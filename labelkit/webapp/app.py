@@ -13,6 +13,8 @@ from labelkit.datasets import list_frames
 from labelkit.env_loader import load_env
 from labelkit.store import FrameStatus, StateStore
 from labelkit.tasks.label import run_label
+from labelkit.tasks.yolo_train import count_trainable, default_device
+from labelkit.train_runner import TrainRunner
 from labelkit.visualize import draw_labeled_image
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -109,6 +111,74 @@ def create_app(config_path: str | Path) -> Flask:
         frames = list_frames(config, store)
         prefixes = sorted({f.prefix for f in frames})
         return jsonify({"prefixes": prefixes})
+
+    @app.route("/api/train/preview")
+    def api_train_preview():
+        store.sync_frames()
+        counts = count_trainable(config, store)
+        return jsonify({
+            "counts": counts,
+            "statuses": ["auto_ok", "auto_fixed", "human_ok"],
+            "default_device": default_device(),
+        })
+
+    @app.route("/api/train/devices")
+    def api_train_devices():
+        dev = default_device()
+        options = ["mps", "cpu"]
+        try:
+            import torch
+            if torch.cuda.is_available():
+                options.insert(0, "0")
+        except Exception:
+            pass
+        if dev not in options:
+            options.insert(0, dev)
+        return jsonify({"default": dev, "options": options})
+
+    @app.route("/api/train/status")
+    def api_train_status():
+        snap = TrainRunner.snapshot()
+        offset = int(request.args.get("offset", 0))
+        chunk, new_offset = TrainRunner.read_log(offset)
+        snap["log_chunk"] = chunk
+        snap["log_offset"] = new_offset
+        return jsonify(snap)
+
+    @app.route("/api/train/start", methods=["POST"])
+    def api_train_start():
+        if TrainRunner.is_running():
+            return jsonify({"ok": False, "error": "已有训练任务在运行"}), 409
+        body = request.get_json(force=True) or {}
+        store.sync_frames()
+        counts = count_trainable(config, store)
+        if counts["total"] < 10:
+            return jsonify({"ok": False, "error": f"可训练样本过少: {counts['total']}"}), 400
+
+        project_root = config.labels_dir.parent
+        run_name = body.get("run_name") or "labelkit_train"
+        out_name = body.get("out_name") or "container_lid_labelkit.pt"
+        base = body.get("base_model") or "yolov8s.pt"
+        base_path = Path(base)
+        if not base_path.is_absolute():
+            for candidate in (project_root / base, config.root / base):
+                if candidate.exists():
+                    base = str(candidate)
+                    break
+
+        params = {
+            "state_dir": str(config.state_dir),
+            "epochs": int(body.get("epochs", 80)),
+            "imgsz": int(body.get("imgsz", 640)),
+            "batch": int(body.get("batch", 8)),
+            "device": body.get("device") or default_device(),
+            "base_model": base,
+            "run_name": run_name,
+            "out_model": str(project_root / "models" / out_name),
+            "dataset_stats": counts,
+        }
+        result = TrainRunner.start(config_path=str(config.config_path), params=params)
+        return jsonify(result)
 
     return app
 

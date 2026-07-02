@@ -44,12 +44,35 @@
     .legend { font-size: 12px; color: var(--muted); }
     kbd { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 12px; }
     .empty { padding: 32px; text-align: center; color: var(--muted); }
+    .header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .btn-train { background: var(--auto); color: #fff; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; border: none; cursor: pointer; }
+    .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 100; align-items: center; justify-content: center; padding: 24px; }
+    .modal-backdrop.open { display: flex; }
+    .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: min(720px, 100%); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+    .modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .modal-body { padding: 16px 20px; overflow-y: auto; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .form-grid label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+    .form-grid input, .form-grid select { width: 100%; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+    .form-full { grid-column: 1 / -1; }
+    .train-info { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 12px; background: var(--bg); padding: 10px 12px; border-radius: 8px; }
+    .train-log { background: #0a0e14; border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.45; color: #b6c2d1; height: 220px; overflow-y: auto; white-space: pre-wrap; margin-top: 12px; display: none; }
+    .train-log.show { display: block; }
+    .modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+    .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border); padding: 8px 16px; border-radius: 8px; cursor: pointer; }
+    .status-tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--bg); color: var(--muted); }
+    .status-tag.running { color: var(--accent); }
+    .status-tag.done { color: var(--ok); }
+    .status-tag.failed { color: var(--wrong); }
   </style>
 </head>
 <body>
   <header>
     <h1>LabelKit · {{ project }}</h1>
-    <div class="stats" id="stats"></div>
+    <div class="header-actions">
+      <div class="stats" id="stats"></div>
+      <button class="btn-train" id="btn-open-train">▶ 训练模型</button>
+    </div>
   </header>
   <main>
     <aside>
@@ -96,6 +119,53 @@
       <div class="legend">快捷键: <kbd>Y</kbd> <kbd>N</kbd> <kbd>→</kbd>/<kbd>空格</kbd> <kbd>←</kbd></div>
     </section>
   </main>
+
+  <div class="modal-backdrop" id="train-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <span>YOLO 训练 · 自动通过 + 人工确认 + 已纠正</span>
+        <span class="status-tag" id="train-status-tag">idle</span>
+      </div>
+      <div class="modal-body">
+        <div class="train-info" id="train-preview">加载样本统计…</div>
+        <div class="form-grid">
+          <div>
+            <label>Epochs</label>
+            <input id="t-epochs" type="number" value="80" min="1" max="500" />
+          </div>
+          <div>
+            <label>Batch</label>
+            <input id="t-batch" type="number" value="8" min="1" max="64" />
+          </div>
+          <div>
+            <label>ImgSize</label>
+            <input id="t-imgsz" type="number" value="640" min="320" max="1280" step="32" />
+          </div>
+          <div>
+            <label>Device（Mac 选 mps = GPU）</label>
+            <select id="t-device"></select>
+          </div>
+          <div class="form-full">
+            <label>基础模型</label>
+            <select id="t-base">
+              <option value="yolov8s.pt">yolov8s.pt（推荐）</option>
+              <option value="yolov8n.pt">yolov8n.pt（更快）</option>
+            </select>
+          </div>
+          <div class="form-full">
+            <label>输出文件名</label>
+            <input id="t-out" type="text" value="container_lid_labelkit.pt" />
+          </div>
+        </div>
+        <pre class="train-log" id="train-log"></pre>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-secondary" id="btn-close-train">关闭</button>
+        <button class="btn-train" id="btn-start-train">开始训练</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     let frames = [], index = 0;
     const statusLabel = {
@@ -211,6 +281,103 @@
       if (e.key==='ArrowRight'||e.key===' ') { e.preventDefault(); document.getElementById('btn-next').click(); }
     });
     loadPrefixes(); loadFrames();
+
+    // ---- 训练 ----
+    let trainLogOffset = 0;
+    let trainPollTimer = null;
+    const trainModal = document.getElementById('train-modal');
+    const trainLog = document.getElementById('train-log');
+    const trainTag = document.getElementById('train-status-tag');
+
+    function setTrainTag(status) {
+      trainTag.textContent = status;
+      trainTag.className = 'status-tag ' + (status === 'running' ? 'running' : status === 'done' ? 'done' : status === 'failed' ? 'failed' : '');
+    }
+
+    async function loadTrainPreview() {
+      const r = await fetch('/api/train/preview');
+      const d = await r.json();
+      const c = d.counts || {};
+      document.getElementById('train-preview').innerHTML =
+        `将使用 <strong>${c.total || 0}</strong> 张（train ${c.train || 0} · val ${c.val || 0}）<br>` +
+        `状态：自动通过 + 已纠正 + 人工确认<br>` +
+        `推荐设备：<strong>${d.default_device || 'mps'}</strong>（Mac Apple GPU）`;
+      const devSel = document.getElementById('t-device');
+      devSel.innerHTML = '';
+      const devR = await fetch('/api/train/devices');
+      const devD = await devR.json();
+      (devD.options || ['mps','cpu']).forEach(v => {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v === 'mps' ? 'mps (Apple GPU)' : v;
+        if (v === (devD.default || 'mps')) o.selected = true;
+        devSel.appendChild(o);
+      });
+    }
+
+    async function pollTrainLog() {
+      const r = await fetch('/api/train/status?offset=' + trainLogOffset);
+      const d = await r.json();
+      if (d.log_chunk) {
+        trainLog.textContent += d.log_chunk;
+        trainLog.scrollTop = trainLog.scrollHeight;
+      }
+      trainLogOffset = d.log_offset || trainLogOffset;
+      setTrainTag(d.status || 'idle');
+      if (d.status === 'running') {
+        trainPollTimer = setTimeout(pollTrainLog, 1500);
+      } else {
+        document.getElementById('btn-start-train').disabled = false;
+        if (d.status === 'done') {
+          trainLog.textContent += `\n✓ 完成: ${d.out_model || ''}\n`;
+          if (d.result && d.result.map50 != null) trainLog.textContent += `mAP50 = ${d.result.map50}\n`;
+        } else if (d.status === 'failed') {
+          trainLog.textContent += `\n✗ 失败: ${d.error || ''}\n`;
+        }
+        trainLog.scrollTop = trainLog.scrollHeight;
+      }
+    }
+
+    document.getElementById('btn-open-train').onclick = async () => {
+      trainModal.classList.add('open');
+      trainLog.textContent = '';
+      trainLog.classList.remove('show');
+      trainLogOffset = 0;
+      setTrainTag('idle');
+      await loadTrainPreview();
+      const st = await (await fetch('/api/train/status')).json();
+      if (st.status === 'running') {
+        trainLog.classList.add('show');
+        trainLogOffset = 0;
+        setTrainTag('running');
+        document.getElementById('btn-start-train').disabled = true;
+        pollTrainLog();
+      }
+    };
+    document.getElementById('btn-close-train').onclick = () => trainModal.classList.remove('open');
+    document.getElementById('btn-start-train').onclick = async () => {
+      if (!confirm('确认开始训练？训练期间请勿关闭终端服务。')) return;
+      const body = {
+        epochs: +document.getElementById('t-epochs').value,
+        batch: +document.getElementById('t-batch').value,
+        imgsz: +document.getElementById('t-imgsz').value,
+        device: document.getElementById('t-device').value,
+        base_model: document.getElementById('t-base').value,
+        out_name: document.getElementById('t-out').value.trim(),
+      };
+      document.getElementById('btn-start-train').disabled = true;
+      trainLog.classList.add('show');
+      trainLog.textContent = '启动训练…\n';
+      trainLogOffset = 0;
+      const r = await fetch('/api/train/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!d.ok) {
+        trainLog.textContent += 'ERROR: ' + (d.error || 'start failed') + '\n';
+        document.getElementById('btn-start-train').disabled = false;
+        return;
+      }
+      setTrainTag('running');
+      pollTrainLog();
+    };
   </script>
 </body>
 </html>
