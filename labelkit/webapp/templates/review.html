@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LabelKit · {{ project }}</title>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #1a2332; --border: #2d3a4f;
+      --text: #e6edf3; --muted: #8b9cb3;
+      --ok: #3fb950; --wrong: #f85149; --pending: #d29922;
+      --accent: #58a6ff; --auto: #a371f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+    header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    h1 { font-size: 18px; font-weight: 600; }
+    .stats { display: flex; gap: 12px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+    .stats b { color: var(--text); }
+    main { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 65px); }
+    aside { border-right: 1px solid var(--border); padding: 16px; overflow-y: auto; }
+    .filters label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+    select, textarea { width: 100%; padding: 8px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px; }
+    textarea { min-height: 64px; resize: vertical; margin-top: 8px; }
+    .frame-list { margin-top: 12px; max-height: calc(100vh - 380px); overflow-y: auto; }
+    .frame-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; margin-bottom: 4px; border: 1px solid transparent; word-break: break-all; }
+    .frame-item:hover { background: var(--panel); }
+    .frame-item.active { border-color: var(--accent); background: var(--panel); }
+    .frame-item.human_ok, .frame-item.auto_ok, .frame-item.auto_fixed { border-left: 3px solid var(--ok); }
+    .frame-item.human_wrong, .frame-item.needs_human { border-left: 3px solid var(--wrong); }
+    .frame-item.unlabeled, .frame-item.llm_labeled { border-left: 3px solid var(--pending); }
+    .viewer { padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+    .img-wrap { background: #000; border-radius: 8px; overflow: hidden; max-width: 100%; border: 1px solid var(--border); }
+    .img-wrap img { display: block; max-width: min(1200px, 100%); max-height: calc(100vh - 320px); }
+    .meta { text-align: center; font-size: 14px; color: var(--muted); max-width: 900px; }
+    .review-note { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; font-size: 13px; color: var(--muted); max-width: 900px; width: 100%; line-height: 1.5; }
+    .review-note strong { color: var(--text); }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    button { padding: 10px 18px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .btn-ok { background: var(--ok); color: #fff; }
+    .btn-wrong { background: var(--wrong); color: #fff; }
+    .btn-nav { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+    .btn-accent { background: var(--accent); color: #fff; }
+    .legend { font-size: 12px; color: var(--muted); }
+    kbd { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 12px; }
+    .empty { padding: 32px; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LabelKit · {{ project }}</h1>
+    <div class="stats" id="stats"></div>
+  </header>
+  <main>
+    <aside>
+      <div class="filters">
+        <label>数据集</label>
+        <select id="f-split"><option value="">全部</option><option value="train">train</option><option value="val">val</option></select>
+        <label>视频前缀</label>
+        <select id="f-prefix"><option value="">全部</option></select>
+        <label>状态</label>
+        <select id="f-status">
+          <option value="all">全部</option>
+          <option value="needs_human">需人工 (needs_human)</option>
+          <option value="auto_ok">自动通过 (auto_ok)</option>
+          <option value="auto_fixed">自动纠正 (auto_fixed)</option>
+          <option value="human_ok">人工确认 (human_ok)</option>
+          <option value="human_wrong">人工驳回 (human_wrong)</option>
+          <option value="unlabeled">未标注</option>
+        </select>
+        <p style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5">
+          <strong style="color:var(--text)">Y</strong> 确认正确 · <strong style="color:var(--text)">N</strong> 仍有问题 · 空格/→ 下一张
+        </p>
+        <label>备注</label>
+        <textarea id="note" placeholder="可选备注"></textarea>
+      </div>
+      <div class="frame-list" id="frame-list"></div>
+    </aside>
+    <section class="viewer">
+      <div class="legend">
+        {% for c in classes %}
+        <span style="color: rgb({{ c.color[2] }},{{ c.color[1] }},{{ c.color[0] }})">■ {{ c.name }}</span>
+        {% endfor %}
+      </div>
+      <div class="img-wrap"><img id="preview" alt="preview" /></div>
+      <div class="meta" id="meta">加载中…</div>
+      <div class="review-note" id="review-note" style="display:none"></div>
+      <div class="actions">
+        <button class="btn-nav" id="btn-prev">← 上一张</button>
+        <button class="btn-ok" id="btn-ok">✓ 确认 (Y)</button>
+        <button class="btn-wrong" id="btn-wrong">✗ 有问题 (N)</button>
+        <button class="btn-accent" id="btn-relabel">LLM 重标</button>
+        <button class="btn-nav" id="btn-next">下一张 →</button>
+      </div>
+      <div class="legend">快捷键: <kbd>Y</kbd> <kbd>N</kbd> <kbd>→</kbd>/<kbd>空格</kbd> <kbd>←</kbd></div>
+    </section>
+  </main>
+  <script>
+    let frames = [], index = 0;
+    const statusLabel = {
+      unlabeled: '未标注', llm_labeled: '已打标', auto_ok: '自动通过',
+      auto_fixed: '已纠正', needs_human: '需人工', human_ok: '人工确认', human_wrong: '人工驳回'
+    };
+
+    async function loadStats() {
+      const r = await fetch('/api/stats');
+      const s = await r.json();
+      document.getElementById('stats').innerHTML = Object.entries(s)
+        .map(([k,v]) => `<span>${k} <b>${v}</b></span>`).join('');
+    }
+
+    async function loadPrefixes() {
+      const r = await fetch('/api/prefixes');
+      const d = await r.json();
+      const sel = document.getElementById('f-prefix');
+      d.prefixes.forEach(p => {
+        const o = document.createElement('option');
+        o.value = p; o.textContent = p;
+        sel.appendChild(o);
+      });
+    }
+
+    async function loadFrames() {
+      const qs = new URLSearchParams();
+      const split = document.getElementById('f-split').value;
+      const prefix = document.getElementById('f-prefix').value;
+      const status = document.getElementById('f-status').value;
+      if (split) qs.set('split', split);
+      if (prefix) qs.set('prefix', prefix);
+      if (status) qs.set('status', status);
+      const r = await fetch('/api/frames?' + qs);
+      const data = await r.json();
+      frames = data.frames;
+      index = Math.min(index, Math.max(0, frames.length - 1));
+      renderList(); showCurrent(); loadStats();
+    }
+
+    function renderList() {
+      const el = document.getElementById('frame-list');
+      if (!frames.length) { el.innerHTML = '<div class="empty">无匹配帧</div>'; return; }
+      el.innerHTML = frames.map((f,i) =>
+        `<div class="frame-item ${f.status} ${i===index?'active':''}" data-i="${i}">
+          ${f.stem}<br><small>${statusLabel[f.status]||f.status}</small>
+        </div>`).join('');
+      el.querySelectorAll('.frame-item').forEach(item => {
+        item.onclick = () => { index = +item.dataset.i; renderList(); showCurrent(); };
+      });
+    }
+
+    function showCurrent() {
+      const img = document.getElementById('preview');
+      const meta = document.getElementById('meta');
+      const rn = document.getElementById('review-note');
+      if (!frames.length) { img.removeAttribute('src'); meta.textContent = '无图片'; rn.style.display='none'; return; }
+      const f = frames[index];
+      img.src = `/api/preview/${f.split}/${f.stem}?t=${Date.now()}`;
+      meta.innerHTML = `<strong>${f.stem}</strong> · ${f.split} · ${index+1}/${frames.length} · ${statusLabel[f.status]||f.status}`;
+      document.getElementById('note').value = f.note || '';
+      if (f.review_note) { rn.style.display='block'; rn.innerHTML = `<strong>LLM 审查:</strong> ${f.review_note}`; }
+      else { rn.style.display='none'; }
+      renderList();
+    }
+
+    async function submit(status) {
+      if (!frames.length) return;
+      const f = frames[index];
+      const note = document.getElementById('note').value.trim();
+      const filterStatus = document.getElementById('f-status').value;
+      await fetch('/api/feedback', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({id: f.id, status, note})
+      });
+      const stay = status === 'human_ok' && (filterStatus === 'needs_human' || filterStatus === 'human_wrong');
+      if (!stay && index < frames.length - 1) index++;
+      await loadFrames();
+    }
+
+    document.getElementById('btn-ok').onclick = () => submit('human_ok');
+    document.getElementById('btn-wrong').onclick = () => submit('human_wrong');
+    document.getElementById('btn-prev').onclick = () => { if (index>0) { index--; showCurrent(); } };
+    document.getElementById('btn-next').onclick = () => { if (index<frames.length-1) { index++; showCurrent(); } };
+    document.getElementById('btn-relabel').onclick = async () => {
+      if (!frames.length) return;
+      const f = frames[index];
+      if (!confirm(`对 ${f.stem} 触发 LLM 重标？`)) return;
+      await fetch(`/api/relabel/${f.split}/${f.stem}`, {method:'POST'});
+      await loadFrames();
+    };
+    ['f-split','f-prefix','f-status'].forEach(id => {
+      document.getElementById(id).onchange = () => { index=0; loadFrames(); };
+    });
+    document.addEventListener('keydown', e => {
+      if (e.target.tagName === 'TEXTAREA') return;
+      if (e.key==='y'||e.key==='Y') submit('human_ok');
+      if (e.key==='n'||e.key==='N') submit('human_wrong');
+      if (e.key==='ArrowLeft') document.getElementById('btn-prev').click();
+      if (e.key==='ArrowRight'||e.key===' ') { e.preventDefault(); document.getElementById('btn-next').click(); }
+    });
+    loadPrefixes(); loadFrames();
+  </script>
+</body>
+</html>

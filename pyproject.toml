@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labelkit"
+version = "0.1.0"
+description = "LLM-powered YOLO labeling, review, and fix pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+  "openai>=1.30.0",
+  "opencv-python-headless>=4.8.0",
+  "pyyaml>=6.0",
+  "flask>=3.0.0",
+  "ultralytics>=8.2.0",
+]
+
+[project.scripts]
+labelkit = "labelkit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["labelkit*"]
+
+[tool.setuptools.package-data]
+labelkit = ["webapp/templates/*.html"]

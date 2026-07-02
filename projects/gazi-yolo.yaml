@@ -1,0 +1,40 @@
+name: gazi-yolo
+task: detect
+
+images: ../../gazi-yolo/data/images
+labels: ../../gazi-yolo/data/labels
+state_dir: ../../gazi-yolo/.labelkit
+
+splits:
+  - train
+  - val
+
+classes:
+  - id: 0
+    name: bucket
+    prompt: 灰色或白色塑料桶身，框住整个容器主体，含把手顶部
+    color: [255, 140, 0]
+  - id: 1
+    name: lid
+    prompt: 桶顶白色或红色螺旋盖，只框盖子本体，不含灰色把手区域；盖歪了也要标
+    color: [255, 60, 60]
+
+rules:
+  lid_top_ratio: 0.40
+  lid_area_min: 0.003
+  lid_area_max: 0.15
+
+vlm:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen-vl-max
+  api_key_env: DASHSCOPE_API_KEY
+  max_side: 1280
+
+yolo:
+  model: ../../gazi-yolo/models/container_lid_best.pt
+  conf: 0.12
+  conf_accept: 0.8
+
+review_policy:
+  max_fix_rounds: 2
+  human_sample_rate: 0.1
