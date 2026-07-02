@@ -20,18 +20,22 @@ from labelkit.yolo_io import parse_labels, write_labels
 
 
 REVIEW_PROMPT = """你是标注质量审查员。图片上已画了检测框和类别名。
-请审查每个框是否正确，返回严格 JSON（不要 markdown）：
+请审查每个框是否正确，返回严格 JSON（不要 markdown，所有字符串必须用双引号）：
 {{
-  "verdict": "pass" 或 "fail",
-  "issues": ["问题描述1", "问题描述2"],
+  "verdict": "pass",
+  "issues": [],
   "boxes": [
-    {{"class": "类名", "verdict": "correct|offset|missing|wrong", "note": "说明"}}
+    {{"class": "bucket", "verdict": "correct", "note": ""}}
   ],
   "summary": "一句话总结"
 }}
+verdict 只能是 "pass" 或 "fail"。
 审查标准：
 {standards}
-图片尺寸 {iw}x{ih}。pass 表示所有必需类别框都正确；fail 表示有偏移、漏标或误标。"""
+{extra}
+图片尺寸 {iw}x{ih}。
+- pass：必需类别正确；可选类别正确（无盖时不应有 lid 框）。
+- fail：框偏移、漏标、误标、无盖却标了 lid、把桶口/把手标成 lid。"""
 
 
 def _parse_json(text: str) -> dict:
@@ -88,7 +92,12 @@ def run_review(
         statuses={FrameStatus.LLM_LABELED, FrameStatus.AUTO_FIXED, FrameStatus.NEEDS_HUMAN},
     )
     review_dir = config.state_dir / "review_images"
-    standards = "\n".join(f"- {c.name}: {c.prompt}" for c in config.classes)
+    standards_lines = []
+    for c in config.classes:
+        req = "必需" if c.required else "可选（无则不应有框）"
+        standards_lines.append(f"- {c.name}（{req}）: {c.prompt}")
+    standards = "\n".join(standards_lines)
+    extra = config.prompts.get("review", "").strip()
 
     pass_n = fail_n = skip = 0
     for frame in frames:
@@ -109,7 +118,7 @@ def run_review(
         review_img = review_dir / f"{frame.split}_{frame.stem}.jpg"
         save_review_image(config, frame.image_path, frame.label_path, review_img)
 
-        prompt = REVIEW_PROMPT.format(standards=standards, iw=iw, ih=ih)
+        prompt = REVIEW_PROMPT.format(standards=standards, extra=extra or "（无额外说明）", iw=iw, ih=ih)
         try:
             has_api = bool(os.environ.get(config.vlm.api_key_env))
             if has_api:

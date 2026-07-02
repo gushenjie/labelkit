@@ -29,7 +29,12 @@ def check_rules(config: ProjectConfig, labels: dict, iw: int, ih: int) -> RuleRe
 
     if bucket is None:
         issues.append("missing bucket")
-    if lid is None:
+
+    lid_required = bool(rules.get("lid_required", True))
+    lid_cls = next((c for c in config.classes if c.id == 1), None)
+    if lid_cls is not None:
+        lid_required = lid_cls.required
+    if lid_required and lid is None:
         issues.append("missing lid")
 
     if bucket and lid:

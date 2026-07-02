@@ -13,6 +13,7 @@ class ClassConfig:
     id: int
     name: str
     prompt: str
+    required: bool = True
     color: tuple[int, int, int] = (0, 255, 0)
 
 
@@ -52,6 +53,7 @@ class ProjectConfig:
     yolo: YoloConfig
     review_policy: ReviewPolicy
     rules: dict = field(default_factory=dict)
+    prompts: dict = field(default_factory=dict)
 
     @property
     def class_names(self) -> dict[int, str]:
@@ -77,6 +79,7 @@ def load_config(path: str | Path) -> ProjectConfig:
             id=int(c["id"]),
             name=c["name"],
             prompt=c["prompt"],
+            required=bool(c.get("required", True)),
             color=tuple(c.get("color", [0, 140, 255] if int(c["id"]) == 0 else [255, 60, 60])),
         )
         for c in raw.get("classes", [])
@@ -116,4 +119,5 @@ def load_config(path: str | Path) -> ProjectConfig:
             human_sample_rate=float(policy_raw.get("human_sample_rate", 0.1)),
         ),
         rules=raw.get("rules", {}),
+        prompts=raw.get("prompts", {}),
     )

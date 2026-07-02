@@ -12,17 +12,29 @@ splits:
 classes:
   - id: 0
     name: bucket
+    required: true
     prompt: 灰色或白色塑料桶身，框住整个容器主体，含把手顶部
     color: [255, 140, 0]
   - id: 1
     name: lid
-    prompt: 桶顶白色或红色螺旋盖，只框盖子本体，不含灰色把手区域；盖歪了也要标
+    required: false
+    prompt: 仅当桶顶存在清晰可见的白色或红色螺旋盖时才标；桶口敞开、无盖、只有螺纹敞口或空口时禁止标 lid；不要把桶口、把手、空口区域标成 lid
     color: [255, 60, 60]
 
 rules:
+  lid_required: false
   lid_top_ratio: 0.40
   lid_area_min: 0.003
   lid_area_max: 0.15
+
+prompts:
+  label: |
+    这是工业桶+盖检测数据集。NG 场景可能没有盖。
+    只有肉眼能确认存在白色/红色旋盖时才输出 lid 框。
+    桶口敞开、无盖、盖子被拿走 — boxes 里只保留 bucket，不要编造 lid。
+  review: |
+    重点检查 lid 误标：若图中无盖但画了 lid 框（例如标在桶口/敞口上），必须 fail。
+    若图中无盖且只标了 bucket、没有 lid 框，这是正确的，应 pass。
 
 vlm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1

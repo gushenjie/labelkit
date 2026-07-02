@@ -77,21 +77,32 @@ class VlmBackend(LabelBackend):
         return h.hexdigest()
 
     def _build_prompt(self, iw: int, ih: int) -> str:
-        lines = [
+        lines: list[str] = []
+        extra = self.config.prompts.get("label", "").strip()
+        if extra:
+            lines.append(extra)
+            lines.append("")
+        lines.extend([
             "你是工业视觉标注员。请在图片中找到以下目标并返回像素级边界框（左上角 x,y + 宽 w + 高 h）。",
             "返回严格 JSON，不要 markdown：",
             "{",
             '  "boxes": [',
             '    {"class": "类名", "x": int, "y": int, "w": int, "h": int}',
             "  ],",
-            '  "note": "简短说明"',
+            '  "note": "简短说明（若无某类别请写明原因）"',
             "}",
             f"图片尺寸：{iw}x{ih} 像素。",
+            "",
+            "重要规则：",
+            "- 并非每张图都包含所有类别；看不到就不要编造框。",
+            "- 可选类别未出现时不输出该类别，boxes 里不要包含。",
+            "",
             "类别说明：",
-        ]
+        ])
         for c in self.config.classes:
-            lines.append(f'- {c.name}: {c.prompt}')
-        lines.append("每个类别最多一个框。找不到的类别不要输出。")
+            req = "必须" if c.required else "可选（仅当清晰可见时才标，否则不要输出）"
+            lines.append(f"- {c.name}（{req}）: {c.prompt}")
+        lines.append("每个类别最多一个框。")
         return "\n".join(lines)
 
     def _call_vlm(self, b64: str, prompt: str) -> dict:
