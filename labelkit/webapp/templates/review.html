@@ -61,12 +61,13 @@
         <label>状态</label>
         <select id="f-status">
           <option value="all">全部</option>
-          <option value="needs_human">需人工 (needs_human)</option>
-          <option value="auto_ok">自动通过 (auto_ok)</option>
-          <option value="auto_fixed">自动纠正 (auto_fixed)</option>
-          <option value="human_ok">人工确认 (human_ok)</option>
-          <option value="human_wrong">人工驳回 (human_wrong)</option>
+          <option value="needs_human">需人工</option>
+          <option value="auto_ok">自动通过</option>
+          <option value="auto_fixed">已纠正</option>
+          <option value="human_ok">人工确认</option>
+          <option value="human_wrong">人工驳回</option>
           <option value="unlabeled">未标注</option>
+          <option value="llm_labeled">已打标</option>
         </select>
         <p style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5">
           <strong style="color:var(--text)">Y</strong> 确认正确 · <strong style="color:var(--text)">N</strong> 仍有问题 · 空格/→ 下一张
@@ -101,12 +102,25 @@
       unlabeled: '未标注', llm_labeled: '已打标', auto_ok: '自动通过',
       auto_fixed: '已纠正', needs_human: '需人工', human_ok: '人工确认', human_wrong: '人工驳回'
     };
+    const statLabel = {
+      total: '总计',
+      unlabeled: '未标注',
+      llm_labeled: '已打标',
+      auto_ok: '自动通过',
+      auto_fixed: '已纠正',
+      needs_human: '需人工',
+      human_ok: '人工确认',
+      human_wrong: '人工驳回',
+    };
+    const statOrder = ['total', 'auto_ok', 'auto_fixed', 'needs_human', 'human_ok', 'human_wrong', 'llm_labeled', 'unlabeled'];
 
     async function loadStats() {
       const r = await fetch('/api/stats');
       const s = await r.json();
-      document.getElementById('stats').innerHTML = Object.entries(s)
-        .map(([k,v]) => `<span>${k} <b>${v}</b></span>`).join('');
+      const ordered = statOrder.filter(k => k in s).map(k => [k, s[k]]);
+      const rest = Object.entries(s).filter(([k]) => !statOrder.includes(k));
+      document.getElementById('stats').innerHTML = [...ordered, ...rest]
+        .map(([k, v]) => `<span>${statLabel[k] || k} <b>${v}</b></span>`).join('');
     }
 
     async function loadPrefixes() {

@@ -10,6 +10,7 @@ from flask import Flask, jsonify, render_template, request, send_file
 
 from labelkit.config import load_config
 from labelkit.datasets import list_frames
+from labelkit.env_loader import load_env
 from labelkit.store import FrameStatus, StateStore
 from labelkit.tasks.label import run_label
 from labelkit.visualize import draw_labeled_image
@@ -115,11 +116,19 @@ def create_app(config_path: str | Path) -> Flask:
 def run_server(config_path: str | Path, port: int = 8765, open_browser: bool = True) -> None:
     import webbrowser
 
+    loaded = load_env(config_path)
     config = load_config(config_path)
     url = f"http://127.0.0.1:{port}"
     print(f"LabelKit review: {url}")
     print(f"Project: {config.name}")
     print(f"State: {config.state_dir / 'state.json'}")
+    if loaded:
+        print(f"已加载本地配置: {', '.join(loaded)}")
+    from labelkit.env_loader import api_key_configured
+    if api_key_configured(config.vlm.api_key_env):
+        print("VLM API Key: 已配置")
+    else:
+        print(f"VLM API Key: 未配置（请填写 .env 或 {config.vlm.api_key_env}）")
     if open_browser:
         Timer(1.0, lambda: webbrowser.open(url)).start()
     app = create_app(config_path)

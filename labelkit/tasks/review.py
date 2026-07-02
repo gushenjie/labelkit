@@ -120,7 +120,7 @@ def run_review(
             else:
                 result = {"verdict": "pass" if rule.ok else "fail", "issues": rule.issues}
                 verdict = result["verdict"]
-                summary = "rules-only review (no VLM API key)"
+                summary = "仅规则审查（未配置 VLM API Key，请在 labelkit/.env 填写）"
                 issues = rule.issues
             review_note = summary or "; ".join(issues)
             if rule.ok and verdict == "pass":

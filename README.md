@@ -10,7 +10,10 @@ LLM-powered YOLO labeling pipeline: **label → review → fix → human spot-ch
 cd labelkit
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
-export DASHSCOPE_API_KEY=your_key   # Qwen via DashScope
+
+# API Key（推荐，不会进 Git）
+cp .env.example .env
+# 编辑 .env → DASHSCOPE_API_KEY=sk-...
 
 # Full pipeline on gazi-yolo project
 labelkit run -c projects/gazi-yolo.yaml
@@ -79,6 +82,19 @@ labelkit export -c projects/gazi-yolo.yaml --out ../gazi-yolo/data/export
 ```
 
 Copies confirmed frames (auto_ok + auto_fixed + human_ok) for training.
+
+## Local Secrets (.env)
+
+| File | Purpose |
+|------|---------|
+| `.env` | Repo-level secrets (gitignored) |
+| `projects/gazi-yolo.local.env` | Per-project override (gitignored) |
+| `.env.example` | Template only, safe to commit |
+
+```bash
+cp .env.example .env
+# edit .env — never commit this file
+```
 
 ## License
 

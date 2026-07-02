@@ -7,6 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from labelkit.env_loader import load_env
 from labelkit.config import load_config
 from labelkit.store import StateStore
 from labelkit.tasks.export import run_export
@@ -141,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)
+    loaded = load_env(args.config)
+    if loaded:
+        print(f"已加载本地配置: {', '.join(loaded)}")
     return args.func(args)
 
 
