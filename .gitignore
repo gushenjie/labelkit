@@ -4,7 +4,9 @@ __pycache__/
 dist/
 build/
 .labelkit/
-gazi-yolo/
+data/
+web/node_modules/
+web/.next/
 *.pyc
 .DS_Store
 

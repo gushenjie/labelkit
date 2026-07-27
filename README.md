@@ -1,100 +1,67 @@
 # LabelKit
 
-LLM-powered YOLO labeling pipeline: **label → review → fix → human spot-check**.
+LLM 驱动的 YOLO 标注训练平台：**建项目 → 传视频 → 抽帧去重 → LLM 标注 → 人工复查 → 训练 → 模型反哺**。
 
-> Dataset grows automatically. Human effort approaches zero.
+> 以项目为单位隔离资源。支持目标检测与图像分类两种任务类型。
 
-## Quick Start
+## 架构
+
+```
+Next.js 前端 (:3003)  →  FastAPI 后端 (:8010)  →  SQLite + data/projects/
+```
+
+- **后端**：`server/` — FastAPI + SQLAlchemy + 后台任务
+- **前端**：`web/` — Next.js App Router + Tailwind
+- **数据**：`data/labelkit.db` + `data/projects/<id>/`（gitignored）
+- **旧 CLI**：`labelkit/` 保留，与新平台并存
+- **UI 规范**：[`docs/UI设计规范.md`](docs/UI设计规范.md) — 全页面视觉 Token、组件、交互与响应式基线
+
+## 快速启动
 
 ```bash
+# 1. 后端
 cd labelkit
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+source .venv/bin/activate
+pip install -r server/requirements.txt
+PYTHONPATH=. uvicorn server.main:app --host 127.0.0.1 --port 8010 --reload
 
-# API Key（推荐，不会进 Git）
-cp .env.example .env
-# 编辑 .env → DASHSCOPE_API_KEY=sk-...
-
-# Full pipeline on gazi-yolo project
-labelkit run -c projects/gazi-yolo.yaml
-
-# Or step by step
-labelkit label  -c projects/gazi-yolo.yaml --backend vlm --limit 10
-labelkit review -c projects/gazi-yolo.yaml
-labelkit fix    -c projects/gazi-yolo.yaml
-labelkit stats  -c projects/gazi-yolo.yaml
-labelkit serve  -c projects/gazi-yolo.yaml   # http://127.0.0.1:8765
-labelkit export -c projects/gazi-yolo.yaml
+# 2. 前端（新终端）
+cd web && npm install && npm run dev
 ```
 
-## Architecture
-
-```
-CLI (label/review/fix/run)  →  state.json + YOLO txt
-Web UI (serve)              →  human spot-check (Y/N)
-```
-
-### Frame States
-
-| State | Meaning |
-|-------|---------|
-| `unlabeled` | Not yet processed |
-| `llm_labeled` | Labeled, pending review |
-| `auto_ok` | Passed LLM + rule review |
-| `auto_fixed` | Fixed and re-approved |
-| `needs_human` | Failed review, needs human |
-| `human_ok` | Human confirmed (protected) |
-| `human_wrong` | Human rejected |
-
-### Backends
-
-- **`vlm`** — Qwen2.5-VL via DashScope (default, cold start)
-- **`yolo`** — Your trained `.pt` model (fast, free); low-confidence frames fallback to VLM
-
-## Project Config
-
-See [`projects/gazi-yolo.yaml`](projects/gazi-yolo.yaml). Key fields:
-
-```yaml
-images: path/to/images    # train/ val/ subdirs
-labels: path/to/labels
-classes:
-  - id: 0
-    name: bucket
-    prompt: "describe what to box"
-vlm:
-  model: qwen-vl-max
-yolo:
-  model: path/to/best.pt
-  conf_accept: 0.8
-```
-
-## Web UI
-
-- Filter by status (`needs_human`, `auto_ok`, etc.)
-- **Y** confirm · **N** reject · **LLM 重标** single-frame relabel
-- Shows LLM review notes
-
-## Export
+或使用脚本：
 
 ```bash
-labelkit export -c projects/gazi-yolo.yaml --out ../gazi-yolo/data/export
+chmod +x scripts/start-server.sh scripts/start-web.sh
+./scripts/start-server.sh   # http://127.0.0.1:8010
+./scripts/start-web.sh      # http://127.0.0.1:3003
 ```
 
-Copies confirmed frames (auto_ok + auto_fixed + human_ok) for training.
+首次使用请在 **设置** 页配置 DashScope API Key。
 
-## Local Secrets (.env)
+## 产品流程
 
-| File | Purpose |
-|------|---------|
-| `.env` | Repo-level secrets (gitignored) |
-| `projects/gazi-yolo.local.env` | Per-project override (gitignored) |
-| `.env.example` | Template only, safe to commit |
+| 步骤 | 页面 | 说明 |
+|------|------|------|
+| 创建项目 | 项目列表 → 新建 | 选择 detect / classify，定义类别 |
+| 素材接入 | 素材管理 | 上传视频/图片、抽帧、phash 去重 |
+| 自动标注 | 自动标注 | LLM 批量标注 + 自动审查，带费用预估 |
+| 人工复查 | 复查标注 | Y/N 快捷键 + **手动画框/改框**（保底） |
+| 训练 | 训练模型 | 按视频切分 train/val，模型版本库 |
+| 反哺 | 训练模型 | 用 pt 模型重标 human_wrong 帧 |
+| 试用 | 模型试用台 | 上传图片看推理效果 |
+| 导入 | 项目设置 | 导入已有 YOLO 数据集（如 gazi-yolo） |
 
-```bash
-cp .env.example .env
-# edit .env — never commit this file
-```
+## 帧状态
+
+`unlabeled` → `llm_labeled` → `auto_ok` / `needs_human` → `human_ok` / `human_wrong` / `no_target`
+
+## 迁移 gazi-yolo 数据
+
+在项目设置 → 导入已有 YOLO 数据集，填写：
+
+- 图片目录：`/path/to/gazi-yolo/data/images/train`
+- 标签目录：`/path/to/gazi-yolo/data/labels/train`
 
 ## License
 

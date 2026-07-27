@@ -18,7 +18,7 @@ classes:
   - id: 1
     name: lid
     required: false
-    prompt: 仅当桶顶存在清晰可见的白色或红色螺旋盖时才标；桶口敞开、无盖、只有螺纹敞口或空口时禁止标 lid；不要把桶口、把手、空口区域标成 lid
+    prompt: 仅框桶顶白色或红色螺旋盖圆盘本体；必须排除灰色/白色把手、提手、桶肩；框要紧贴盖缘，不要框到把手或整块桶顶
     color: [255, 60, 60]
 
 rules:
@@ -43,9 +43,9 @@ vlm:
   max_side: 1280
 
 yolo:
-  model: ../../gazi-yolo/models/container_lid_best.pt
-  conf: 0.12
-  conf_accept: 0.8
+  model: ../../gazi-yolo/data/models/container_lid_v8.pt
+  conf: 0.22
+  conf_accept: 1.0
 
 review_policy:
   max_fix_rounds: 2
