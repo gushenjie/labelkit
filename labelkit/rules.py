@@ -14,13 +14,14 @@ class RuleResult:
     issues: list[str]
 
 
-def _get_xywh(labels: dict, cls_id: int, iw: int, ih: int) -> tuple[int, int, int, int] | None:
-    if cls_id not in labels:
+def _get_xywh(labels: list[tuple[int, float, float, float, float]], cls_id: int, iw: int, ih: int) -> tuple[int, int, int, int] | None:
+    label = next((item for item in labels if item[0] == cls_id), None)
+    if label is None:
         return None
-    return yolo_to_xywh(*labels[cls_id], iw, ih)
+    return yolo_to_xywh(*label[1:], iw, ih)
 
 
-def check_rules(config: ProjectConfig, labels: dict, iw: int, ih: int) -> RuleResult:
+def check_rules(config: ProjectConfig, labels: list[tuple[int, float, float, float, float]], iw: int, ih: int) -> RuleResult:
     issues: list[str] = []
     rules = config.rules or {}
 

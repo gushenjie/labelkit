@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import shutil
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 import cv2
 from sqlalchemy.orm import Session
 
-from server.core.paths import frames_dir
+from server.core.paths import frames_dir, label_path_for_frame
 from server.core.yolo_io import parse_labels, yolo_to_xywh
-from server.core.paths import labels_dir as get_labels_dir
 from server.db.models import Annotation, Category, Frame, FrameStatus, Project, ProjectTaskType, Task
 
 
@@ -33,14 +32,20 @@ def crop_from_bbox(
     return frame[y1:y2, x1:x2]
 
 
-def run_derive_classify_task(db: Session, task: Task, *, log: Callable[[str], None] | None = None) -> None:
+def run_derive_classify_task(
+    db: Session,
+    task: Task,
+    *,
+    log: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     project = db.get(Project, task.project_id)
     if project.task_type != ProjectTaskType.CLASSIFY:
         raise RuntimeError("Target project must be classify type")
 
     source_project_id = task.params.get("source_project_id")
     source_class_id = int(task.params.get("source_class_id", 1))
-    label_mapping: dict[str, str] = task.params.get("label_mapping", {})
+    target_class_id = task.params.get("target_class_id")
 
     source = db.get(Project, source_project_id)
     if not source:
@@ -52,53 +57,79 @@ def run_derive_classify_task(db: Session, task: Task, *, log: Callable[[str], No
     ).all()
 
     task.total = len(frames)
-    db.commit()
+    db.flush()
     created = 0
+    created_paths: list[Path] = []
+    preview_frame_ids: list[str] = []
+    categories = db.query(Category).filter(Category.project_id == project.id).all()
+    target_cat = (
+        next((category for category in categories if category.class_id == int(target_class_id)), None)
+        if target_class_id is not None
+        else (categories[0] if categories else None)
+    )
+    if not target_cat:
+        raise RuntimeError("Target category not found")
 
-    for i, src_frame in enumerate(frames):
-        lbl_path = get_labels_dir(source_project_id, src_frame.split) / f"{Path(src_frame.filename).stem}.txt"
-        if not lbl_path.exists():
-            continue
-        labels = parse_labels(lbl_path.read_text(encoding="utf-8"))
-        if source_class_id not in labels:
-            continue
+    try:
+        for i, src_frame in enumerate(frames):
+            if cancelled and cancelled():
+                raise RuntimeError("任务已取消")
+            lbl_path = label_path_for_frame(source_project_id, src_frame)
+            if not lbl_path.exists():
+                continue
+            labels = parse_labels(lbl_path.read_text(encoding="utf-8"))
+            source_labels = [label for label in labels if label[0] == source_class_id]
+            if not source_labels:
+                continue
 
-        img = cv2.imread(src_frame.filepath)
-        if img is None:
-            continue
-        ih, iw = img.shape[:2]
-        bbox = yolo_to_xywh(*labels[source_class_id], iw, ih)
-        crop = crop_from_bbox(img, bbox)
-        if crop is None:
-            continue
+            img = cv2.imread(src_frame.filepath)
+            if img is None:
+                continue
+            ih, iw = img.shape[:2]
 
-        # Determine classify label from source frame prefix or mapping
-        cls_name = label_mapping.get(src_frame.filename[:3], "unknown")
-        cats = db.query(Category).filter(Category.project_id == project.id).all()
-        target_cat = next((c for c in cats if c.name == cls_name), None)
-        if not target_cat and cats:
-            target_cat = cats[0]
+            for box_index, (_cls_id, xc, yc, w, h) in enumerate(source_labels):
+                bbox = yolo_to_xywh(xc, yc, w, h, iw, ih)
+                crop = crop_from_bbox(img, bbox)
+                if crop is None:
+                    continue
 
-        out_dir = frames_dir(project.id, "train")
-        out_path = out_dir / f"crop_{src_frame.id}_{created:06d}.jpg"
-        cv2.imwrite(str(out_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                storage_key = uuid.uuid4().hex
+                out_dir = frames_dir(project.id, "train")
+                out_path = out_dir / f"{storage_key}.jpg"
+                if not cv2.imwrite(str(out_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 92]):
+                    raise RuntimeError(f"Cannot write derived crop: {out_path}")
+                created_paths.append(out_path)
 
-        frame = Frame(
-            project_id=project.id,
-            filename=out_path.name,
-            filepath=str(out_path),
-            split="train",
-            status=FrameStatus.UNLABELED,
-            source="derive",
-        )
-        db.add(frame)
-        db.flush()
-        if target_cat:
-            db.add(Annotation(frame_id=frame.id, class_id=target_cat.class_id, source="derive"))
-        created += 1
-        task.progress = i + 1
+                frame = Frame(
+                    project_id=project.id,
+                    filename=f"crop_{Path(src_frame.filename).stem}_{box_index + 1}.jpg",
+                    storage_key=storage_key,
+                    source_group_id=src_frame.source_group_id or src_frame.video_id or src_frame.id,
+                    filepath=str(out_path),
+                    split="train",
+                    status=FrameStatus.NEEDS_HUMAN,
+                    note=f"派生自 {source.name} / 类别 {source_class_id}",
+                    source="derive",
+                )
+                db.add(frame)
+                db.flush()
+                db.add(Annotation(frame_id=frame.id, class_id=target_cat.class_id, source="derive"))
+                if len(preview_frame_ids) < 20:
+                    preview_frame_ids.append(frame.id)
+                created += 1
+            task.progress = i + 1
+    except Exception:
+        for path in created_paths:
+            path.unlink(missing_ok=True)
+        raise
 
-    task.result = {"created": created}
+    task.result = {
+        "created": created,
+        "source_project_id": source.id,
+        "source_class_id": source_class_id,
+        "target_class_id": target_cat.class_id,
+        "preview_frame_ids": preview_frame_ids,
+    }
     if log:
         log(f"派生分类素材: {created} 张")
     db.commit()

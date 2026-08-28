@@ -30,6 +30,12 @@ export type Project = {
   updated_at: string;
 };
 
+export type ProjectOverview = {
+  project: Project;
+  stats: Record<string, number>;
+  preview_frame_id: string | null;
+};
+
 export type Category = {
   id?: string;
   class_id: number;
@@ -37,6 +43,7 @@ export type Category = {
   description: string;
   color: string;
   required: boolean;
+  sort_order?: number;
 };
 
 export type Frame = {
@@ -51,6 +58,12 @@ export type Frame = {
   video_id: string | null;
   has_labels: boolean;
   annotations: Annotation[];
+};
+
+export type FramePage = {
+  items: Frame[];
+  next_cursor: string | null;
+  total: number;
 };
 
 export type Annotation = {
@@ -75,8 +88,13 @@ export type Task = {
   result: Record<string, unknown>;
   log: string;
   error: string;
+  cancel_requested: boolean;
+  heartbeat_at: string | null;
+  retry_of_task_id: string | null;
   created_at: string;
 };
+
+export type GlobalTask = Task & { project_name: string };
 
 export type Video = {
   id: string;
@@ -95,10 +113,71 @@ export type ModelVersion = {
   filepath: string;
   metrics: Record<string, unknown>;
   dataset_snapshot: Record<string, unknown>;
+  dataset_version_id: string | null;
+};
+
+export type PublicDatasetProvider = {
+  provider: "kaggle" | "roboflow";
+  available: boolean;
+  discovery: boolean;
+  url_import: boolean;
+};
+
+export type PublicDatasetCandidate = {
+  provider: "kaggle" | "roboflow";
+  source_ref: string;
+  source_version: string;
+  source_url: string;
+  title: string;
+  description: string;
+  license_name: string;
+  license_url: string;
+  license_fingerprint: string;
+  download_bytes: number | null;
+  image_count: number | null;
+  task_type: string | null;
+  classes: string[];
+  updated_at: string;
+  score: number;
+  requires_manual_license_confirmation: boolean;
+  recommendation_reason?: string;
+  stars?: number | null;
+  downloads?: number | null;
+  views?: number | null;
+};
+
+export type PublicDatasetImport = {
+  id: string;
+  project_id: string;
+  provider: string;
+  source_ref: string;
+  source_version: string;
+  source_url: string;
+  title: string;
+  license_name: string;
+  license_url: string;
+  license_fingerprint: string;
+  state: string;
+  expected_download_bytes: number | null;
+  actual_download_bytes: number;
+  extracted_bytes: number;
+  artifact_checksum: string;
+  detected_format: string;
+  source_classes: Array<{ class_id: number; name: string }>;
+  class_mapping: Record<string, number | null>;
+  suggested_mapping: Record<string, number | null>;
+  quality_report: Record<string, unknown>;
+  review_frame_ids: string[];
+  fetch_task_id: string | null;
+  import_task_id: string | null;
+  dataset_version_id: string | null;
+  train_task_id: string | null;
+  estimated_vlm_cost: number;
 };
 
 export const api = {
   listProjects: () => request<Project[]>("/api/projects"),
+  listProjectOverviews: () => request<ProjectOverview[]>("/api/projects/overview"),
   createProject: (body: Partial<Project> & { categories?: Category[] }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   getProject: (id: string) => request<Project>(`/api/projects/${id}`),
@@ -166,6 +245,62 @@ export const api = {
     request<Frame[]>(
       `/api/projects/${projectId}/frames?sort=${sort}${status ? `&status=${status}` : ""}${limit ? `&limit=${limit}` : ""}`
     ),
+  listFramesPage: (
+    projectId: string,
+    statuses: string[],
+    cursor?: string | null,
+    sort = "uncertainty",
+  ) => {
+    const query = new URLSearchParams({ statuses: statuses.join(","), sort, limit: "100" });
+    if (cursor) query.set("cursor", cursor);
+    return request<FramePage>(`/api/projects/${projectId}/frames/page?${query.toString()}`);
+  },
+
+  publicDatasetProviders: () =>
+    request<PublicDatasetProvider[]>("/api/public-datasets/providers"),
+  discoverPublicDatasets: (projectId: string, query: string, roboflowUrl = "") =>
+    request<{ candidates: PublicDatasetCandidate[]; errors: Record<string, string> }>(
+      `/api/projects/${projectId}/public-datasets/discover`,
+      { method: "POST", body: JSON.stringify({ query, roboflow_url: roboflowUrl }) },
+    ),
+  fetchPublicDataset: (projectId: string, candidate: PublicDatasetCandidate) =>
+    request<PublicDatasetImport>(`/api/projects/${projectId}/public-datasets/fetch`, {
+      method: "POST",
+      body: JSON.stringify({
+        provider: candidate.provider,
+        source_ref: candidate.source_ref,
+        source_url: candidate.source_url,
+        license_fingerprint: candidate.license_fingerprint,
+        license_confirmed: true,
+      }),
+    }),
+  getPublicDatasetImport: (projectId: string, importId: string) =>
+    request<PublicDatasetImport>(`/api/projects/${projectId}/public-dataset-imports/${importId}`),
+  listPublicDatasetImports: (projectId: string) =>
+    request<PublicDatasetImport[]>(`/api/projects/${projectId}/public-dataset-imports`),
+  publishPublicDataset: (
+    projectId: string,
+    importId: string,
+    body: {
+      class_mapping: Record<string, number | null>;
+      warnings_confirmed: boolean;
+      auto_label: boolean;
+      cost_confirmed: boolean;
+      training_params: Record<string, unknown>;
+    },
+  ) => request<Task>(`/api/projects/${projectId}/public-dataset-imports/${importId}/publish`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+  approvePublicDatasetAndTrain: (projectId: string, importId: string) =>
+    request<Task>(`/api/projects/${projectId}/public-dataset-imports/${importId}/approve-and-train`, {
+      method: "POST",
+    }),
+  discardPublicDataset: (projectId: string, importId: string) =>
+    request<{ ok: boolean; removed_frames: number }>(
+      `/api/projects/${projectId}/public-dataset-imports/${importId}/discard`,
+      { method: "POST" },
+    ),
   frameStats: (projectId: string) =>
     request<Record<string, number>>(`/api/projects/${projectId}/frames/stats`),
   frameImageUrl: (projectId: string, frameId: string, annotated = false) =>
@@ -186,6 +321,7 @@ export const api = {
     ),
 
   listTasks: (projectId: string) => request<Task[]>(`/api/projects/${projectId}/tasks`),
+  listAllTasks: () => request<GlobalTask[]>("/api/tasks"),
   createTask: (projectId: string, task_type: string, params: Record<string, unknown> = {}) =>
     request<Task>(`/api/projects/${projectId}/tasks`, {
       method: "POST",
@@ -199,6 +335,8 @@ export const api = {
     request<{ ok: boolean; task_id: string }>(`/api/projects/${projectId}/tasks/cancel-running`, {
       method: "POST",
     }),
+  retryTask: (projectId: string, taskId: string) =>
+    request<Task>(`/api/projects/${projectId}/tasks/${taskId}/retry`, { method: "POST" }),
 
   listModels: (projectId: string) => request<ModelVersion[]>(`/api/projects/${projectId}/models`),
   uploadModel: (projectId: string, file: File, name = "") => {

@@ -15,6 +15,8 @@ export type ContinueAction = {
 const TASK_LABEL: Record<string, string> = {
   import: "导入数据集",
   derive_classify: "生成分类数据",
+  public_fetch: "公开数据下载分析",
+  public_import: "公开数据发布",
   extract: "提取素材",
   dedup: "素材去重",
   label: "自动标注",
@@ -35,6 +37,8 @@ export function getNextActionForTask(
   switch (taskType) {
     case "extract":
     case "dedup":
+    case "public_fetch":
+    case "public_import":
       return { label: "去自动标注", href: `/projects/${projectId}/label` };
     case "label":
     case "relabel":

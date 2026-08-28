@@ -54,7 +54,8 @@ def list_frames(
             if status and rec.status != (status if isinstance(status, FrameStatus) else FrameStatus(status)):
                 continue
             lbl_path = config.labels_dir / sp / f"{stem}.txt"
-            labels = parse_labels(lbl_path.read_text()) if lbl_path.exists() else {}
+            labels = parse_labels(lbl_path.read_text()) if lbl_path.exists() else []
+            present_class_ids = {label[0] for label in labels}
             out.append(
                 FrameInfo(
                     id=frame_id,
@@ -65,7 +66,7 @@ def list_frames(
                     status=rec.status,
                     note=rec.note,
                     review_note=rec.review_note,
-                    has_labels={c.id: c.id in labels for c in config.classes},
+                    has_labels={c.id: c.id in present_class_ids for c in config.classes},
                 )
             )
     return out

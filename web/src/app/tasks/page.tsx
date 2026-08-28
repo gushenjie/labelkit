@@ -19,6 +19,8 @@ const TASK_LABEL: Record<string, string> = {
   relabel: "YOLO 半自动",
   import: "导入数据",
   derive_classify: "生成分类集",
+  public_fetch: "公开数据下载分析",
+  public_import: "公开数据发布",
 };
 
 const STATUS_ZH: Record<string, string> = {
@@ -28,6 +30,7 @@ const STATUS_ZH: Record<string, string> = {
   failed: "失败",
   cancelled: "已取消",
   paused: "已暂停",
+  interrupted: "已中断",
 };
 
 type TaskRow = Task & { projectName: string };
@@ -41,15 +44,9 @@ export default function GlobalTasksPage() {
   const [filterStatus, setFilterStatus] = useState("all");
 
   const load = useCallback(async () => {
-    const list = await api.listProjects();
+    const [list, allTasks] = await Promise.all([api.listProjects(), api.listAllTasks()]);
     setProjects(list);
-    const rows = await Promise.all(
-      list.map(async (p) => {
-        const ts = await api.listTasks(p.id);
-        return ts.map((t) => ({ ...t, projectName: p.name }));
-      }),
-    );
-    const flat = rows.flat().sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const flat = allTasks.map((task) => ({ ...task, projectName: task.project_name }));
     setTasks(flat);
     setSelected((prev) => (prev ? flat.find((t) => t.id === prev.id) ?? prev : null));
     setLoading(false);
@@ -137,6 +134,7 @@ export default function GlobalTasksPage() {
             <option value="completed">已完成</option>
             <option value="failed">失败</option>
             <option value="cancelled">已取消</option>
+            <option value="interrupted">已中断</option>
           </select>
         </label>
         <span className="operations-filterbar__result">{filtered.length} 条结果</span>
@@ -202,6 +200,7 @@ export default function GlobalTasksPage() {
               <TaskDetailPanel
                 task={selected}
                 onCancel={() => api.cancelTask(selected.project_id, selected.id).then(load)}
+                onRetry={() => api.retryTask(selected.project_id, selected.id).then(load)}
               />
             )}
           </PanelSection>

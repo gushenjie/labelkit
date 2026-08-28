@@ -3,25 +3,29 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypeAlias
 
 
-def parse_labels(text: str) -> dict[int, tuple[float, float, float, float]]:
-    result: dict[int, tuple[float, float, float, float]] = {}
+YoloLabel: TypeAlias = tuple[int, float, float, float, float]
+
+
+def parse_labels(text: str) -> list[YoloLabel]:
+    """Parse every YOLO row, including repeated class IDs."""
+    result: list[YoloLabel] = []
     for line in text.strip().splitlines():
         parts = line.split()
         if len(parts) < 5:
             continue
         cls_id = int(parts[0])
-        if cls_id not in result:
-            result[cls_id] = tuple(map(float, parts[1:5]))
+        xc, yc, w, h = map(float, parts[1:5])
+        result.append((cls_id, xc, yc, w, h))
     return result
 
 
-def write_labels(path: Path, labels: dict[int, tuple[float, float, float, float]]) -> None:
+def write_labels(path: Path, labels: list[YoloLabel]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    for cls_id in sorted(labels.keys()):
-        xc, yc, w, h = labels[cls_id]
+    lines: list[str] = []
+    for cls_id, xc, yc, w, h in labels:
         lines.append(f"{cls_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}")
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 

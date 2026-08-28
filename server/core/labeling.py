@@ -17,8 +17,23 @@ from sqlalchemy.orm import Session
 
 from server.config import settings
 from server.core.paths import cache_dir
-from server.core.yolo_io import xywh_to_yolo
+from server.core.yolo_io import YoloLabel, xywh_to_yolo
 from server.db.models import Category, Frame, FrameStatus, Project, ProjectTaskType
+
+VLM_PROMPT_VERSION = "detect-classify-v2"
+
+
+def vlm_cache_identity(content_prompt_hash: str) -> str:
+    return hashlib.sha256(
+        "|".join(
+            [
+                content_prompt_hash,
+                settings.vlm_model,
+                settings.vlm_base_url.rstrip("/"),
+                VLM_PROMPT_VERSION,
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 @dataclass
@@ -85,7 +100,7 @@ def build_detect_prompt(project: Project, categories: list[Category], iw: int, i
     for c in categories:
         req = "必须" if c.required else "可选（仅当清晰可见时才标）"
         lines.append(f"- {c.name}（{req}）: {c.description}")
-    lines.append("每个类别最多一个框。")
+    lines.append("同一类别可能有多个目标；必须为每个清晰可见的目标分别输出一个框。")
     return "\n".join(lines)
 
 
@@ -111,7 +126,8 @@ def call_vlm(image_path: Path, prompt: str, cache_key: str | None = None, projec
         raise RuntimeError("DASHSCOPE_API_KEY not configured")
 
     if cache_key and project_id:
-        cache_file = cache_dir(project_id) / "vlm" / f"{cache_key}.json"
+        cache_identity = vlm_cache_identity(cache_key)
+        cache_file = cache_dir(project_id) / "vlm" / f"{cache_identity}.json"
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         if cache_file.exists():
             return json.loads(cache_file.read_text(encoding="utf-8"))
@@ -224,9 +240,9 @@ def propose_yolo(model_path: Path, image_path: Path, conf: float = 0.25) -> list
     return out
 
 
-def boxes_to_yolo_dict(boxes: list[ProposedBox], iw: int, ih: int) -> dict[int, tuple[float, float, float, float]]:
-    result: dict[int, tuple[float, float, float, float]] = {}
+def boxes_to_yolo_labels(boxes: list[ProposedBox], iw: int, ih: int) -> list[YoloLabel]:
+    result: list[YoloLabel] = []
     for b in sorted(boxes, key=lambda x: -x.conf):
-        if b.cls_id not in result:
-            result[b.cls_id] = xywh_to_yolo(b.x, b.y, b.w, b.h, iw, ih)
+        xc, yc, w, h = xywh_to_yolo(b.x, b.y, b.w, b.h, iw, ih)
+        result.append((b.cls_id, xc, yc, w, h))
     return result

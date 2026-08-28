@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -18,14 +19,29 @@ class OpenPathRequest(BaseModel):
 
 @router.post("/pick-folder")
 def pick_folder():
-    """macOS：弹出系统文件夹选择对话框，返回绝对路径。"""
-    if platform.system() != "Darwin":
-        raise HTTPException(400, "当前仅支持 macOS 文件夹选择，请手动填写路径")
-
-    script = 'POSIX path of (choose folder with prompt "选择数据集导出目录")'
+    """Open a native folder chooser where the platform provides one."""
+    system = platform.system()
+    if system == "Darwin":
+        command = ["osascript", "-e", 'POSIX path of (choose folder with prompt "选择数据集导出目录")']
+    elif system == "Windows":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-STA",
+            "-Command",
+            (
+                "$shell = New-Object -ComObject Shell.Application; "
+                "$folder = $shell.BrowseForFolder(0, '选择数据集导出目录', 0); "
+                "if ($folder) { $folder.Self.Path }"
+            ),
+        ]
+    elif shutil.which("zenity"):
+        command = ["zenity", "--file-selection", "--directory", "--title=选择数据集导出目录"]
+    else:
+        raise HTTPException(400, "未检测到可用的目录选择器，请手动填写绝对路径")
     try:
         proc = subprocess.run(
-            ["osascript", "-e", script],
+            command,
             capture_output=True,
             text=True,
             timeout=120,

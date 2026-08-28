@@ -18,9 +18,9 @@ import {
   countConfirmed,
   countPendingReview,
   countRejected,
-  filterFramesForReview,
   FRAME_STATUS_SIMPLE,
   normalizeReviewFilter,
+  reviewStatuses,
   REVIEW_FILTERS,
   ReviewFilter,
 } from "@/lib/status";
@@ -34,6 +34,9 @@ export default function ReviewPage() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [frames, setFrames] = useState<Frame[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [pageTotal, setPageTotal] = useState(0);
+  const [loadingNext, setLoadingNext] = useState(false);
   const [frameStats, setFrameStats] = useState<Record<string, number>>({});
   const [tasks, setTasks] = useState<Task[]>([]);
   const [running, setRunning] = useState(false);
@@ -75,9 +78,11 @@ export default function ReviewPage() {
   const loadFrames = useCallback(() => {
     if (!id || filter === null) return;
     api.getProject(id).then(setProject);
-    api.listFrames(id).then((all) => {
-      const f = filterFramesForReview(all, filter);
+    api.listFramesPage(id, reviewStatuses(filter)).then((page) => {
+      const f = page.items;
       setFrames(f);
+      setNextCursor(page.next_cursor);
+      setPageTotal(page.total);
       if (frameParam) {
         const i = f.findIndex((x) => x.id === frameParam);
         setIdx(i >= 0 ? i : 0);
@@ -86,6 +91,22 @@ export default function ReviewPage() {
       }
     });
   }, [id, filter, frameParam]);
+
+  const loadNextPage = useCallback(async () => {
+    if (!id || filter === null || !nextCursor || loadingNext) return;
+    setLoadingNext(true);
+    try {
+      const page = await api.listFramesPage(id, reviewStatuses(filter), nextCursor);
+      setFrames((currentFrames) => {
+        const existing = new Set(currentFrames.map((frame) => frame.id));
+        return [...currentFrames, ...page.items.filter((frame) => !existing.has(frame.id))];
+      });
+      setNextCursor(page.next_cursor);
+      setPageTotal(page.total);
+    } finally {
+      setLoadingNext(false);
+    }
+  }, [filter, id, loadingNext, nextCursor]);
 
   const refreshMeta = useCallback(() => {
     if (!id) return;
@@ -135,12 +156,46 @@ export default function ReviewPage() {
     preload(idx + 2);
   }, [id, frames, idx]);
 
+  useEffect(() => {
+    if (nextCursor && idx >= frames.length - 10) void loadNextPage();
+  }, [frames.length, idx, loadNextPage, nextCursor]);
+
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!isEditing) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const guardLinks = (event: MouseEvent) => {
+      if (!isEditing) return;
+      const link = (event.target as HTMLElement).closest("a");
+      if (link && !window.confirm("当前标注尚未保存，确定离开吗？")) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    document.addEventListener("click", guardLinks, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+      document.removeEventListener("click", guardLinks, true);
+    };
+  }, [isEditing]);
+
+  const confirmDiscard = () => !isEditing || window.confirm("当前标注尚未保存，确定放弃修改吗？");
+
   const goFrame = (next: number) => {
+    if (!confirmDiscard()) return;
     setIsEditing(false);
-    setIdx(next);
+    if (next >= frames.length && nextCursor) {
+      void loadNextPage().then(() => setIdx(Math.min(next, pageTotal - 1)));
+    } else {
+      setIdx(Math.max(0, Math.min(next, frames.length - 1)));
+    }
   };
 
   const switchFilter = (next: ReviewFilter) => {
+    if (!confirmDiscard()) return;
     setIsEditing(false);
     draftsRef.current.clear();
     setFilter(next);
@@ -152,37 +207,33 @@ export default function ReviewPage() {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (e.key === "ArrowLeft") goFrame(Math.max(0, idx - 1));
-      if (e.key === "ArrowRight") goFrame(Math.min(frames.length - 1, idx + 1));
+      if (e.key === "ArrowRight") goFrame(idx + 1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [idx, frames.length]);
 
-  const handleSave = (annotations: Annotation[], frameStatus: string) => {
+  const handleSave = async (annotations: Annotation[], frameStatus: string) => {
     if (!id || !current) return;
     const frameId = current.id;
-    const nextFrames = frames.filter((f) => f.id !== frameId);
-    setFrames(nextFrames);
-    setConfirmedInSession((n) => n + 1);
-    setIsEditing(false);
-    draftsRef.current.delete(frameId);
-    if (idx >= nextFrames.length) setIdx(Math.max(0, nextFrames.length - 1));
-
-    const persist = async () => {
-      try {
-        if (frameStatus === "no_target") {
-          await api.updateAnnotations(id, frameId, [], "no_target");
-        } else {
-          await api.updateAnnotations(id, frameId, annotations, frameStatus);
-        }
-        refreshMeta();
-      } catch (e) {
-        toast({ type: "error", message: `保存失败：${e}` });
-        loadFrames();
-        refreshMeta();
+    try {
+      if (frameStatus === "no_target") {
+        await api.updateAnnotations(id, frameId, [], "no_target");
+      } else {
+        await api.updateAnnotations(id, frameId, annotations, frameStatus);
       }
-    };
-    void persist();
+      const nextFrames = frames.filter((f) => f.id !== frameId);
+      setFrames(nextFrames);
+      setPageTotal((total) => Math.max(0, total - 1));
+      setConfirmedInSession((n) => n + 1);
+      setIsEditing(false);
+      draftsRef.current.delete(frameId);
+      if (idx >= nextFrames.length) setIdx(Math.max(0, nextFrames.length - 1));
+      refreshMeta();
+    } catch (error) {
+      toast({ type: "error", message: `保存失败：${error}` });
+      throw error;
+    }
   };
 
   const startAutoReview = async () => {
@@ -270,7 +321,7 @@ export default function ReviewPage() {
         })}
         {frames.length > 0 && (
           <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--lk-muted)" }}>
-            {idx + 1} / {frames.length}
+            {idx + 1} / {pageTotal}
           </span>
         )}
         <button type="button" className="review-auto-button" onClick={() => setShowAutoReview((v) => !v)}>
@@ -352,7 +403,9 @@ export default function ReviewPage() {
             </aside>
           </div>
           <div className="review-filmstrip">
-            {frames.map((f, i) => (
+            {frames.slice(Math.max(0, idx - 50), Math.min(frames.length, idx + 51)).map((f, offset) => {
+              const i = Math.max(0, idx - 50) + offset;
+              return (
               <Thumb
                 key={f.id}
                 src={api.frameImageUrl(id!, f.id, true)}
@@ -361,7 +414,9 @@ export default function ReviewPage() {
                 selected={i === idx}
                 onClick={() => goFrame(i)}
               />
-            ))}
+              );
+            })}
+            {loadingNext && <span className="review-filmstrip__loading">加载下一页…</span>}
           </div>
         </>
       )}

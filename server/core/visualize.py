@@ -34,7 +34,7 @@ def draw_labeled_image(
     if label_path.exists():
         labels = parse_labels(label_path.read_text(encoding="utf-8"))
         name_map = {c.class_id: c.name for c in categories}
-        for cls_id, (xc, yc, w, h) in labels.items():
+        for cls_id, xc, yc, w, h in labels:
             x, y, bw, bh = yolo_to_xywh(xc, yc, w, h, iw, ih)
             color = _color_for_class(categories, cls_id)
             cv2.rectangle(img, (x, y), (x + bw, y + bh), color, 2)

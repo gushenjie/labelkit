@@ -9,7 +9,6 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from server.config import settings
-from server.db.models import Base
 
 
 def _sqlite_url() -> str:
@@ -36,7 +35,9 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    Base.metadata.create_all(bind=engine)
+    from server.db.migrate import run_database_migrations
+
+    run_database_migrations(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

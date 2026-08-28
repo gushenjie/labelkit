@@ -3,7 +3,15 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { api, Project, Task, Video } from "@/lib/api";
+import {
+  api,
+  Project,
+  PublicDatasetCandidate,
+  PublicDatasetImport,
+  PublicDatasetProvider,
+  Task,
+  Video,
+} from "@/lib/api";
 import { Icon } from "@/components/Icon";
 import { ProjectPageHeader } from "@/components/ProjectPageHeader";
 import { TaskProgress } from "@/components/ui/TaskProgress";
@@ -17,9 +25,16 @@ type UploadItem = {
 
 type MaterialSource = "local" | "public";
 
-const DISCOVERY_EXAMPLES = ["厂区入侵检测", "烟雾识别", "反光衣检测"];
-
+const DISCOVERY_EXAMPLES = ["厂区入侵检测", "烟雾识别", "反光衣检测", "鸟窝检测"];
 const numberFormatter = new Intl.NumberFormat("zh-CN");
+const ROBOFLOW_URL_RE = /^https:\/\/(?:universe|app)\.roboflow\.com\//i;
+
+function formatBytes(bytes: number | null | undefined) {
+  if (bytes == null) return "大小未知";
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
 
 export default function MaterialsPage() {
   const { id } = useParams<{ id: string }>();
@@ -38,6 +53,19 @@ export default function MaterialsPage() {
   const [dragOver, setDragOver] = useState(false);
   const [discoveryIntent, setDiscoveryIntent] = useState("");
   const [showDiscoveryPlan, setShowDiscoveryPlan] = useState(false);
+  const [providers, setProviders] = useState<PublicDatasetProvider[]>([]);
+  const [candidates, setCandidates] = useState<PublicDatasetCandidate[]>([]);
+  const [discoveryErrors, setDiscoveryErrors] = useState<Record<string, string>>({});
+  const [discovering, setDiscovering] = useState(false);
+  const [selectedCandidate, setSelectedCandidate] = useState<PublicDatasetCandidate | null>(null);
+  const [licenseConfirmed, setLicenseConfirmed] = useState(false);
+  const [publicImport, setPublicImport] = useState<PublicDatasetImport | null>(null);
+  const [classMapping, setClassMapping] = useState<Record<string, number | null>>({});
+  const [warningsConfirmed, setWarningsConfirmed] = useState(false);
+  const [autoLabel, setAutoLabel] = useState(false);
+  const [costConfirmed, setCostConfirmed] = useState(false);
+  const [trainingParams, setTrainingParams] = useState({ epochs: 80, imgsz: 640, batch: 8, device: "auto" });
+  const [publicBusy, setPublicBusy] = useState(false);
   const [sourceMode, setSourceMode] = useState<MaterialSource>("local");
   const videoRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
@@ -72,10 +100,35 @@ export default function MaterialsPage() {
   useEffect(() => {
     if (!id) return;
     api.getProject(id).then(setProject);
+    api.publicDatasetProviders().then(setProviders).catch(() => setProviders([]));
+    api.listPublicDatasetImports(id).then((imports) => {
+      const latest = imports.find((item) => item.state !== "discarded");
+      if (latest) {
+        setPublicImport(latest);
+        setSourceMode("public");
+        setShowDiscoveryPlan(true);
+      }
+    }).catch(() => undefined);
     refresh();
     const timer = window.setInterval(refresh, 3000);
     return () => window.clearInterval(timer);
   }, [id]);
+
+  useEffect(() => {
+    if (!id || !publicImport || ["discarded", "training", "completed"].includes(publicImport.state)) return;
+    const timer = window.setInterval(() => {
+      api.getPublicDatasetImport(id, publicImport.id).then((next) => {
+        setPublicImport(next);
+      }).catch(() => undefined);
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [id, publicImport?.id, publicImport?.state]);
+
+  useEffect(() => {
+    if (publicImport?.state === "fetched" && Object.keys(classMapping).length === 0) {
+      setClassMapping(publicImport.suggested_mapping);
+    }
+  }, [publicImport?.id, publicImport?.state, publicImport?.suggested_mapping]);
 
   const uploadVideosParallel = async (files: File[]) => {
     if (!id || files.length === 0) return;
@@ -163,16 +216,132 @@ export default function MaterialsPage() {
     toast({ type: "info", message: "提取任务已启动，可在顶栏查看进度" });
   };
 
-  const buildDiscoveryPlan = () => {
+  const kaggleAvailable = providers.some((item) => item.provider === "kaggle" && item.available);
+  const roboflowAvailable = providers.some((item) => item.provider === "roboflow" && item.available);
+  const keywordDiscoveryAvailable = kaggleAvailable || roboflowAvailable;
+  const publicExamples = DISCOVERY_EXAMPLES;
+
+  const buildDiscoveryPlan = async () => {
     if (!discoveryIntent.trim()) {
-      toast({ type: "error", message: "请先描述希望识别的目标或场景" });
+      toast({
+        type: "error",
+        message: keywordDiscoveryAvailable
+          ? "请先描述希望识别的目标或场景，也可粘贴 Roboflow URL"
+          : "请先配置 Roboflow 或 Kaggle 凭据",
+      });
       return;
     }
+    if (!id) return;
+    const intent = discoveryIntent.trim();
+    const isRoboflowUrl = ROBOFLOW_URL_RE.test(intent);
+
+    if (!isRoboflowUrl && !keywordDiscoveryAvailable) {
+      setShowDiscoveryPlan(true);
+      setCandidates([]);
+      setSelectedCandidate(null);
+      setLicenseConfirmed(false);
+      setDiscoveryErrors({
+        providers: "当前未配置可用的公开数据源凭据",
+      });
+      toast({ type: "error", message: "请先配置 Roboflow 或 Kaggle 凭据" });
+      return;
+    }
+
+    setDiscovering(true);
     setShowDiscoveryPlan(true);
-    toast({
-      type: "info",
-      message: "检索方案已生成；接入 Roboflow 与 Kaggle 后可返回真实候选数据集",
-    });
+    setSelectedCandidate(null);
+    setLicenseConfirmed(false);
+    try {
+      const result = await api.discoverPublicDatasets(
+        id,
+        isRoboflowUrl ? "" : intent,
+        isRoboflowUrl ? intent : "",
+      );
+      setCandidates(result.candidates);
+      setDiscoveryErrors(result.errors);
+      if (result.candidates.length === 0) {
+        const detail = Object.values(result.errors).filter(Boolean).join("；");
+        toast({
+          type: "error",
+          message: detail || "没有找到可验证的数据集候选，请换个检索词试试",
+        });
+      }
+    } catch (error) {
+      toast({ type: "error", message: `公开数据检索失败：${error}` });
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const startPublicFetch = async () => {
+    if (!id || !selectedCandidate || !licenseConfirmed) return;
+    setPublicBusy(true);
+    try {
+      const created = await api.fetchPublicDataset(id, selectedCandidate);
+      setPublicImport(created);
+      toast({ type: "info", message: "已开始下载固定版本并执行安全检查" });
+    } catch (error) {
+      toast({ type: "error", message: `无法开始下载：${error}` });
+    } finally {
+      setPublicBusy(false);
+    }
+  };
+
+  const startPublicPublish = async () => {
+    if (!id || !publicImport) return;
+    if (publicImport.source_classes.some((item) => !(String(item.class_id) in classMapping))) {
+      toast({ type: "error", message: "请为每个来源类别选择项目类别或忽略" });
+      return;
+    }
+    setPublicBusy(true);
+    try {
+      await api.publishPublicDataset(id, publicImport.id, {
+        class_mapping: classMapping,
+        warnings_confirmed: warningsConfirmed,
+        auto_label: autoLabel,
+        cost_confirmed: costConfirmed,
+        training_params: trainingParams,
+      });
+      setPublicImport({ ...publicImport, state: "publishing" });
+      toast({ type: "info", message: "正在原子发布公开数据，可在任务中心查看进度" });
+    } catch (error) {
+      toast({ type: "error", message: `公开数据发布失败：${error}` });
+    } finally {
+      setPublicBusy(false);
+    }
+  };
+
+  const approveAndTrain = async () => {
+    if (!id || !publicImport) return;
+    setPublicBusy(true);
+    try {
+      const task = await api.approvePublicDatasetAndTrain(id, publicImport.id);
+      setPublicImport({ ...publicImport, state: "training", train_task_id: task.id });
+      toast({ type: "success", message: "复查门禁通过，已创建不可变数据版本并开始训练" });
+    } catch (error) {
+      toast({ type: "error", message: `${error}` });
+      const refreshed = await api.getPublicDatasetImport(id, publicImport.id).catch(() => null);
+      if (refreshed) setPublicImport(refreshed);
+    } finally {
+      setPublicBusy(false);
+    }
+  };
+
+  const discardPublicImport = async () => {
+    if (!id || !publicImport) return;
+    setPublicBusy(true);
+    try {
+      await api.discardPublicDataset(id, publicImport.id);
+      setPublicImport(null);
+      setSelectedCandidate(null);
+      setClassMapping({});
+      toast({ type: "success", message: "已安全放弃本次公开数据，不影响项目历史素材" });
+      refresh();
+    } catch (error) {
+      toast({ type: "error", message: `${error}` });
+    } finally {
+      setPublicBusy(false);
+    }
   };
 
   const activeExtract = tasks.find(
@@ -364,16 +533,22 @@ export default function MaterialsPage() {
               <div className="materials-ai-composer__badge">
                 <Icon name="sparkles" size={15} />
                 AI data scout
-                <em>能力预览</em>
+                <em>受控自动化</em>
               </div>
               <h3>描述你想识别的目标或场景</h3>
-              <p>智能体将把自然语言需求拆解为类别、场景和数据质量条件。</p>
+              <p>
+                {roboflowAvailable
+                  ? "已支持 Roboflow 关键词检索；也可直接粘贴带版本号的 Universe URL。"
+                  : kaggleAvailable
+                    ? "可用关键词检索 Kaggle，或粘贴 Roboflow URL。"
+                    : "请先配置 Roboflow 或 Kaggle 凭据后再检索。"}
+              </p>
                 <label className="materials-ai-prompt">
                   <span>识别需求</span>
                   <textarea
                     rows={3}
                     value={discoveryIntent}
-                    placeholder="例如：我想做厂区周界入侵检测，需要识别人、车辆和翻越围栏行为"
+                    placeholder="例如：鸟窝检测、烟雾识别；或 https://universe.roboflow.com/workspace/project/1"
                     onChange={(event) => {
                       setDiscoveryIntent(event.target.value);
                       setShowDiscoveryPlan(false);
@@ -383,7 +558,7 @@ export default function MaterialsPage() {
 
                 <div className="materials-ai-examples">
                   <span>快速填写</span>
-                  {DISCOVERY_EXAMPLES.map((example) => (
+                  {publicExamples.map((example) => (
                     <button
                       key={example}
                       type="button"
@@ -397,11 +572,11 @@ export default function MaterialsPage() {
                   ))}
                 </div>
               <div className="materials-ai-composer__action">
-                <button type="button" onClick={buildDiscoveryPlan}>
+                <button type="button" disabled={discovering} onClick={buildDiscoveryPlan}>
                   <Icon name="sparkles" size={16} />
-                  生成检索方案
+                  {discovering ? "正在检索…" : "查找公开数据"}
                 </button>
-                <span>当前仅生成方案，不会立即下载数据</span>
+                <span>检索不会下载；选择固定版本并确认许可后才开始</span>
               </div>
             </div>
 
@@ -411,21 +586,30 @@ export default function MaterialsPage() {
                 <div>
                   <span className="project-section-kicker">Public source</span>
                   <h3>面向任务筛选数据</h3>
-                  <p>优先比较类别覆盖、场景接近度和许可证。</p>
+                  <p>
+                    {roboflowAvailable
+                      ? "Roboflow 支持关键词自动检索公开数据集，无需再手动找链接。"
+                      : "优先比较类别覆盖、场景接近度和许可证。"}
+                  </p>
                 </div>
               </div>
               <div className="materials-provider-list">
-                <span><i>R</i>Roboflow Universe</span>
-                <span><i>K</i>Kaggle</span>
+                {providers.map((provider) => (
+                  <span key={provider.provider}>
+                    <i>{provider.provider === "roboflow" ? "R" : "K"}</i>
+                    {provider.provider === "roboflow" ? "Roboflow" : "Kaggle"}
+                    <small>{provider.available ? "可用" : "未配置"}</small>
+                  </span>
+                ))}
               </div>
               <ol className="materials-ingest-flow">
                 <li><strong>01</strong><span><b>理解需求</b><small>提取目标、场景与任务类型</small></span></li>
                 <li><strong>02</strong><span><b>比较候选</b><small>按匹配度与数据质量排序</small></span></li>
-                <li><strong>03</strong><span><b>导入项目</b><small>统一格式后进入素材库</small></span></li>
+                <li><strong>03</strong><span><b>导入训练</b><small>确认许可后统一格式入库</small></span></li>
               </ol>
               <div className="materials-rail-note">
                 <Icon name="check" size={13} />
-                推荐结果会说明规模、格式与许可
+                {roboflowAvailable ? "Roboflow 已配置，可直接关键词检索" : "推荐结果会说明规模、格式与许可"}
               </div>
             </aside>
           </div>
@@ -463,14 +647,14 @@ export default function MaterialsPage() {
               <span className="project-section-kicker">Discovery blueprint</span>
               <h2>公开数据检索方案</h2>
             </div>
-            <span>等待数据源授权</span>
+            <span>{publicImport ? `导入状态 · ${publicImport.state}` : "等待数据源授权"}</span>
           </header>
 
           <div className="materials-discovery-plan__intent">
             <span><Icon name="sparkles" size={17} /></span>
             <div>
-              <small>智能体已理解需求</small>
-              <strong>{discoveryIntent}</strong>
+              <small>{publicImport ? "已恢复最近一次公开导入" : "智能体已理解需求"}</small>
+              <strong>{publicImport?.title || discoveryIntent}</strong>
             </div>
           </div>
 
@@ -481,14 +665,155 @@ export default function MaterialsPage() {
             <div><span>合规检查</span><strong>许可证优先</strong><small>过滤用途不明确的数据集</small></div>
           </div>
 
-          <div className="materials-discovery-plan__empty">
-            <span><Icon name="database" size={22} /></span>
-            <div>
-              <strong>候选数据集将在这里按匹配度排序</strong>
-              <p>接入 Roboflow 与 Kaggle API 后，显示规模、类别、质量、许可证和预估导入量。</p>
+          {discovering && (
+            <div className="materials-discovery-plan__empty">
+              <span><Icon name="sparkles" size={22} /></span>
+              <div><strong>正在读取官方数据源元数据</strong><p>只比较候选，不会在此阶段下载文件。</p></div>
             </div>
-            <button type="button" disabled>一键导入项目</button>
-          </div>
+          )}
+
+          {!discovering && candidates.length === 0 && !publicImport && (
+            <div className="materials-discovery-plan__empty">
+              <span><Icon name="database" size={22} /></span>
+              <div>
+                <strong>暂未获得可验证的候选</strong>
+                <p>
+                  {Object.values(discoveryErrors).join("；")
+                    || "可换个检索词，或粘贴带固定版本号的 Roboflow URL。"}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {candidates.length > 0 && !publicImport && (
+            <div className="public-candidates">
+              {candidates.map((candidate, index) => {
+                const selected = selectedCandidate?.license_fingerprint === candidate.license_fingerprint;
+                return (
+                  <button
+                    type="button"
+                    key={`${candidate.provider}:${candidate.source_ref}:${candidate.source_version}`}
+                    className={
+                      selected
+                        ? "public-candidate public-candidate--selected"
+                        : index === 0
+                          ? "public-candidate public-candidate--recommended"
+                          : "public-candidate"
+                    }
+                    onClick={() => {
+                      setSelectedCandidate(candidate);
+                      setLicenseConfirmed(false);
+                    }}
+                  >
+                    <span className="public-candidate__provider">{candidate.provider}</span>
+                    {index === 0 && <span className="public-candidate__badge">最推荐</span>}
+                    <strong>{candidate.title}</strong>
+                    <p>{candidate.recommendation_reason || candidate.description || candidate.source_ref}</p>
+                    <div>
+                      <span>v{candidate.source_version}</span>
+                      <span>{candidate.image_count ? `${numberFormatter.format(candidate.image_count)} 张` : "图片数待分析"}</span>
+                      <span>{formatBytes(candidate.download_bytes)}</span>
+                      <span>{candidate.license_name || "许可未知"}</span>
+                      {candidate.classes?.length > 0 && <span>{candidate.classes.slice(0, 3).join(" / ")}</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {selectedCandidate && !publicImport && (
+            <div className="public-confirmation">
+              <div>
+                <strong>确认数据来源与许可</strong>
+                <p>固定版本 {selectedCandidate.source_version} · {selectedCandidate.license_name || "许可未知"}。平台仅展示来源元数据，不构成法律意见。</p>
+                <a href={selectedCandidate.source_url} target="_blank" rel="noreferrer">查看原始数据页面</a>
+              </div>
+              <label>
+                <input type="checkbox" checked={licenseConfirmed} onChange={(event) => setLicenseConfirmed(event.target.checked)} />
+                我已核对许可、署名要求和底层图片权利，并同意下载分析
+              </label>
+              <button type="button" className="btn-primary" disabled={!licenseConfirmed || publicBusy} onClick={startPublicFetch}>
+                {publicBusy ? "正在创建任务…" : "下载并安全分析"}
+              </button>
+            </div>
+          )}
+
+          {publicImport && (
+            <div className="public-import-workflow">
+              <div className="public-import-workflow__steps" aria-label="公开数据导入进度">
+                {["发现", "下载分析", "映射发布", "抽样复查", "版本训练"].map((step, index) => {
+                  const progressIndex = ["created", "fetching", "fetched", "publishing", "needs_label", "review", "review_expanded", "training", "completed"].indexOf(publicImport.state);
+                  const thresholds = [0, 1, 3, 5, 7];
+                  return <span key={step} className={progressIndex >= thresholds[index] ? "is-active" : ""}><i>{index + 1}</i>{step}</span>;
+                })}
+              </div>
+
+              <div className="public-import-workflow__summary">
+                <div><small>当前状态</small><strong>{publicImport.state}</strong></div>
+                <div><small>识别格式</small><strong>{publicImport.detected_format || "分析中"}</strong></div>
+                <div><small>下载 / 解压</small><strong>{formatBytes(publicImport.actual_download_bytes)} / {formatBytes(publicImport.extracted_bytes)}</strong></div>
+                <div><small>校验摘要</small><strong>{publicImport.artifact_checksum ? publicImport.artifact_checksum.slice(0, 12) : "待生成"}</strong></div>
+              </div>
+
+              {["created", "fetching"].includes(publicImport.state) && (
+                <div className="public-import-workflow__notice"><Icon name="database" size={16} />正在下载固定版本、校验摘要并执行安全解压。此阶段不会创建项目帧。</div>
+              )}
+
+              {["fetch_failed", "fetch_interrupted"].includes(publicImport.state) && (
+                <div className="public-import-workflow__notice public-import-workflow__notice--danger">下载或分析未完成。可在任务中心查看脱敏错误并安全重试，或放弃后重新选择候选。</div>
+              )}
+
+              {publicImport.state === "fetched" && (
+                <div className="public-mapping">
+                  <header><div><strong>确认类别映射与质量门禁</strong><p>每个来源类别都必须映射到现有项目类别或明确忽略，不会静默新建类别。</p></div></header>
+                  <div className="public-mapping__quality">
+                    <span>图片 <strong>{String(publicImport.quality_report.image_count ?? 0)}</strong></span>
+                    <span>标注 <strong>{String(publicImport.quality_report.annotation_count ?? 0)}</strong></span>
+                    <span>阻断 <strong>{Array.isArray(publicImport.quality_report.blocking) ? publicImport.quality_report.blocking.length : 0}</strong></span>
+                    <span>警告 <strong>{Array.isArray(publicImport.quality_report.warnings) ? publicImport.quality_report.warnings.length : 0}</strong></span>
+                  </div>
+                  {Array.isArray(publicImport.quality_report.blocking) && publicImport.quality_report.blocking.length > 0 && (
+                    <ul className="public-mapping__issues public-mapping__issues--danger">{publicImport.quality_report.blocking.map((item) => <li key={String(item)}>{String(item)}</li>)}</ul>
+                  )}
+                  {Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && (
+                    <ul className="public-mapping__issues">{publicImport.quality_report.warnings.map((item) => <li key={String(item)}>{String(item)}</li>)}</ul>
+                  )}
+                  <div className="public-mapping__rows">
+                    {publicImport.source_classes.map((sourceClass) => (
+                      <label key={sourceClass.class_id}><span>{sourceClass.name}<small>来源 ID {sourceClass.class_id}</small></span><select value={classMapping[String(sourceClass.class_id)] ?? "ignore"} onChange={(event) => setClassMapping((previous) => ({ ...previous, [String(sourceClass.class_id)]: event.target.value === "ignore" ? null : Number(event.target.value) }))}><option value="ignore">忽略此类别</option>{project?.categories.map((category) => <option key={category.class_id} value={category.class_id}>{category.name} · ID {category.class_id}</option>)}</select></label>
+                    ))}
+                  </div>
+                  {Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && <label className="public-mapping__check"><input type="checkbox" checked={warningsConfirmed} onChange={(event) => setWarningsConfirmed(event.target.checked)} />我已查看并接受质量报告中的警告</label>}
+                  {Number(publicImport.quality_report.annotation_count ?? 0) === 0 && (
+                    <div className="public-mapping__cost"><label><input type="checkbox" checked={autoLabel} onChange={(event) => setAutoLabel(event.target.checked)} />导入后对本次数据执行 VLM 自动标注</label>{autoLabel && <label><input type="checkbox" checked={costConfirmed} onChange={(event) => setCostConfirmed(event.target.checked)} />我确认预估费用约 ¥{publicImport.estimated_vlm_cost.toFixed(2)}</label>}</div>
+                  )}
+                  <div className="public-training-params">
+                    <strong>训练参数</strong>
+                    <label><span>轮次</span><input type="number" min="1" max="1000" value={trainingParams.epochs} onChange={(event) => setTrainingParams((previous) => ({ ...previous, epochs: Number(event.target.value) }))} /></label>
+                    <label><span>图像尺寸</span><input type="number" min="32" max="4096" step="32" value={trainingParams.imgsz} onChange={(event) => setTrainingParams((previous) => ({ ...previous, imgsz: Number(event.target.value) }))} /></label>
+                    <label><span>批大小</span><input type="number" min="1" max="1024" value={trainingParams.batch} onChange={(event) => setTrainingParams((previous) => ({ ...previous, batch: Number(event.target.value) }))} /></label>
+                    <label><span>设备</span><select value={trainingParams.device} onChange={(event) => setTrainingParams((previous) => ({ ...previous, device: event.target.value }))}><option value="auto">自动</option><option value="cpu">CPU</option><option value="mps">MPS</option><option value="0">CUDA 0</option></select></label>
+                  </div>
+                  <button type="button" className="btn-primary" disabled={publicBusy || (Array.isArray(publicImport.quality_report.blocking) && publicImport.quality_report.blocking.length > 0) || (Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && !warningsConfirmed) || (autoLabel && !costConfirmed)} onClick={startPublicPublish}>确认映射并发布到项目</button>
+                </div>
+              )}
+
+              {["publishing", "needs_label"].includes(publicImport.state) && <div className="public-import-workflow__notice"><Icon name="sparkles" size={16} />{publicImport.state === "publishing" ? "正在事务化发布素材和标注。" : "素材已导入为未标注数据，请完成标注后再创建训练版本。"}</div>}
+              {publicImport.state === "publish_interrupted" && <div className="public-import-workflow__notice public-import-workflow__notice--danger">发布被中断，源 staging 仍保留；请在任务中心重试，系统会清理未提交的孤儿文件。</div>}
+
+              {["review", "review_expanded"].includes(publicImport.state) && (
+                <div className="public-review-gate"><div><strong>需要完成风险抽样复查</strong><p>共有 {publicImport.review_frame_ids.length} 张固定样本。发现错误时系统会自动扩大受影响类别的复查范围。</p></div><div><Link href={`/projects/${id}/label?status=needs_human`} className="btn-secondary">打开抽样复查</Link><button type="button" className="btn-primary" disabled={publicBusy} onClick={approveAndTrain}>复查完成，创建版本并训练</button></div></div>
+              )}
+
+              {publicImport.state === "full_review_required" && <div className="public-import-workflow__notice public-import-workflow__notice--danger">抽样持续发现错误，已禁止自动训练。请全量复查或放弃该数据集。</div>}
+              {publicImport.state === "training" && <div className="public-import-workflow__notice"><Icon name="check" size={16} />不可变数据版本已创建，训练任务正在运行。</div>}
+              {["training_failed", "training_cancelled", "training_interrupted"].includes(publicImport.state) && <div className="public-import-workflow__notice public-import-workflow__notice--danger">训练未完成，不可变数据版本仍然保留。请在任务中心查看原因并重试。</div>}
+              {publicImport.state === "completed" && <div className="public-import-workflow__notice"><Icon name="check" size={16} />公开数据链路已完成，训练结果已关联来源和数据版本。</div>}
+
+              {!publicImport.dataset_version_id && !(["fetching", "publishing", "training"].includes(publicImport.state)) && <button type="button" className="public-import-workflow__discard" disabled={publicBusy} onClick={discardPublicImport}>放弃本次公开数据</button>}
+            </div>
+          )}
         </section>
       )}
 
@@ -592,7 +917,7 @@ export default function MaterialsPage() {
               <small>填写 0 表示不限制</small>
             </label>
             <label>
-              <span>去重严格度</span>
+              <span>重复判定阈值</span>
               <input
                 className="input"
                 type="number"
@@ -601,7 +926,7 @@ export default function MaterialsPage() {
                 value={dedupThreshold}
                 onChange={(event) => setDedupThreshold(Number(event.target.value))}
               />
-              <small>数值越小，保留的相似画面越少</small>
+              <small>感知哈希距离不超过该值即判为重复；数值越大，删除越多</small>
             </label>
             <button
               type="button"

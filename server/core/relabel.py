@@ -9,9 +9,9 @@ from pathlib import Path
 import cv2
 from sqlalchemy.orm import Session
 
-from server.core.labeling import boxes_to_yolo_dict, propose_yolo
-from server.core.paths import labels_dir
-from server.core.yolo_io import write_labels
+from server.core.labeling import boxes_to_yolo_labels, propose_yolo
+from server.core.paths import label_path_for_frame
+from server.core.yolo_io import YoloLabel, write_labels
 from server.db.models import Annotation, Frame, FrameStatus, ModelVersion, Project, Task
 
 PENDING_STATUSES = {
@@ -62,17 +62,17 @@ def _apply_yolo_result(
     frame: Frame,
     project: Project,
     boxes: list,
-    yolo_boxes: dict[int, tuple[float, float, float, float]],
+    yolo_labels: list[YoloLabel],
     *,
     was_unlabeled: bool,
 ) -> None:
-    lbl_path = labels_dir(project.id, frame.split) / f"{Path(frame.filename).stem}.txt"
+    lbl_path = label_path_for_frame(project.id, frame)
     db.query(Annotation).filter(Annotation.frame_id == frame.id).delete()
 
-    if yolo_boxes:
-        write_labels(lbl_path, yolo_boxes)
-        for cls_id, (xc, yc, w, h) in yolo_boxes.items():
-            conf_val = next((b.conf for b in boxes if b.cls_id == cls_id), 0.9)
+    if yolo_labels:
+        write_labels(lbl_path, yolo_labels)
+        ordered_boxes = sorted(boxes, key=lambda item: -item.conf)
+        for box, (cls_id, xc, yc, w, h) in zip(ordered_boxes, yolo_labels, strict=True):
             db.add(Annotation(
                 frame_id=frame.id,
                 class_id=cls_id,
@@ -80,7 +80,7 @@ def _apply_yolo_result(
                 y_center=yc,
                 width=w,
                 height=h,
-                confidence=conf_val,
+                confidence=box.conf,
                 source="yolo",
             ))
         frame.status = FrameStatus.LLM_LABELED
@@ -130,8 +130,8 @@ def run_relabel_task(db: Session, task: Task, *, cancelled: Callable[[], bool] |
                 continue
             ih, iw = img.shape[:2]
             boxes = propose_yolo(model_path, Path(frame.filepath), conf=conf)
-            yolo_boxes = boxes_to_yolo_dict(boxes, iw, ih)
-            _apply_yolo_result(db, frame, project, boxes, yolo_boxes, was_unlabeled=was_unlabeled)
+            yolo_labels = boxes_to_yolo_labels(boxes, iw, ih)
+            _apply_yolo_result(db, frame, project, boxes, yolo_labels, was_unlabeled=was_unlabeled)
             ok += 1
         except Exception as e:
             frame.note = str(e)

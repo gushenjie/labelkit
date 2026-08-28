@@ -229,9 +229,8 @@ def get_backend(config: ProjectConfig, name: str) -> LabelBackend:
     raise ValueError(f"Unknown backend: {name}")
 
 
-def boxes_to_yolo_dict(boxes: list[ProposedBox], iw: int, ih: int) -> dict[int, tuple[float, float, float, float]]:
-    result: dict[int, tuple[float, float, float, float]] = {}
+def boxes_to_yolo_labels(boxes: list[ProposedBox], iw: int, ih: int) -> list[tuple[int, float, float, float, float]]:
+    result: list[tuple[int, float, float, float, float]] = []
     for b in sorted(boxes, key=lambda x: -x.conf):
-        if b.cls_id not in result:
-            result[b.cls_id] = xywh_to_yolo(b.x, b.y, b.w, b.h, iw, ih)
+        result.append((b.cls_id, *xywh_to_yolo(b.x, b.y, b.w, b.h, iw, ih)))
     return result

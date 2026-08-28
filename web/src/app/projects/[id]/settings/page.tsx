@@ -19,6 +19,8 @@ export default function ProjectSettingsPage() {
   const [importLabels, setImportLabels] = useState("");
   const [sourceProjectId, setSourceProjectId] = useState("");
   const [sourceClassId, setSourceClassId] = useState(1);
+  const [targetClassId, setTargetClassId] = useState(0);
+  const [sourceProjects, setSourceProjects] = useState<Project[]>([]);
 
   useEffect(() => {
     if (!id) return;
@@ -27,13 +29,15 @@ export default function ProjectSettingsPage() {
       setCategories(p.categories);
       setLabelPrompt(p.label_prompt);
       setReviewPrompt(p.review_prompt);
+      setTargetClassId(p.categories[0]?.class_id ?? 0);
     });
+    api.listProjects().then((projects) => setSourceProjects(projects.filter((item) => item.task_type === "detect")));
   }, [id]);
 
   const save = async () => {
     if (!id) return;
     await api.updateProject(id, { label_prompt: labelPrompt, review_prompt: reviewPrompt });
-    await api.setCategories(id, categories);
+    await api.setCategories(id, categories.map((category, index) => ({ ...category, sort_order: index })));
     toast({ type: "success", message: "设置已保存" });
   };
 
@@ -42,7 +46,7 @@ export default function ProjectSettingsPage() {
     await api.createTask(id, "derive_classify", {
       source_project_id: sourceProjectId,
       source_class_id: sourceClassId,
-      label_mapping: {},
+      target_class_id: targetClassId,
     });
     toast({ type: "success", message: "派生分类素材任务已启动" });
   };
@@ -122,13 +126,41 @@ export default function ProjectSettingsPage() {
           <Panel className="project-settings-panel">
             <PanelSection
               title="类别定义"
-              action={<span className="panel-section__count">{categories.length}</span>}
+              action={
+                <button
+                  type="button"
+                  className="btn-secondary text-xs"
+                  onClick={() => setCategories((current) => [
+                    ...current,
+                    {
+                      class_id: Math.max(-1, ...current.map((category) => category.class_id)) + 1,
+                      name: `新类别 ${current.length + 1}`,
+                      description: "",
+                      color: "#12A88F",
+                      required: true,
+                      sort_order: current.length,
+                    },
+                  ])}
+                >
+                  新增类别
+                </button>
+              }
             >
               <div className="project-category-list">
                 {categories.map((category, index) => (
                   <div key={category.id || index} className="project-category-row">
                     <span className="project-category-row__index">{category.class_id}</span>
-                    <i style={{ background: category.color }} aria-hidden="true" />
+                    <input
+                      className="project-category-row__color"
+                      type="color"
+                      aria-label={`${category.name} 颜色`}
+                      value={category.color}
+                      onChange={(event) => {
+                        const next = [...categories];
+                        next[index] = { ...category, color: event.target.value };
+                        setCategories(next);
+                      }}
+                    />
                     <label>
                       <span>类别名称</span>
                       <input
@@ -154,6 +186,36 @@ export default function ProjectSettingsPage() {
                         }}
                       />
                     </label>
+                    <div className="project-category-row__actions">
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={`上移 ${category.name}`}
+                        disabled={index === 0}
+                        onClick={() => setCategories((current) => {
+                          const next = [...current];
+                          [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                          return next;
+                        })}
+                      ><Icon name="chevron-down" size={14} style={{ transform: "rotate(180deg)" }} /></button>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={`下移 ${category.name}`}
+                        disabled={index === categories.length - 1}
+                        onClick={() => setCategories((current) => {
+                          const next = [...current];
+                          [next[index], next[index + 1]] = [next[index + 1], next[index]];
+                          return next;
+                        })}
+                      ><Icon name="chevron-down" size={14} /></button>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={`删除 ${category.name}`}
+                        onClick={() => setCategories((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                      ><Icon name="trash" size={14} /></button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -213,7 +275,20 @@ export default function ProjectSettingsPage() {
                 <p>从检测项目的目标框裁剪图片，生成新的分类训练素材。</p>
                 <label className="settings-field">
                   <span>源检测项目 ID</span>
-                  <input className="input" value={sourceProjectId} onChange={(e) => setSourceProjectId(e.target.value)} />
+                  <select className="input" value={sourceProjectId} onChange={(e) => setSourceProjectId(e.target.value)}>
+                    <option value="">请选择源检测项目</option>
+                    {sourceProjects.map((sourceProject) => (
+                      <option key={sourceProject.id} value={sourceProject.id}>{sourceProject.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="settings-field">
+                  <span>目标分类类别</span>
+                  <select className="input" value={targetClassId} onChange={(e) => setTargetClassId(Number(e.target.value))}>
+                    {categories.map((category) => (
+                      <option key={category.class_id} value={category.class_id}>{category.name}</option>
+                    ))}
+                  </select>
                 </label>
                 <label className="settings-field">
                   <span>裁剪类别 ID</span>

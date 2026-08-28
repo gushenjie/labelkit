@@ -16,6 +16,8 @@ const TASK_LABEL: Record<string, string> = {
   relabel: "YOLO 半自动",
   import: "导入数据",
   derive_classify: "生成分类集",
+  public_fetch: "公开数据下载分析",
+  public_import: "公开数据发布",
 };
 
 const STATUS_ZH: Record<string, string> = {
@@ -25,11 +27,13 @@ const STATUS_ZH: Record<string, string> = {
   failed: "失败",
   cancelled: "已取消",
   paused: "已暂停",
+  interrupted: "已中断",
 };
 
 type Props = {
   task: Task & { projectName: string };
   onCancel?: () => void;
+  onRetry?: () => void;
 };
 
 function StatRow({ label, value }: { label: string; value: ReactNode }) {
@@ -283,7 +287,7 @@ function LabelSnapshot({ task }: { task: Task }) {
   );
 }
 
-export function TaskDetailPanel({ task, onCancel }: Props) {
+export function TaskDetailPanel({ task, onCancel, onRetry }: Props) {
   const pct = task.total > 0 ? Math.round((task.progress / task.total) * 100) : 0;
   const logLines = task.log ? formatLogLines(task.log) : [];
 
@@ -304,7 +308,7 @@ export function TaskDetailPanel({ task, onCancel }: Props) {
             task.status === "failed" ? "text-danger-600" :
             task.status === "running" ? "text-warning-600" : "text-text"
           }>
-            {STATUS_ZH[task.status] || task.status}
+            {task.cancel_requested && task.status === "running" ? "取消中" : STATUS_ZH[task.status] || task.status}
           </span>
         </p>
         <p><span className="text-muted">时间：</span>{new Date(task.created_at).toLocaleString()}</p>
@@ -343,9 +347,17 @@ export function TaskDetailPanel({ task, onCancel }: Props) {
       )}
 
       {task.status === "running" && onCancel && (
-        <button type="button" className="btn-secondary mt-4" onClick={onCancel}>
-          取消任务
+        <button type="button" className="btn-secondary mt-4" disabled={task.cancel_requested} onClick={onCancel}>
+          {task.cancel_requested ? "取消中…" : "取消任务"}
         </button>
+      )}
+      {["failed", "cancelled", "interrupted"].includes(task.status) && onRetry && (
+        <button type="button" className="btn-secondary mt-4" onClick={onRetry}>
+          创建重试任务
+        </button>
+      )}
+      {task.retry_of_task_id && (
+        <p className="mt-2 text-xs text-subtle">重试来源：{task.retry_of_task_id}</p>
       )}
     </div>
   );

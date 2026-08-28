@@ -14,7 +14,7 @@ from labelkit.yolo_io import parse_labels, yolo_to_xywh
 def draw_labeled_image(
     config: ProjectConfig,
     image_path: Path,
-    labels: dict | None = None,
+    labels: list[tuple[int, float, float, float, float]] | None = None,
     lbl_path: Path | None = None,
 ) -> np.ndarray:
     img = cv2.imread(str(image_path))
@@ -25,11 +25,13 @@ def draw_labeled_image(
         if lbl_path and lbl_path.exists():
             labels = parse_labels(lbl_path.read_text())
         else:
-            labels = {}
-    for cls in config.classes:
-        if cls.id not in labels:
+            labels = []
+    classes = {cls.id: cls for cls in config.classes}
+    for class_id, xc, yc, width, height in labels:
+        cls = classes.get(class_id)
+        if cls is None:
             continue
-        x, y, w, h = yolo_to_xywh(*labels[cls.id], iw, ih)
+        x, y, w, h = yolo_to_xywh(xc, yc, width, height, iw, ih)
         color = cls.color
         cv2.rectangle(img, (x, y), (x + w, y + h), color, 3)
         cv2.putText(

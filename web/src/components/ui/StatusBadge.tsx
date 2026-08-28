@@ -4,6 +4,8 @@ const STATUS_MAP: Record<string, { label: string; tone: string }> = {
   completed: { label: "已完成", tone: "success" },
   failed: { label: "失败", tone: "danger" },
   cancelled: { label: "已取消", tone: "muted" },
+  interrupted: { label: "已中断", tone: "warning" },
+  paused: { label: "已暂停", tone: "warning" },
   ready: { label: "待开始", tone: "muted" },
 };
 

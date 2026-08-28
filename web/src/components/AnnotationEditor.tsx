@@ -2,14 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Annotation, Category } from "@/lib/api";
-
-type Box = {
-  class_id: number;
-  x_center: number;
-  y_center: number;
-  width: number;
-  height: number;
-};
+import { moveBox, NormalizedBox as Box, resizeBox, ResizeHandle } from "@/lib/annotation-boxes";
 
 type Props = {
   frameId: string;
@@ -17,7 +10,7 @@ type Props = {
   categories: Category[];
   annotations: Annotation[];
   taskType: "detect" | "classify";
-  onSave: (annotations: Annotation[], status: string) => void;
+  onSave: (annotations: Annotation[], status: string) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
   darkCanvas?: boolean;
 };
@@ -50,10 +43,19 @@ export function AnnotationEditor({
   const [selectedClass, setSelectedClass] = useState(0);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [drawing, setDrawing] = useState<{ x: number; y: number } | null>(null);
-  const [drag, setDrag] = useState<{ idx: number; mode: "move"; ox: number; oy: number } | null>(null);
+  const [drag, setDrag] = useState<{
+    idx: number;
+    mode: "move" | "resize";
+    handle?: ResizeHandle;
+    startX: number;
+    startY: number;
+    initial: Box;
+  } | null>(null);
   const [dirty, setDirty] = useState(false);
   const [classLabel, setClassLabel] = useState<number | null>(annotations[0]?.class_id ?? null);
   const [imageReady, setImageReady] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const markDirty = useCallback(() => {
     setDirty(true);
@@ -108,6 +110,14 @@ export function AnnotationEditor({
       ctx.fillStyle = color;
       ctx.font = "14px sans-serif";
       ctx.fillText(cat?.name || String(b.class_id), x, Math.max(14, y - 4));
+      if (i === selectedIdx) {
+        const points = [
+          [x, y], [x + w / 2, y], [x + w, y], [x + w, y + h / 2],
+          [x + w, y + h], [x + w / 2, y + h], [x, y + h], [x, y + h / 2],
+        ];
+        ctx.fillStyle = "#fff";
+        points.forEach(([px, py]) => ctx.fillRect(px - 4, py - 4, 8, 8));
+      }
     });
 
     if (drawing) {
@@ -141,14 +151,23 @@ export function AnnotationEditor({
     draw();
   }, [imageReady, draw]);
 
-  const hitTest = (mx: number, my: number, canvas: HTMLCanvasElement): number | null => {
+  const hitTest = (mx: number, my: number, canvas: HTMLCanvasElement): { idx: number; handle?: ResizeHandle } | null => {
+    const handles: [ResizeHandle, number, number][] = [];
     for (let i = boxes.length - 1; i >= 0; i--) {
       const b = boxes[i];
       const x = (b.x_center - b.width / 2) * canvas.width;
       const y = (b.y_center - b.height / 2) * canvas.height;
       const w = b.width * canvas.width;
       const h = b.height * canvas.height;
-      if (mx >= x && mx <= x + w && my >= y && my <= y + h) return i;
+      handles.push(
+        ["nw", x, y], ["n", x + w / 2, y], ["ne", x + w, y],
+        ["e", x + w, y + h / 2], ["se", x + w, y + h],
+        ["s", x + w / 2, y + h], ["sw", x, y + h], ["w", x, y + h / 2],
+      );
+      const handle = handles.find(([, hx, hy]) => Math.abs(mx - hx) <= 10 && Math.abs(my - hy) <= 10);
+      if (handle) return { idx: i, handle: handle[0] };
+      if (mx >= x && mx <= x + w && my >= y && my <= y + h) return { idx: i };
+      handles.length = 0;
     }
     return null;
   };
@@ -163,8 +182,15 @@ export function AnnotationEditor({
     const my = (e.clientY - rect.top) * scaleY;
     const hit = hitTest(mx, my, canvas);
     if (hit !== null) {
-      setSelectedIdx(hit);
-      setDrag({ idx: hit, mode: "move", ox: mx, oy: my });
+      setSelectedIdx(hit.idx);
+      setDrag({
+        idx: hit.idx,
+        mode: hit.handle ? "resize" : "move",
+        handle: hit.handle,
+        startX: mx,
+        startY: my,
+        initial: boxes[hit.idx],
+      });
     } else {
       setSelectedIdx(null);
       setDrawing({ x: mx, y: my });
@@ -181,14 +207,24 @@ export function AnnotationEditor({
     const my = (e.clientY - rect.top) * scaleY;
 
     if (drag) {
-      const dx = (mx - drag.ox) / canvas.width;
-      const dy = (my - drag.oy) / canvas.height;
+      const dx = (mx - drag.startX) / canvas.width;
+      const dy = (my - drag.startY) / canvas.height;
       setBoxes((prev) =>
         prev.map((b, i) =>
-          i === drag.idx ? { ...b, x_center: b.x_center + dx, y_center: b.y_center + dy } : b
+          i !== drag.idx
+            ? b
+            : drag.mode === "move"
+              ? moveBox(drag.initial, dx, dy)
+              : resizeBox(
+                  drag.initial,
+                  drag.handle!,
+                  Math.max(0, Math.min(1, mx / canvas.width)),
+                  Math.max(0, Math.min(1, my / canvas.height)),
+                  8 / canvas.width,
+                  8 / canvas.height,
+                )
         )
       );
-      setDrag({ ...drag, ox: mx, oy: my });
       markDirty();
     } else if (drawing) {
       const ctx = canvas.getContext("2d");
@@ -216,8 +252,8 @@ export function AnnotationEditor({
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const mx = (e.clientX - rect.left) * scaleX;
-    const my = (e.clientY - rect.top) * scaleY;
+    const mx = Math.max(0, Math.min(canvas.width, (e.clientX - rect.left) * scaleX));
+    const my = Math.max(0, Math.min(canvas.height, (e.clientY - rect.top) * scaleY));
 
     if (drawing) {
       const x1 = Math.min(drawing.x, mx);
@@ -263,26 +299,35 @@ export function AnnotationEditor({
       confidence: 1,
     }));
 
-  const save = (status: string) => {
-    if (taskType === "classify") {
-      onSave(classLabel !== null ? [{ class_id: classLabel }] : [], status);
-    } else {
-      onSave(toPayload(), status);
+  const save = async (status: string) => {
+    if (saving) return;
+    setSaving(true);
+    setSaveError("");
+    try {
+      if (taskType === "classify") {
+        await onSave(classLabel !== null ? [{ class_id: classLabel }] : [], status);
+      } else {
+        await onSave(toPayload(), status);
+      }
+      clearDirty();
+    } catch (error) {
+      setSaveError(String(error));
+    } finally {
+      setSaving(false);
     }
-    clearDirty();
   };
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (e.key === "y" || e.key === "Y") save("human_ok");
-      if (e.key === "n" || e.key === "N") save("human_wrong");
+      if (e.key === "y" || e.key === "Y") void save("human_ok");
+      if (e.key === "n" || e.key === "N") void save("human_wrong");
       if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         deleteSelected();
       }
-      if (e.key === "0") save("no_target");
+      if (e.key === "0") void save("no_target");
       if (e.key >= "1" && e.key <= "9") {
         const classId = Number(e.key) - 1;
         if (categories.some((c) => c.class_id === classId)) setSelectedClass(classId);
@@ -306,11 +351,12 @@ export function AnnotationEditor({
               {c.name}
             </button>
           ))}
-          <button className="btn-secondary" onClick={() => save("no_target")}>无目标</button>
+          <button className="btn-secondary" disabled={saving} onClick={() => void save("no_target")}>无目标</button>
         </div>
+        {saveError && <p className="mt-3 text-sm text-red-600">保存失败，修改已保留：{saveError}</p>}
         <div className="mt-4 flex gap-2">
-          <button className="btn-primary" onClick={() => save("human_ok")}>Y 确认 (保存)</button>
-          <button className="btn-secondary" onClick={() => save("human_wrong")}>N 驳回</button>
+          <button className="btn-primary" disabled={saving} onClick={() => void save("human_ok")}>{saving ? "保存中…" : "Y 确认 (保存)"}</button>
+          <button className="btn-secondary" disabled={saving} onClick={() => void save("human_wrong")}>N 驳回</button>
         </div>
       </div>
     );
@@ -363,12 +409,13 @@ export function AnnotationEditor({
         />
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
-        <button className="btn-primary" onClick={() => save("human_ok")}>Y 确认 (保存)</button>
-        <button className="btn-secondary" onClick={() => save("human_wrong")}>N 驳回 (保存)</button>
-        <button className="btn-secondary" onClick={() => save("no_target")}>无目标</button>
+        <button className="btn-primary" disabled={saving} onClick={() => void save("human_ok")}>{saving ? "保存中…" : "Y 确认 (保存)"}</button>
+        <button className="btn-secondary" disabled={saving} onClick={() => void save("human_wrong")}>N 驳回 (保存)</button>
+        <button className="btn-secondary" disabled={saving} onClick={() => void save("no_target")}>无目标</button>
       </div>
+      {saveError && <p className="mt-2 text-sm text-red-500">保存失败，修改已保留：{saveError}</p>}
       <p className="mt-2 text-xs text-slate-500">
-        操作：空白处拖拽画新框 · 点击框选中后拖动/删除 · 快捷键 Y/N/Del
+        操作：空白处拖拽画新框 · 拖动框移动 · 拖动八个白色控制点缩放 · 快捷键 Y/N/Del
       </p>
     </div>
   );

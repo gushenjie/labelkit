@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CreateProjectModal } from "@/components/CreateProjectModal";
 import { Icon } from "@/components/Icon";
@@ -82,6 +83,7 @@ function HomeSkeleton() {
 }
 
 export default function HomePage() {
+  const router = useRouter();
   const confirm = useConfirm();
   const { toast } = useToast();
   const { recentTasks, runningTasks } = useTaskTray();
@@ -120,26 +122,13 @@ export default function HomePage() {
     else setLoading(true);
     setError("");
     try {
-      const [projects, settings] = await Promise.all([api.listProjects(), api.getSettings()]);
+      const [overviews, settings] = await Promise.all([api.listProjectOverviews(), api.getSettings()]);
       setApiKeyMissing(!settings.dashscope_api_key_set);
-      const enriched = await Promise.all(
-        projects.map(async (project) => {
-          const [statsResult, previewResult] = await Promise.allSettled([
-            api.frameStats(project.id),
-            project.frame_count > 0
-              ? api.listFrames(project.id, undefined, "recent", 1)
-              : Promise.resolve([]),
-          ]);
-          const stats = statsResult.status === "fulfilled"
-            ? statsResult.value
-            : { total: project.frame_count };
-          const previewFrameId = previewResult.status === "fulfilled"
-            ? previewResult.value[0]?.id
-            : undefined;
-          return { project, stats, previewFrameId };
-        }),
-      );
-      setItems(enriched);
+      setItems(overviews.map(({ project, stats, preview_frame_id }) => ({
+        project,
+        stats,
+        previewFrameId: preview_frame_id ?? undefined,
+      })));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "项目数据加载失败");
     } finally {
@@ -549,7 +538,14 @@ export default function HomePage() {
         </div>
       )}
 
-      <CreateProjectModal open={createModalOpen} onClose={closeCreateModal} />
+      <CreateProjectModal
+        open={createModalOpen}
+        onClose={closeCreateModal}
+        onCreated={(project) => {
+          setCreateModalOpen(false);
+          router.push(`/projects/${project.id}`);
+        }}
+      />
     </div>
   );
 }

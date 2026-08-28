@@ -17,6 +17,8 @@ const TASK_LABEL: Record<string, string> = {
   relabel: "YOLO 半自动",
   import: "导入数据",
   derive_classify: "生成分类集",
+  public_fetch: "公开数据下载分析",
+  public_import: "公开数据发布",
 };
 
 export default function TasksPage() {
@@ -26,7 +28,10 @@ export default function TasksPage() {
 
   useEffect(() => {
     if (!id) return;
-    const load = () => api.listTasks(id).then(setTasks);
+    const load = () => api.listTasks(id).then((nextTasks) => {
+      setTasks(nextTasks);
+      setSelected((current) => current ? nextTasks.find((task) => task.id === current.id) ?? current : null);
+    });
     load();
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
@@ -80,8 +85,14 @@ export default function TasksPage() {
               )}
               {selected.error && <p className="mt-2 text-danger-600">{selected.error}</p>}
               {selected.status === "running" && id && (
-                <button className="btn-secondary mt-3" onClick={() => api.cancelTask(id, selected.id)}>取消任务</button>
+                <button className="btn-secondary mt-3" disabled={selected.cancel_requested} onClick={() => api.cancelTask(id, selected.id)}>
+                  {selected.cancel_requested ? "取消中…" : "取消任务"}
+                </button>
               )}
+              {["failed", "cancelled", "interrupted"].includes(selected.status) && id && (
+                <button className="btn-secondary mt-3" onClick={() => api.retryTask(id, selected.id)}>创建重试任务</button>
+              )}
+              {selected.retry_of_task_id && <p className="mt-2 text-xs text-subtle">重试来源：{selected.retry_of_task_id}</p>}
             </div>
           )}
           </PanelSection>

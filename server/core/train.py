@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
+import threading
+from collections import deque
+from datetime import datetime, timezone
+from queue import Empty, Queue
 from collections.abc import Callable
 from pathlib import Path
 
 import yaml
 from sqlalchemy.orm import Session
 
-from server.core.paths import exports_dir, frames_dir, labels_dir, models_dir
+from server.core.dataset_service import DatasetService, DatasetVersionRepository
+from server.core.paths import exports_dir, label_path_for_frame, models_dir
 from server.db.models import Category, Frame, FrameStatus, ModelVersion, Project, ProjectTaskType, Task
 
 
@@ -63,7 +69,7 @@ def prepare_dataset(
         lbl_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(img_src, img_dst)
 
-        lbl_src = labels_dir(project.id, frame.split) / f"{img_src.stem}.txt"
+        lbl_src = label_path_for_frame(project.id, frame)
         if lbl_src.exists():
             shutil.copy2(lbl_src, lbl_dst)
         else:
@@ -113,82 +119,184 @@ def prepare_classify_dataset(
     return stats
 
 
-def run_train_task(db: Session, task: Task, *, log: Callable[[str], None] | None = None) -> None:
+def _terminate_process_tree(pid: int, timeout: float = 5.0) -> None:
+    import psutil
+
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    processes = parent.children(recursive=True) + [parent]
+    for process in processes:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(processes, timeout=timeout)
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            pass
+    psutil.wait_procs(alive, timeout=timeout)
+
+
+def run_train_task(
+    db: Session,
+    task: Task,
+    *,
+    log: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     project = db.get(Project, task.project_id)
     params = task.params
     epochs = int(params.get("epochs", 80))
     imgsz = int(params.get("imgsz", 640))
     batch = int(params.get("batch", 8))
-    device = params.get("device", "mps")
-    base_model = params.get("base_model", "yolov8s.pt")
+    workers = int(params.get("workers", 0))
+    device = params.get("device", "auto")
+    requested_model = (params.get("base_model") or "").strip()
     val_ratio = float(params.get("val_ratio", 0.2))
-    run_name = params.get("run_name", "labelkit_train")
+    run_name = f"task_{task.id}"
 
     dataset_dir = exports_dir(project.id) / f"train_{task.id}"
     dataset_dir.mkdir(parents=True, exist_ok=True)
+    dataset_service = DatasetService(DatasetVersionRepository(db))
+    requested_version_id = (params.get("dataset_version_id") or "").strip()
+    dataset_version = (
+        dataset_service.get_version(project.id, requested_version_id)
+        if requested_version_id
+        else dataset_service.create_version(project.id, project.task_type, val_ratio=val_ratio)
+    )
+    db.commit()
+    try:
+        stats = dataset_service.materialize(dataset_version, dataset_dir, cancelled=cancelled)
+    except Exception:
+        if dataset_dir.exists():
+            shutil.rmtree(dataset_dir)
+        raise
 
     if project.task_type == ProjectTaskType.CLASSIFY:
-        stats = prepare_classify_dataset(db, project, dataset_dir, val_ratio=val_ratio)
+        base_model = requested_model or "yolov8s-cls.pt"
+        if base_model == "yolov8s.pt":
+            base_model = "yolov8s-cls.pt"
         if stats["total"] < 10:
             raise RuntimeError(f"可训练样本过少: {stats['total']}")
         if log:
             log(f"分类数据集: {stats}")
-        script = f"""
-from ultralytics import YOLO
-model = YOLO("{base_model}")
-results = model.train(data="{dataset_dir}", epochs={epochs}, imgsz={imgsz}, batch={batch}, device="{device}", project="{exports_dir(project.id)}", name="{run_name}")
-print("METRICS:", results.results_dict if hasattr(results, 'results_dict') else {{}})
-"""
+        data_path = dataset_dir
     else:
-        stats = prepare_dataset(db, project, dataset_dir, val_ratio=val_ratio)
+        base_model = requested_model or "yolov8s.pt"
         if stats["total"] < 10:
             raise RuntimeError(f"可训练样本过少: {stats['total']}")
         if log:
             log(f"检测数据集: {stats}")
-        data_yaml = dataset_dir / "dataset.yaml"
-        script = f"""
-from ultralytics import YOLO
-model = YOLO("{base_model}")
-results = model.train(data="{data_yaml}", epochs={epochs}, imgsz={imgsz}, batch={batch}, device="{device}", project="{exports_dir(project.id)}", name="{run_name}")
-print("METRICS:", results.results_dict if hasattr(results, 'results_dict') else {{}})
-"""
+        data_path = dataset_dir / "dataset.yaml"
 
     task.total = epochs
     db.commit()
     if log:
         log("开始训练...")
 
-    proc = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
+    output_root = exports_dir(project.id) / "training_runs"
+    output_root.mkdir(parents=True, exist_ok=True)
+    request_path = dataset_dir / "training-request.json"
+    metrics_path = dataset_dir / "training-metrics.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "mode": project.task_type.value,
+                "base_model": base_model,
+                "data": str(data_path.resolve()),
+                "epochs": epochs,
+                "imgsz": imgsz,
+                "batch": batch,
+                "workers": workers,
+                "device": device,
+                "output_root": str(output_root.resolve()),
+                "run_name": run_name,
+                "metrics_path": str(metrics_path.resolve()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    training_log = dataset_dir / "training.log"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "server.core.train_entry", "--params", str(request_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
         cwd=str(Path(__file__).resolve().parent.parent.parent),
     )
-    output = proc.stdout + proc.stderr
-    if log:
-        log(output[-4000:])
+    tail: deque[str] = deque(maxlen=40)
+    line_queue: Queue[str | None] = Queue()
 
-    if proc.returncode != 0:
-        raise RuntimeError(f"Training failed: {output[-1000:]}")
+    def read_output() -> None:
+        assert proc.stdout is not None
+        try:
+            for output_line in proc.stdout:
+                line_queue.put(output_line)
+        finally:
+            line_queue.put(None)
 
-    run_dir = exports_dir(project.id) / run_name / "weights" / "best.pt"
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    was_cancelled = False
+    with training_log.open("w", encoding="utf-8") as output_file:
+        while True:
+            if cancelled and cancelled() and not was_cancelled:
+                was_cancelled = True
+                _terminate_process_tree(proc.pid)
+            try:
+                line = line_queue.get(timeout=0.2)
+            except Empty:
+                if proc.poll() is not None and not reader.is_alive():
+                    break
+                continue
+            if line is None:
+                break
+            output_file.write(line)
+            output_file.flush()
+            tail.append(line.rstrip())
+            epoch_match = re.match(r"^\s*(\d+)\s*/\s*(\d+)\b", line)
+            if epoch_match:
+                task.progress = min(int(epoch_match.group(1)), epochs)
+                task.heartbeat_at = datetime.now(timezone.utc)
+                db.commit()
+    reader.join(timeout=1.0)
+    returncode = proc.wait()
+
+    if was_cancelled:
+        run_output_dir = output_root / run_name
+        if run_output_dir.exists():
+            shutil.rmtree(run_output_dir)
+        if dataset_dir.exists():
+            shutil.rmtree(dataset_dir)
+        if log:
+            log("训练已取消，训练进程树已终止")
+        return
+
+    if returncode != 0:
+        raise RuntimeError("Training failed:\n" + "\n".join(list(tail)[-12:]))
+
+    run_output_dir = output_root / run_name
+    run_dir = run_output_dir / "weights" / "best.pt"
     if not run_dir.exists():
-        candidates = list((exports_dir(project.id) / run_name).rglob("best.pt"))
-        if not candidates:
-            raise RuntimeError("best.pt not found after training")
-        run_dir = candidates[0]
+        raise RuntimeError(f"Current task best.pt not found: {run_dir}")
 
     version = db.query(ModelVersion).filter(ModelVersion.project_id == project.id).count() + 1
     out_path = models_dir(project.id) / f"v{version}_best.pt"
     shutil.copy2(run_dir, out_path)
 
-    metrics = {}
-    for line in output.splitlines():
-        if "METRICS:" in line:
-            try:
-                metrics = json.loads(line.split("METRICS:", 1)[1].strip().replace("'", '"'))
-            except Exception:
-                metrics = {"raw": line}
+    if not metrics_path.exists():
+        raise RuntimeError("Training metrics file not found")
+    metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics = metrics_payload.get("metrics", {})
 
     mv = ModelVersion(
         project_id=project.id,
@@ -196,10 +304,21 @@ print("METRICS:", results.results_dict if hasattr(results, 'results_dict') else 
         name=f"v{version}",
         filepath=str(out_path),
         metrics=metrics,
-        dataset_snapshot=stats,
+        dataset_snapshot={**stats, "base_model": base_model, "output_dir": str(run_output_dir)},
         task_id=task.id,
+        dataset_version_id=dataset_version.id,
     )
     db.add(mv)
     task.progress = epochs
-    task.result = {"model_path": str(out_path), "version": version, "metrics": metrics, "dataset": stats}
+    task.result = {
+        "model_path": str(out_path),
+        "version": version,
+        "metrics": metrics,
+        "dataset": stats,
+        "dataset_version_id": dataset_version.id,
+        "base_model": base_model,
+        "device": metrics_payload.get("device", device),
+        "output_dir": str(run_output_dir),
+        "log_path": str(training_log),
+    }
     db.commit()

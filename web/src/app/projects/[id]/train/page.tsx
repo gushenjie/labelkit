@@ -36,7 +36,7 @@ export default function TrainPage() {
   const [epochs, setEpochs] = useState(80);
   const [imgsz, setImgsz] = useState(640);
   const [batch, setBatch] = useState(8);
-  const [device, setDevice] = useState("mps");
+  const [device, setDevice] = useState("auto");
   const [stats, setStats] = useState<Record<string, number>>({});
   const [starting, setStarting] = useState(false);
   const [exportDir, setExportDir] = useState("");
@@ -112,7 +112,6 @@ export default function TrainPage() {
         imgsz,
         batch,
         device,
-        base_model: "yolov8s.pt",
         val_ratio: valRatio / 100,
       });
       refresh();
@@ -257,7 +256,9 @@ export default function TrainPage() {
             </PanelSection>
 
             <PanelSection title="训练参数">
-              <p className="text-xs text-subtle">基于 YOLOv8s 预训练权重，在本项目数据上微调</p>
+              <p className="text-xs text-subtle">
+                基于 {project?.task_type === "classify" ? "YOLOv8s-cls" : "YOLOv8s"} 预训练权重，在本项目数据上微调
+              </p>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted">训练轮数</label>
@@ -274,6 +275,7 @@ export default function TrainPage() {
                 <div>
                   <label className="text-xs text-muted">计算设备</label>
                   <select className="input" value={device} onChange={(e) => setDevice(e.target.value)}>
+                    <option value="auto">自动选择（CUDA → MPS → CPU）</option>
                     <option value="mps">Apple GPU (MPS)</option>
                     <option value="cpu">CPU（较慢）</option>
                     <option value="0">NVIDIA GPU (CUDA)</option>

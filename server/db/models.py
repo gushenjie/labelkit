@@ -42,6 +42,8 @@ class TaskType(str, enum.Enum):
     RELABEL = "relabel"
     IMPORT = "import"
     DERIVE_CLASSIFY = "derive_classify"
+    PUBLIC_FETCH = "public_fetch"
+    PUBLIC_IMPORT = "public_import"
 
 
 class TaskStatus(str, enum.Enum):
@@ -51,6 +53,7 @@ class TaskStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 class FrameStatus(str, enum.Enum):
@@ -90,6 +93,10 @@ class Project(Base):
     frames: Mapped[list[Frame]] = relationship(back_populates="project", cascade="all, delete-orphan")
     tasks: Mapped[list[Task]] = relationship(back_populates="project", cascade="all, delete-orphan")
     models: Mapped[list[ModelVersion]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    dataset_versions: Mapped[list[DatasetVersion]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    public_dataset_imports: Mapped[list[PublicDatasetImport]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
 
 
 class Category(Base):
@@ -102,6 +109,7 @@ class Category(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     color: Mapped[str] = mapped_column(String(20), default="#FF8C00")
     required: Mapped[bool] = mapped_column(Boolean, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     project: Mapped[Project] = relationship(back_populates="categories")
 
@@ -112,6 +120,7 @@ class Video(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    storage_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     filepath: Mapped[str] = mapped_column(String(1000), nullable=False)
     duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     fps: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -130,6 +139,11 @@ class Frame(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id", ondelete="SET NULL"), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    storage_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    source_group_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    public_import_id: Mapped[str | None] = mapped_column(
+        ForeignKey("public_dataset_imports.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     filepath: Mapped[str] = mapped_column(String(1000), nullable=False)
     split: Mapped[str] = mapped_column(String(20), default="train")
     phash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -147,6 +161,7 @@ class Frame(Base):
     project: Mapped[Project] = relationship(back_populates="frames")
     video: Mapped[Video | None] = relationship(back_populates="frames")
     annotations: Mapped[list[Annotation]] = relationship(back_populates="frame", cascade="all, delete-orphan")
+    public_import: Mapped[PublicDatasetImport | None] = relationship(back_populates="frames")
 
 
 class Annotation(Base):
@@ -179,6 +194,9 @@ class Task(Base):
     result: Mapped[dict] = mapped_column(JSON, default=dict)
     log: Mapped[str] = mapped_column(Text, default="")
     error: Mapped[str] = mapped_column(Text, default="")
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retry_of_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -197,6 +215,73 @@ class ModelVersion(Base):
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     dataset_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    dataset_version_id: Mapped[str | None] = mapped_column(ForeignKey("dataset_versions.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     project: Mapped[Project] = relationship(back_populates="models")
+
+
+class DatasetVersion(Base):
+    __tablename__ = "dataset_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ready")
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    categories: Mapped[list] = mapped_column(JSON, default=list)
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    snapshot_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    project: Mapped[Project] = relationship(back_populates="dataset_versions")
+
+
+class PublicDatasetImport(Base):
+    __tablename__ = "public_dataset_imports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_version: Mapped[str] = mapped_column(String(100), default="")
+    source_url: Mapped[str] = mapped_column(String(1000), default="")
+    title: Mapped[str] = mapped_column(String(500), default="")
+    license_name: Mapped[str] = mapped_column(String(200), default="unknown")
+    license_url: Mapped[str] = mapped_column(String(1000), default="")
+    license_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    license_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    state: Mapped[str] = mapped_column(String(40), default="created", index=True)
+    expected_download_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actual_download_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    extracted_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    artifact_checksum: Mapped[str] = mapped_column(String(64), default="")
+    detected_format: Mapped[str] = mapped_column(String(40), default="")
+    detected_root: Mapped[str] = mapped_column(String(1000), default="")
+    source_classes: Mapped[list] = mapped_column(JSON, default=list)
+    class_mapping: Mapped[dict] = mapped_column(JSON, default=dict)
+    quality_report: Mapped[dict] = mapped_column(JSON, default=dict)
+    review_frame_ids: Mapped[list] = mapped_column(JSON, default=list)
+    workflow_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    staging_path: Mapped[str] = mapped_column(String(1000), default="")
+    fetch_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    import_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    dataset_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("dataset_versions.id"), nullable=True
+    )
+    train_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    project: Mapped[Project] = relationship(back_populates="public_dataset_imports")
+    frames: Mapped[list[Frame]] = relationship(back_populates="public_import")
+
+
+class ProjectExecutionLease(Base):
+    __tablename__ = "project_execution_leases"
+
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

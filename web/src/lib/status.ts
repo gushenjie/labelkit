@@ -36,6 +36,13 @@ const PENDING_REVIEW = new Set([
 const REJECTED_REVIEW = new Set(["human_wrong"]);
 const CONFIRMED_REVIEW = new Set(["human_ok", "no_target"]);
 
+export function reviewStatuses(filter: ReviewFilter): string[] {
+  if (filter === "pending") return [...PENDING_REVIEW];
+  if (filter === "rejected") return [...REJECTED_REVIEW];
+  if (filter === "confirmed") return [...CONFIRMED_REVIEW];
+  return [...PENDING_REVIEW, ...REJECTED_REVIEW, ...CONFIRMED_REVIEW];
+}
+
 export function countPendingReview(stats: Record<string, number>): number {
   return (
     (stats.auto_ok ?? 0) +

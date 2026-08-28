@@ -75,7 +75,7 @@ def run_review_task(db: Session, task: Task, *, cancelled: Callable[[], bool] | 
     db.commit()
     pass_n = fail_n = 0
 
-    from server.core.paths import cache_dir, labels_dir
+    from server.core.paths import cache_dir, label_path_for_frame
     review_path = cache_dir(project.id) / "review_images"
     review_path.mkdir(parents=True, exist_ok=True)
 
@@ -98,7 +98,7 @@ def run_review_task(db: Session, task: Task, *, cancelled: Callable[[], bool] | 
             task.progress = i + 1
             continue
 
-        lbl_path = labels_dir(project.id, frame.split) / f"{Path(frame.filename).stem}.txt"
+        lbl_path = label_path_for_frame(project.id, frame)
         img = cv2.imread(frame.filepath)
         if img is None:
             fail_n += 1

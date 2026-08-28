@@ -3,13 +3,13 @@
 import type { CSSProperties, FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
 import { Icon } from "@/components/Icon";
-import { api, Category } from "@/lib/api";
+import { api, Category, Project } from "@/lib/api";
 
 type CreateProjectModalProps = {
   open: boolean;
   onClose: () => void;
+  onCreated: (project: Project) => void;
 };
 
 const CATEGORY_COLORS = ["#12A88F", "#1570EF", "#EC6B18", "#7F56D9", "#DC6803", "#0E9384"];
@@ -24,8 +24,7 @@ function createCategory(index: number): Category {
   };
 }
 
-export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
-  const router = useRouter();
+export function CreateProjectModal({ open, onClose, onCreated }: CreateProjectModalProps) {
   const nameInputRef = useRef<HTMLInputElement>(null);
   const modalRef = useRef<HTMLFormElement>(null);
   const onCloseRef = useRef(onClose);
@@ -158,8 +157,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           required: index === 0,
         })),
       });
-      onClose();
-      router.push(`/projects/${project.id}`);
+      onCreated(project);
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "项目创建失败，请稍后重试");
     } finally {

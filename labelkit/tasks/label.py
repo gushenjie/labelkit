@@ -6,7 +6,7 @@ import os
 
 import cv2
 
-from labelkit.backends import boxes_to_yolo_dict, get_backend
+from labelkit.backends import boxes_to_yolo_labels, get_backend
 from labelkit.config import ProjectConfig
 from labelkit.datasets import iter_target_frames
 from labelkit.rules import check_rules
@@ -63,8 +63,8 @@ def run_label(
                     vlm = VlmBackend(config)
                     boxes = vlm.propose(frame.image_path)
 
-            yolo_boxes = boxes_to_yolo_dict(boxes, iw, ih)
-            if 0 not in yolo_boxes:
+            yolo_boxes = boxes_to_yolo_labels(boxes, iw, ih)
+            if not any(label[0] == 0 for label in yolo_boxes):
                 store.update(frame.id, FrameStatus.NEEDS_HUMAN, note="missing bucket", source=backend_name)
                 fail += 1
                 continue

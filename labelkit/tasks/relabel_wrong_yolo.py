@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import cv2
 
-from labelkit.backends import boxes_to_yolo_dict, get_backend
+from labelkit.backends import boxes_to_yolo_labels, get_backend
 from labelkit.config import ProjectConfig
 from labelkit.datasets import list_frames
 from labelkit.rules import check_rules
@@ -36,8 +36,8 @@ def run_relabel_wrong_yolo(
                 continue
             ih, iw = img.shape[:2]
             boxes = backend.propose(frame.image_path)
-            yolo_boxes = boxes_to_yolo_dict(boxes, iw, ih)
-            if 0 not in yolo_boxes:
+            yolo_boxes = boxes_to_yolo_labels(boxes, iw, ih)
+            if not any(label[0] == 0 for label in yolo_boxes):
                 store.update(
                     frame.id,
                     FrameStatus.HUMAN_WRONG,
