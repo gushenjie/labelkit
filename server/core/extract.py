@@ -7,6 +7,8 @@ from typing import Callable
 
 import cv2
 
+from server.core.image_io import open_video_capture, write_image_bgr
+
 
 def extract_frames(
     video_path: Path,
@@ -18,7 +20,7 @@ def extract_frames(
     on_progress: Callable[[int, int], None] | None = None,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    cap = cv2.VideoCapture(str(video_path))
+    cap = open_video_capture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
 
@@ -35,7 +37,9 @@ def extract_frames(
             break
         if frame_no % interval == 0:
             out = output_dir / f"{prefix}_{idx:06d}.jpg"
-            cv2.imwrite(str(out), frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            write_image_bgr(out, frame, quality=92)
+            if not out.is_file():
+                raise RuntimeError(f"抽帧写入失败: {out}")
             saved.append(out)
             idx += 1
             if on_progress:

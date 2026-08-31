@@ -16,6 +16,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from server.config import settings
+from server.core.image_io import read_image_bgr
 from server.core.paths import cache_dir
 from server.core.yolo_io import YoloLabel, xywh_to_yolo
 from server.db.models import Category, Frame, FrameStatus, Project, ProjectTaskType
@@ -134,7 +135,7 @@ def call_vlm(image_path: Path, prompt: str, cache_key: str | None = None, projec
 
     from openai import OpenAI
 
-    img = cv2.imread(str(image_path))
+    img = read_image_bgr(image_path)
     if img is None:
         raise ValueError(f"Cannot read {image_path}")
     resized, _ = _resize_for_vlm(img)
@@ -167,7 +168,7 @@ def call_vlm(image_path: Path, prompt: str, cache_key: str | None = None, projec
 
 
 def propose_detect(project: Project, categories: list[Category], image_path: Path) -> tuple[list[ProposedBox], str]:
-    img = cv2.imread(str(image_path))
+    img = read_image_bgr(image_path)
     if img is None:
         raise ValueError(f"Cannot read {image_path}")
     ih, iw = img.shape[:2]
@@ -224,11 +225,12 @@ def propose_classify(project: Project, categories: list[Category], image_path: P
     return cls_id, float(result.get("confidence", 0.9)), result.get("note", "")
 
 
-def propose_yolo(model_path: Path, image_path: Path, conf: float = 0.25) -> list[ProposedBox]:
+def propose_yolo(model_path: Path, image: Path | np.ndarray, conf: float = 0.25) -> list[ProposedBox]:
     from ultralytics import YOLO
 
     model = YOLO(str(model_path))
-    results = model.predict(str(image_path), conf=conf, verbose=False)
+    source = image if isinstance(image, np.ndarray) else str(image)
+    results = model.predict(source=source, conf=conf, verbose=False)
     out: list[ProposedBox] = []
     if not results or results[0].boxes is None:
         return out

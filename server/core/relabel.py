@@ -6,9 +6,11 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-import cv2
+from pathlib import Path
+
 from sqlalchemy.orm import Session
 
+from server.core.image_io import read_image_bgr
 from server.core.labeling import boxes_to_yolo_labels, propose_yolo
 from server.core.paths import label_path_for_frame
 from server.core.yolo_io import YoloLabel, write_labels
@@ -124,12 +126,13 @@ def run_relabel_task(db: Session, task: Task, *, cancelled: Callable[[], bool] |
             break
         was_unlabeled = frame.status == FrameStatus.UNLABELED
         try:
-            img = cv2.imread(frame.filepath)
+            img_path = Path(frame.filepath)
+            img = read_image_bgr(img_path)
             if img is None:
                 fail += 1
                 continue
             ih, iw = img.shape[:2]
-            boxes = propose_yolo(model_path, Path(frame.filepath), conf=conf)
+            boxes = propose_yolo(model_path, img, conf=conf)
             yolo_labels = boxes_to_yolo_labels(boxes, iw, ih)
             _apply_yolo_result(db, frame, project, boxes, yolo_labels, was_unlabeled=was_unlabeled)
             ok += 1

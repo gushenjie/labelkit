@@ -20,6 +20,7 @@ type Props = {
   loading?: boolean;
   onUpload?: (file: File) => void;
   uploadDisabled?: boolean;
+  showSummary?: boolean;
 };
 
 function pickImageFile(dataTransfer: DataTransfer): File | null {
@@ -42,6 +43,7 @@ export function ModelTrialPreview({
   loading,
   onUpload,
   uploadDisabled = false,
+  showSummary = true,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -151,9 +153,11 @@ export function ModelTrialPreview({
       {...dropZoneProps}
     >
       <canvas ref={canvasRef} className="model-trial-preview__canvas" aria-label="模型检测结果预览" />
-      <p className="model-trial-preview__summary" data-testid="model-trial-result">
-        {loading ? "正在分析…" : boxes.length > 0 ? `检测到 ${boxes.length} 个目标` : "未检测到目标"}
-      </p>
+      {showSummary && (
+        <p className="model-trial-preview__summary" data-testid="model-trial-result">
+          {loading ? "正在分析…" : boxes.length > 0 ? `检测到 ${boxes.length} 个目标` : "未检测到目标"}
+        </p>
+      )}
       {canUpload && !loading && (
         <p className="model-trial-preview__hint">可继续拖拽图片替换检测</p>
       )}

@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 from sqlalchemy.orm import Session
 
+from server.core.image_io import read_image_bgr, write_image_bgr
 from server.core.paths import frames_dir, label_path_for_frame
 from server.core.yolo_io import parse_labels, yolo_to_xywh
 from server.db.models import Annotation, Category, Frame, FrameStatus, Project, ProjectTaskType, Task
@@ -82,7 +83,7 @@ def run_derive_classify_task(
             if not source_labels:
                 continue
 
-            img = cv2.imread(src_frame.filepath)
+            img = read_image_bgr(Path(src_frame.filepath))
             if img is None:
                 continue
             ih, iw = img.shape[:2]
@@ -96,8 +97,7 @@ def run_derive_classify_task(
                 storage_key = uuid.uuid4().hex
                 out_dir = frames_dir(project.id, "train")
                 out_path = out_dir / f"{storage_key}.jpg"
-                if not cv2.imwrite(str(out_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 92]):
-                    raise RuntimeError(f"Cannot write derived crop: {out_path}")
+                write_image_bgr(out_path, crop, quality=92)
                 created_paths.append(out_path)
 
                 frame = Frame(

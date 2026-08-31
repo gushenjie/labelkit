@@ -309,9 +309,19 @@ def update_annotations(project_id: str, frame_id: str, body: AnnotationsUpdate, 
 
 @router.get("/label/estimate", response_model=LabelEstimate)
 def label_estimate(project_id: str, db: Session = Depends(get_db)):
-    count = db.query(Frame).filter(
-        Frame.project_id == project_id,
-        Frame.status == FrameStatus.UNLABELED,
-    ).count()
+    count = (
+        db.query(Frame)
+        .filter(
+            Frame.project_id == project_id,
+            or_(
+                Frame.status == FrameStatus.UNLABELED,
+                and_(
+                    Frame.status == FrameStatus.NEEDS_HUMAN,
+                    ~Frame.annotations.any(),
+                ),
+            ),
+        )
+        .count()
+    )
     cost = settings.vlm_cost_per_image
     return LabelEstimate(frame_count=count, cost_per_image=cost, estimated_cost=round(count * cost, 2))

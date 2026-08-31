@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import cv2
 from sqlalchemy.orm import Session
 
 from server.config import settings
+from server.core.image_io import read_image_bgr
 from server.core.labeling import (
     boxes_to_yolo_labels,
     propose_classify,
@@ -72,6 +72,15 @@ def _resolve_label_frames(
         q = q.filter(~Frame.status.in_(CONFIRMED))
     if only_status == "pending":
         q = q.filter(Frame.status.in_(LLM_PENDING_STATUSES))
+    elif only_status == FrameStatus.UNLABELED.value:
+        # 读取失败会落在 NEEDS_HUMAN 且无标注，允许再次发起 LLM 标注重试。
+        q = q.filter(
+            (Frame.status == FrameStatus.UNLABELED)
+            | (
+                (Frame.status == FrameStatus.NEEDS_HUMAN)
+                & ~Frame.annotations.any()
+            )
+        )
     elif only_status:
         q = q.filter(Frame.status == FrameStatus(only_status))
     return q.order_by(Frame.uncertainty.desc(), Frame.created_at).all()
@@ -127,7 +136,7 @@ def run_label_task(db: Session, task: Task, *, is_cancelled: Callable[[], bool] 
             raise RuntimeError(f"Image file missing: {img_path}")
         if project_input.task_type == ProjectTaskType.CLASSIFY:
             return ("classify", propose_classify(project_input, category_inputs, img_path))
-        img = cv2.imread(str(img_path))
+        img = read_image_bgr(img_path)
         if img is None:
             raise RuntimeError(f"Cannot read image: {img_path}")
         ih, iw = img.shape[:2]
@@ -211,4 +220,8 @@ def run_label_task(db: Session, task: Task, *, is_cancelled: Callable[[], bool] 
             break
 
     task.result = {"ok": ok, "fail": fail, "stopped": stopped}
+    summary = f"LLM 标注完成: 成功 {ok} 张, 失败 {fail} 张"
+    if stopped:
+        summary += "（用户中断）"
+    task.log = (task.log + "\n" + summary).strip() if task.log else summary
     db.commit()

@@ -3,6 +3,7 @@
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api, Task } from "@/lib/api";
+import { formatDateTime } from "@/lib/datetime";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel, PanelSection } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -60,7 +61,7 @@ export default function TasksPage() {
                     <StatusBadge status={t.status} />
                   </div>
                   <div className="mt-1 text-xs text-subtle">
-                    {new Date(t.created_at).toLocaleString()} · {t.progress}/{t.total}
+                    {formatDateTime(t.created_at)} · {t.progress}/{t.total}
                   </div>
                 </li>
               ))}

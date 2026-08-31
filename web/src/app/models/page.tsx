@@ -28,6 +28,14 @@ function formatTrainMetric(metrics: Record<string, unknown>, ...keys: string[]):
   return null;
 }
 
+function readModelMetrics(metrics: Record<string, unknown>) {
+  return {
+    map50: formatTrainMetric(metrics, "metrics/mAP50(B)", "mAP50", "map50"),
+    precision: formatTrainMetric(metrics, "metrics/precision(B)", "precision"),
+    recall: formatTrainMetric(metrics, "metrics/recall(B)", "recall"),
+  };
+}
+
 export default function GlobalModelsPage() {
   return (
     <Suspense fallback={<p className="p-6 text-subtle">加载中…</p>}>
@@ -41,6 +49,7 @@ function GlobalModelsPageInner() {
   const projectParam = searchParams.get("project");
   const { toast } = useToast();
   const previewUrlRef = useRef<string | null>(null);
+  const lastTrialFileRef = useRef<File | null>(null);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
@@ -48,9 +57,6 @@ function GlobalModelsPageInner() {
   const [loadProjectsError, setLoadProjectsError] = useState("");
   const [models, setModels] = useState<ModelVersion[]>([]);
   const [stats, setStats] = useState<Record<string, number>>({});
-  const [uploading, setUploading] = useState(false);
-  const [displayName, setDisplayName] = useState("");
-  const [error, setError] = useState("");
 
   const [trialModelId, setTrialModelId] = useState("");
   const [preview, setPreview] = useState<string | null>(null);
@@ -64,8 +70,8 @@ function GlobalModelsPageInner() {
       setModels(m);
       setStats(s);
       setTrialModelId((prev) => (prev && m.find((x) => x.id === prev) ? prev : m[0]?.id ?? ""));
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      // 刷新失败时保留当前列表
     }
   }, [projectId]);
 
@@ -109,25 +115,10 @@ function GlobalModelsPageInner() {
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
   }, []);
 
-  const handleUpload = async (file: File) => {
-    if (!projectId) return;
-    setUploading(true);
-    setError("");
-    try {
-      await api.uploadModel(projectId, file, displayName.trim());
-      setDisplayName("");
-      await refresh();
-      toast({ type: "success", message: "模型上传成功" });
-    } catch (e) {
-      setError(String(e));
-      toast({ type: "error", message: String(e) });
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const runTrial = async (file: File) => {
-    if (!projectId || !trialModelId) return;
+  const runTrial = useCallback(async (file: File, modelId?: string) => {
+    const activeModelId = modelId ?? trialModelId;
+    if (!projectId || !activeModelId) return;
+    lastTrialFileRef.current = file;
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
     const nextPreview = URL.createObjectURL(file);
     previewUrlRef.current = nextPreview;
@@ -138,7 +129,7 @@ function GlobalModelsPageInner() {
       const fd = new FormData();
       fd.append("file", file);
       const res = await fetch(
-        `${getApiBase()}/api/projects/${projectId}/models/predict?model_id=${trialModelId}`,
+        `${getApiBase()}/api/projects/${projectId}/models/predict?model_id=${activeModelId}`,
         { method: "POST", body: fd },
       );
       if (!res.ok) {
@@ -153,27 +144,37 @@ function GlobalModelsPageInner() {
     } finally {
       setTrialLoading(false);
     }
-  };
+  }, [projectId, trialModelId, toast]);
+
+  const selectModel = useCallback((modelId: string) => {
+    setTrialModelId(modelId);
+    const cached = lastTrialFileRef.current;
+    if (cached) {
+      void runTrial(cached, modelId);
+    }
+  }, [runTrial]);
 
   const currentProject = projects.find((p) => p.id === projectId);
-  const latestModel = models[0];
+  const activeModel = models.find((m) => m.id === trialModelId) ?? models[0];
+  const activeMetrics = useMemo(
+    () => readModelMetrics(activeModel?.metrics ?? {}),
+    [activeModel],
+  );
   const rejectedCount = stats.human_wrong ?? 0;
-  const modelMetrics = latestModel?.metrics ?? {};
-  const map50 = formatTrainMetric(modelMetrics, "metrics/mAP50(B)", "mAP50", "map50");
-  const precision = formatTrainMetric(modelMetrics, "metrics/precision(B)", "precision");
-  const recall = formatTrainMetric(modelMetrics, "metrics/recall(B)", "recall");
 
-  const advancedHint = useMemo(() => {
-    const parts = ["上传外部权重"];
-    if (rejectedCount > 0) parts.push("驳回修正");
-    return parts.join("、");
-  }, [rejectedCount]);
+  const trialSummary = trialLoading
+    ? "正在分析…"
+    : preview
+      ? trialBoxes.length > 0
+        ? `检测到 ${trialBoxes.length} 个目标`
+        : "未检测到目标"
+      : null;
 
   return (
-    <div className="operations-page model-library-page model-library-page--focused">
+    <div className="operations-page model-center-page">
       <PageHeader
         title="模型中心"
-        description="选择项目、在线试用检测效果；训练与导出在对应项目页完成"
+        description="选版本、试效果——上传图片即时看检测框"
         eyebrow="Model center"
         action={
           currentProject ? (
@@ -216,9 +217,9 @@ function GlobalModelsPageInner() {
         </Panel>
       ) : (
         <>
-          <section className="model-hero">
-            <div className="model-hero__project">
-              <span className="project-section-kicker">Current project</span>
+          <div className="model-center__bar">
+            <label className="model-center__project">
+              <span>当前项目</span>
               {projects.length === 1 ? (
                 <strong>{currentProject?.name}</strong>
               ) : (
@@ -228,136 +229,141 @@ function GlobalModelsPageInner() {
                   ))}
                 </select>
               )}
+            </label>
+            <div className="model-center__bar-meta">
+              <span>{stats.total ?? 0} 张素材</span>
+              <span>{models.length} 个版本</span>
             </div>
+          </div>
 
-            {models.length === 0 ? (
-              <div className="model-hero__empty">
-                <strong>该项目还没有模型</strong>
-                <p>完成训练后会自动出现在这里</p>
-                <Link href={`/projects/${projectId}/train`} className="btn-primary">去训练</Link>
-              </div>
-            ) : (
-              <div className="model-hero__card">
-                <span><Icon name="package" size={18} /></span>
-                <div>
-                  <strong>{latestModel?.name ?? "—"}</strong>
-                  <small>版本 v{latestModel?.version} · {modelOrigin(latestModel!)}</small>
+          {models.length === 0 ? (
+            <div className="model-center__empty">
+              <span><Icon name="package" size={28} /></span>
+              <strong>该项目还没有模型</strong>
+              <p>完成训练后版本会出现在左侧，可在此在线试用</p>
+              <Link href={`/projects/${projectId}/train`} className="btn-primary">去训练</Link>
+            </div>
+          ) : (
+            <div className="model-center__workspace">
+              <aside className="model-center__rail" aria-label="模型版本与指标">
+                <div className="model-center__rail-head">
+                  <h2>版本</h2>
+                  <span>{models.length}</span>
                 </div>
-                <div className="model-hero__stats">
-                  {map50 && <span><em>mAP50</em><strong>{map50}</strong></span>}
-                  {precision && <span><em>精确率</em><strong>{precision}</strong></span>}
-                  {recall && <span><em>召回率</em><strong>{recall}</strong></span>}
-                  <span><em>版本数</em><strong>{models.length}</strong></span>
-                  <span><em>数据帧</em><strong>{stats.total ?? 0}</strong></span>
-                </div>
-              </div>
-            )}
-          </section>
 
-          {models.length > 0 && (
-            <Panel className="model-trial-panel model-trial-panel--primary">
-              <PanelSection title="在线试用">
-                <p className="model-trial-panel__lead">上传一张图片，即时查看检测框（不写入标注）</p>
-                <div className="model-trial-panel__toolbar">
-                  {models.length > 1 && (
-                    <label className="model-trial-panel__field">
-                      <span>模型版本</span>
-                      <select className="input text-sm" value={trialModelId} onChange={(e) => setTrialModelId(e.target.value)}>
-                        {models.map((m) => (
-                          <option key={m.id} value={m.id}>{m.name} (v{m.version})</option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                  <label className="model-trial-panel__upload btn-primary">
-                    <Icon name="upload" size={15} />
-                    {trialLoading ? "检测中…" : "选择图片"}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="sr-only"
-                      disabled={!trialModelId || trialLoading}
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) runTrial(file);
-                        e.target.value = "";
-                      }}
-                    />
-                  </label>
-                </div>
-                <ModelTrialPreview
-                  imageUrl={preview}
-                  boxes={trialBoxes}
-                  categories={currentProject?.categories ?? []}
-                  loading={trialLoading}
-                  onUpload={runTrial}
-                  uploadDisabled={!trialModelId}
-                />
-              </PanelSection>
-            </Panel>
-          )}
-
-          {models.length > 1 && (
-            <Panel className="model-versions-panel">
-              <PanelSection title={`全部版本 (${models.length})`}>
-                <ul className="model-registry-list model-registry-list--compact">
-                  {models.map((m) => (
-                    <li key={m.id}>
-                      <span><Icon name="package" size={16} /></span>
-                      <div><strong>{m.name}</strong><small>v{m.version}</small></div>
-                      <em>{modelOrigin(m)}</em>
-                    </li>
-                  ))}
+                <ul className="model-version-picker" role="listbox" aria-label="选择模型版本">
+                  {models.map((m) => {
+                    const selected = m.id === trialModelId;
+                    const { map50 } = readModelMetrics(m.metrics);
+                    return (
+                      <li key={m.id}>
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          className={selected ? "model-version-picker__item model-version-picker__item--active" : "model-version-picker__item"}
+                          onClick={() => selectModel(m.id)}
+                        >
+                          <span className="model-version-picker__badge">v{m.version}</span>
+                          <span className="model-version-picker__copy">
+                            <strong>{m.name}</strong>
+                            <small>{modelOrigin(m)}</small>
+                          </span>
+                          {map50 && <em>{map50}</em>}
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
-              </PanelSection>
-            </Panel>
-          )}
 
-          <details className="model-advanced">
-            <summary>{advancedHint}</summary>
-            <div className="model-advanced__body">
-              <Panel className="model-upload-panel">
-                <PanelSection title="上传外部模型">
-                  {error && <p className="mb-2 text-sm text-danger-600">{error}</p>}
-                  <p className="model-advanced__hint">导入第三方 YOLO .pt 权重，归档到当前项目</p>
-                  <input
-                    className="input mb-2 text-sm"
-                    placeholder="显示名称（可选）"
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                  />
-                  <input
-                    type="file"
-                    accept=".pt"
-                    className="input text-sm"
-                    disabled={uploading || !projectId}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) handleUpload(f);
-                      e.target.value = "";
-                    }}
-                  />
-                  {uploading && <p className="mt-2 text-xs text-subtle">上传中…</p>}
-                </PanelSection>
-              </Panel>
-
-              {rejectedCount > 0 && (
-                <Panel className="model-correction-panel">
-                  <PanelSection title="驳回修正">
-                    <p className="model-advanced__hint">
-                      对已驳回的 {rejectedCount} 张图片用模型批量重打框
+                {activeModel && (
+                  <div className="model-center__metrics">
+                    <p className="model-center__metrics-title">当前版本指标</p>
+                    <div className="model-center__metrics-grid">
+                      <div className={activeMetrics.map50 ? "model-center__metric" : "model-center__metric model-center__metric--muted"}>
+                        <strong>{activeMetrics.map50 ?? "—"}</strong>
+                        <span>mAP50</span>
+                      </div>
+                      <div className={activeMetrics.precision ? "model-center__metric" : "model-center__metric model-center__metric--muted"}>
+                        <strong>{activeMetrics.precision ?? "—"}</strong>
+                        <span>精确率</span>
+                      </div>
+                      <div className={activeMetrics.recall ? "model-center__metric" : "model-center__metric model-center__metric--muted"}>
+                        <strong>{activeMetrics.recall ?? "—"}</strong>
+                        <span>召回率</span>
+                      </div>
+                    </div>
+                    <p className="model-center__metrics-note">
+                      小样本指标波动大，请以在线试用为准
                     </p>
-                    <YoloLabelPanel
-                      projectId={projectId}
-                      frameStats={stats}
-                      fixedOnlyStatus="human_wrong"
-                      onDone={refresh}
-                    />
-                  </PanelSection>
-                </Panel>
-              )}
+                  </div>
+                )}
+
+                {rejectedCount > 0 && (
+                  <details className="model-advanced model-advanced--rail">
+                    <summary>驳回修正</summary>
+                    <div className="model-advanced__body">
+                      <p className="model-advanced__hint">对已驳回的 {rejectedCount} 张图片用模型批量重打框</p>
+                      <YoloLabelPanel
+                        projectId={projectId}
+                        frameStats={stats}
+                        fixedOnlyStatus="human_wrong"
+                        onDone={refresh}
+                      />
+                    </div>
+                  </details>
+                )}
+              </aside>
+
+              <section className="model-center__stage" aria-label="在线试用">
+                <div className="model-center__stage-head">
+                  <div>
+                    <h2>在线试用</h2>
+                    <p>上传或拖拽图片，即时预览检测框（不写入标注）</p>
+                  </div>
+                  <div className="model-center__stage-actions">
+                    {activeModel && (
+                      <span className="model-center__stage-version">
+                        {activeModel.name} · v{activeModel.version}
+                      </span>
+                    )}
+                    <label className="btn-primary model-trial-panel__upload model-center__upload">
+                      <Icon name="upload" size={15} />
+                      {trialLoading ? "检测中…" : "选择图片"}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="sr-only"
+                        disabled={!trialModelId || trialLoading}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) runTrial(file);
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="model-center__stage-body">
+                  <ModelTrialPreview
+                    imageUrl={preview}
+                    boxes={trialBoxes}
+                    categories={currentProject?.categories ?? []}
+                    loading={trialLoading}
+                    onUpload={runTrial}
+                    uploadDisabled={!trialModelId}
+                    showSummary={false}
+                  />
+                  {trialSummary && (
+                    <p className="model-center__stage-result" data-testid="model-trial-result">
+                      {trialSummary}
+                    </p>
+                  )}
+                </div>
+              </section>
             </div>
-          </details>
+          )}
         </>
       )}
     </div>

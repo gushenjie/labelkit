@@ -23,7 +23,7 @@ def test_extract_rejects_unreadable_video(tmp_path):
     invalid_video = tmp_path / "broken.avi"
     invalid_video.write_bytes(b"not-a-video")
 
-    with pytest.raises(RuntimeError, match="Cannot open video"):
+    with pytest.raises(RuntimeError, match="无法打开视频"):
         extract_frames(invalid_video, tmp_path / "frames")
 
 

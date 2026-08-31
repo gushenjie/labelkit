@@ -7,10 +7,10 @@ import hashlib
 from collections.abc import Callable
 from pathlib import Path
 
-import cv2
 from sqlalchemy.orm import Session
 
 from server.core.dedup import compute_phash
+from server.core.image_io import read_image_bgr
 from server.core.paths import frames_dir, label_path_for_frame
 from server.core.yolo_io import YoloLabel, parse_labels, write_labels
 from server.db.models import (
@@ -32,7 +32,7 @@ def _storage_key(project_id: str, image_path: Path) -> str:
 
 
 def _validate_image(path: Path) -> None:
-    image = cv2.imread(str(path))
+    image = read_image_bgr(path)
     if image is None or image.size == 0:
         raise RuntimeError(f"Invalid image: {path}")
 

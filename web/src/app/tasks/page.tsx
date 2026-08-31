@@ -6,7 +6,8 @@ import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel, PanelSection } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { api, Project, Task } from "@/lib/api";
+import { api, Task } from "@/lib/api";
+import { formatDateTime } from "@/lib/datetime";
 import { Icon } from "@/components/Icon";
 
 const TASK_LABEL: Record<string, string> = {
@@ -36,7 +37,6 @@ const STATUS_ZH: Record<string, string> = {
 type TaskRow = Task & { projectName: string };
 
 export default function GlobalTasksPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [selected, setSelected] = useState<TaskRow | null>(null);
   const [loading, setLoading] = useState(true);
@@ -44,13 +44,22 @@ export default function GlobalTasksPage() {
   const [filterStatus, setFilterStatus] = useState("all");
 
   const load = useCallback(async () => {
-    const [list, allTasks] = await Promise.all([api.listProjects(), api.listAllTasks()]);
-    setProjects(list);
+    const allTasks = await api.listAllTasks();
     const flat = allTasks.map((task) => ({ ...task, projectName: task.project_name }));
     setTasks(flat);
     setSelected((prev) => (prev ? flat.find((t) => t.id === prev.id) ?? prev : null));
     setLoading(false);
   }, []);
+
+  const projectOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const task of tasks) {
+      map.set(task.project_id, task.projectName);
+    }
+    return [...map.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+  }, [tasks]);
 
   useEffect(() => {
     load();
@@ -121,7 +130,7 @@ export default function GlobalTasksPage() {
           <span>项目</span>
           <select className="input" value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
             <option value="all">全部项目</option>
-            {projects.map((p) => (
+            {projectOptions.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
@@ -174,7 +183,7 @@ export default function GlobalTasksPage() {
                             <StatusBadge status={task.status} label={STATUS_ZH[task.status] || task.status} />
                           </span>
                           <small>{task.projectName}</small>
-                          <em>{new Date(task.created_at).toLocaleString()} · {task.progress}/{task.total}</em>
+                          <em>{formatDateTime(task.created_at)} · {task.progress}/{task.total}</em>
                         </span>
                         <span className="task-center-item__progress" aria-label={`进度 ${pct}%`}>
                           <i style={{ width: `${pct}%` }} />

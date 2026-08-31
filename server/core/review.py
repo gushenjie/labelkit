@@ -9,10 +9,10 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-import cv2
 from sqlalchemy.orm import Session
 
 from server.config import settings
+from server.core.image_io import read_image_bgr
 from server.core.visualize import save_review_image
 from server.db.models import Category, Frame, FrameStatus, Project, ProjectTaskType, Task
 
@@ -99,15 +99,17 @@ def run_review_task(db: Session, task: Task, *, cancelled: Callable[[], bool] | 
             continue
 
         lbl_path = label_path_for_frame(project.id, frame)
-        img = cv2.imread(frame.filepath)
+        img_path = Path(frame.filepath)
+        img = read_image_bgr(img_path)
         if img is None:
+            frame.review_note = f"无法读取图片: {img_path}"
             fail_n += 1
             task.progress = i + 1
             continue
         ih, iw = img.shape[:2]
 
         review_img = review_path / f"{frame.id}.jpg"
-        save_review_image(categories, Path(frame.filepath), lbl_path, review_img)
+        save_review_image(categories, img_path, lbl_path, review_img)
         prompt = REVIEW_PROMPT.format(standards=standards, extra=extra, iw=iw, ih=ih)
         try:
             result = _call_vlm_review(review_img, prompt)

@@ -177,7 +177,7 @@ async function exportAndTrial(page: Page, project: Project): Promise<void> {
 
   await page.goto(`/models?project=${project.id}`);
   await expect(page.getByRole("heading", { name: "在线试用", exact: true })).toBeVisible();
-  await page.locator('.model-trial-panel input[type="file"]').setInputFiles(path.join(fixturesDir, "sample-00.png"));
+  await page.locator('.model-center__upload input[type="file"], .model-trial-panel input[type="file"]').first().setInputFiles(path.join(fixturesDir, "sample-00.png"));
   await expect(page.getByTestId("model-trial-result")).toContainText(/检测到|未检测/, { timeout: 60_000 });
 }
 

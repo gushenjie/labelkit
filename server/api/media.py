@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from server.api.schemas import VideoOut
 from server.config import settings
 from server.core.dedup import compute_phash
+from server.core.image_io import open_video_capture, read_image_bgr
 from server.core.paths import frames_dir, videos_dir
 from server.db.database import get_db
 from server.db.models import Frame, FrameStatus, Project, Video
@@ -96,7 +97,7 @@ async def upload_video(
     dest = dest_dir / f"{storage_key}{ext}"
     await _stream_upload(file, dest)
 
-    cap = cv2.VideoCapture(str(dest))
+    cap = open_video_capture(dest)
     if not cap.isOpened():
         cap.release()
         dest.unlink(missing_ok=True)
@@ -153,7 +154,7 @@ async def upload_images(
             dest = dest_dir / f"{storage_key}{ext}"
             await _stream_upload(file, dest)
             created_paths.append(dest)
-            image = cv2.imread(str(dest))
+            image = read_image_bgr(dest)
             if image is None or image.size == 0:
                 raise HTTPException(400, f"文件内容不是可读取的图片: {original_name}")
             phash = compute_phash(dest)

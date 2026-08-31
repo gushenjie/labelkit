@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { api, Frame, Task } from "@/lib/api";
+import { formatDateTime } from "@/lib/datetime";
 import { FrameLightbox } from "@/components/FrameLightbox";
 import { DATASET_FORMAT_ZH, PUBLIC_IMPORT_STATE_ZH } from "@/lib/publicDatasetLabels";
 
@@ -377,7 +378,7 @@ export function TaskDetailPanel({ task, onCancel, onRetry }: Props) {
             {task.cancel_requested && task.status === "running" ? "取消中" : STATUS_ZH[task.status] || task.status}
           </span>
         </p>
-        <p><span className="text-muted">时间：</span>{new Date(task.created_at).toLocaleString()}</p>
+        <p><span className="text-muted">时间：</span>{formatDateTime(task.created_at)}</p>
       </div>
 
       <div className="mt-4">
