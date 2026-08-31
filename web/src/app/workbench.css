@@ -2815,6 +2815,30 @@
 
 /* Task center */
 
+.task-center-page {
+  max-width: 1720px;
+}
+
+.task-center-page .operations-summary {
+  margin-bottom: 14px;
+}
+
+.task-center-page .operations-summary > div {
+  min-height: 66px;
+  padding-block: 10px;
+}
+
+.task-center-page .operations-filterbar {
+  grid-template-columns: minmax(140px, 1fr) 210px 180px auto;
+  align-items: center;
+  min-height: 64px;
+  margin-bottom: 14px;
+}
+
+.task-center-page .operations-filterbar > .input {
+  min-width: 0;
+}
+
 .task-center-layout {
   display: grid;
   grid-template-columns: minmax(370px, 0.86fr) minmax(0, 1.14fr);
@@ -4147,6 +4171,7 @@
 /* —— 模型中心：左右分栏工作台 —— */
 .model-center-page {
   --model-rail-width: 272px;
+  max-width: 1720px;
 }
 
 .model-center__bar {
@@ -4183,6 +4208,7 @@
 
 .model-center__bar-meta {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 14px;
   color: var(--lk-muted);
@@ -4195,24 +4221,63 @@
   content: "•";
 }
 
-.model-center__empty {
-  display: grid;
-  justify-items: start;
-  gap: 8px;
-  border: 1px dashed #ccdadd;
-  border-radius: var(--lk-radius-lg);
-  background: var(--lk-surface-soft);
-  padding: 28px 24px;
+.model-center__train-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--lk-brand-700);
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: none;
 }
 
-.model-center__empty > span {
+.model-center__train-link:hover {
+  color: var(--lk-brand-600);
+  text-decoration: underline;
+}
+
+.model-center__empty {
+  display: grid;
+  min-height: 244px;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
+  align-items: center;
+  gap: 32px;
+  border: 1px solid var(--lk-border);
+  border-radius: var(--lk-radius-lg);
+  background: var(--lk-surface);
+  padding: 28px 32px;
+  box-shadow: var(--lk-shadow-panel);
+}
+
+.model-center__empty-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.model-center__empty-copy > span {
   display: grid;
   width: 48px;
   height: 48px;
+  flex: 0 0 48px;
   place-items: center;
   border-radius: 10px;
   background: #e8f3f2;
   color: var(--lk-brand-700);
+}
+
+.model-center__empty-copy > div {
+  display: grid;
+  gap: 5px;
+}
+
+.model-center__empty-kicker,
+.model-center__empty-action > span {
+  color: var(--lk-subtle);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .model-center__empty strong {
@@ -4226,6 +4291,18 @@
   color: var(--lk-muted);
   font-size: 13px;
   line-height: 1.55;
+}
+
+.model-center__empty-action {
+  display: grid;
+  gap: 5px;
+  border-left: 1px solid var(--lk-border);
+  padding-left: 28px;
+}
+
+.model-center__empty-action .btn-primary {
+  justify-self: start;
+  margin-top: 7px;
 }
 
 .model-center__workspace {
@@ -4506,6 +4583,18 @@
 }
 
 @media (max-width: 960px) {
+  .model-center__empty {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .model-center__empty-action {
+    border-top: 1px solid var(--lk-border);
+    border-left: 0;
+    padding-top: 20px;
+    padding-left: 0;
+  }
+
   .model-center__workspace {
     grid-template-columns: 1fr;
     min-height: auto;
@@ -4781,6 +4870,7 @@
 .settings-page {
   width: 100%;
   max-width: 1120px;
+  padding-bottom: 0;
 }
 
 .settings-health {
@@ -4810,7 +4900,6 @@
 .settings-page__panel {
   margin: 0 !important;
   padding: 20px 22px;
-  border-top: 3px solid #244d5e;
 }
 
 .settings-page__panel .panel-section + .panel-section {
@@ -4829,7 +4918,12 @@
   padding: 11px 12px;
 }
 
-.settings-section-intro > span {
+.settings-section-intro .settings-health {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.settings-section-intro > span:not(.settings-health) {
   display: grid;
   width: 34px;
   height: 34px;
@@ -4888,8 +4982,12 @@
 }
 
 .settings-page__savebar {
+  position: static;
+  display: flex;
   justify-content: flex-end;
-  padding-right: max(24px, calc((100vw - var(--lk-shell-sidebar) - 1120px) / 2));
+  margin-top: 24px;
+  border-top: 1px solid var(--lk-border);
+  padding: 16px 0 0;
 }
 
 .project-settings-meta {

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel, PanelSection } from "@/components/ui/Panel";
 import { useToast } from "@/components/ui/ToastProvider";
 import { api } from "@/lib/api";
@@ -44,18 +43,6 @@ export default function SettingsPage() {
 
   return (
     <div className="settings-page">
-      <PageHeader
-        title="全局设置"
-        description="LLM 标注 API 与并发参数"
-        eyebrow="Platform configuration"
-        meta={
-          <span className={settings.dashscope_api_key_set ? "settings-health settings-health--ready" : "settings-health"}>
-            <i aria-hidden="true" />
-            {settings.dashscope_api_key_set ? "API 已配置" : "API 尚未配置"}
-          </span>
-        }
-      />
-
       <Panel className="settings-page__panel">
           <PanelSection title="API 密钥" id="api">
             <div className="settings-section-intro">
@@ -64,6 +51,10 @@ export default function SettingsPage() {
                 <strong>DashScope 访问凭证</strong>
                 <p>仅保存在本机，用于调用视觉大模型标注服务。</p>
               </div>
+              <span className={settings.dashscope_api_key_set ? "settings-health settings-health--ready" : "settings-health"}>
+                <i aria-hidden="true" />
+                {settings.dashscope_api_key_set ? "API 已配置" : "API 尚未配置"}
+              </span>
             </div>
             <label className="settings-field">
               <span>DashScope API Key</span>
@@ -132,13 +123,13 @@ export default function SettingsPage() {
               </label>
             </div>
           </PanelSection>
-      </Panel>
 
-      <div className="settings-page__savebar">
-        <button className="btn-primary" onClick={save} disabled={saving}>
-          {saving ? "保存中…" : "保存设置"}
-        </button>
-      </div>
+          <div className="settings-page__savebar">
+            <button className="btn-primary" onClick={save} disabled={saving}>
+              {saving ? "保存中…" : "保存设置"}
+            </button>
+          </div>
+      </Panel>
     </div>
   );
 }

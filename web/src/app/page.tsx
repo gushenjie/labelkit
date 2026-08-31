@@ -7,15 +7,12 @@ import { CreateProjectModal } from "@/components/CreateProjectModal";
 import { Icon } from "@/components/Icon";
 import { useTaskTray } from "@/components/TaskTrayProvider";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
-import { StatusBadge } from "@/components/ui/StatusBadge";
-import { TaskProgress } from "@/components/ui/TaskProgress";
 import { useToast } from "@/components/ui/ToastProvider";
 import { api, Project } from "@/lib/api";
 import { countBlockingReview, countTrainable } from "@/lib/status";
 import {
   computeContinueAction,
   computeStepBadges,
-  taskTypeLabel,
   type WorkflowStep,
 } from "@/lib/workflow";
 
@@ -62,7 +59,6 @@ function HomeSkeleton() {
           <span className="skeleton skeleton--title" />
           <span className="skeleton skeleton--subtitle" />
         </div>
-        <span className="skeleton skeleton--button" />
         <div className="home-command__metrics">
           {[0, 1, 2, 3, 4].map((item) => (
             <span className="skeleton skeleton--metric" key={item} />
@@ -87,7 +83,7 @@ export default function HomePage() {
   const router = useRouter();
   const confirm = useConfirm();
   const { toast } = useToast();
-  const { recentTasks, runningTasks } = useTaskTray();
+  const { runningTasks } = useTaskTray();
   const [items, setItems] = useState<ProjectMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -115,8 +111,12 @@ export default function HomePage() {
     };
     syncCreateModal();
     window.addEventListener("popstate", syncCreateModal);
-    return () => window.removeEventListener("popstate", syncCreateModal);
-  }, []);
+    window.addEventListener("open-create-project", openCreateModal);
+    return () => {
+      window.removeEventListener("popstate", syncCreateModal);
+      window.removeEventListener("open-create-project", openCreateModal);
+    };
+  }, [openCreateModal]);
 
   const loadDashboard = useCallback(async (quiet = false) => {
     if (quiet) setRefreshing(true);
@@ -168,8 +168,6 @@ export default function HomePage() {
           frames: acc.frames + project.frame_count,
           storage: acc.storage + project.disk_usage_mb,
           pending: acc.pending + countBlockingReview(stats),
-          unlabeled: acc.unlabeled + (stats.unlabeled ?? 0),
-          trained: acc.trained + (modelCount > 0 ? 1 : 0),
           ready: acc.ready + (
             countTrainable(stats) > 0
             && countBlockingReview(stats) === 0
@@ -179,8 +177,15 @@ export default function HomePage() {
               : 0
           ),
         }),
-        { frames: 0, storage: 0, pending: 0, unlabeled: 0, trained: 0, ready: 0 },
+        { frames: 0, storage: 0, pending: 0, ready: 0 },
       ),
+    [items],
+  );
+
+  const attentionProject = useMemo(
+    () => [...items]
+      .filter(({ stats }) => countBlockingReview(stats) > 0)
+      .sort((a, b) => countBlockingReview(b.stats) - countBlockingReview(a.stats))[0],
     [items],
   );
 
@@ -210,19 +215,7 @@ export default function HomePage() {
 
   return (
     <div className="home-page">
-      <section className="home-command" aria-labelledby="home-title">
-        <div className="home-command__heading">
-          <span className="home-command__eyebrow">
-            <i aria-hidden="true" />
-            Vision data operations
-          </span>
-          <h1 id="home-title">项目生产台</h1>
-          <p>管理视频素材、智能标注、人工复查与模型训练的完整生产流程</p>
-        </div>
-        <button type="button" className="btn-primary home-create-btn" onClick={openCreateModal}>
-          <Icon name="plus" size={16} />
-          新建项目
-        </button>
+      <section className="home-command" aria-label="项目生产概览">
         <div className="home-command__metrics" aria-label="生产概览">
           <div className="home-metric">
             <span className="home-metric__icon"><Icon name="folder" size={17} /></span>
@@ -289,15 +282,8 @@ export default function HomePage() {
           </button>
         </div>
       ) : (
-        <div className="home-workspace">
-          <section className="home-project-panel" aria-labelledby="project-orders-title">
-            <div className="home-project-panel__head">
-              <div>
-                <span className="home-section-kicker">Production queue</span>
-                <h2 id="project-orders-title">项目工单</h2>
-              </div>
-              <span>{filteredItems.length} / {items.length} 个项目</span>
-            </div>
+        <div className={`home-workspace${attentionProject ? "" : " home-workspace--full"}`}>
+          <section className="home-project-panel" aria-label="项目列表">
             <div className="home-toolbar">
               <label className="home-search">
                 <Icon name="search" size={16} />
@@ -358,7 +344,10 @@ export default function HomePage() {
                 const stageBadges = computeStepBadges(meta.stats, meta.modelCount);
 
                 return (
-                  <article className="project-order" key={project.id}>
+                  <article
+                    className={`project-order ${countBlockingReview(meta.stats) > 0 ? "project-order--attention" : ""}`}
+                    key={project.id}
+                  >
                     <Link href={`/projects/${project.id}`} className="project-order__preview">
                       {meta.previewFrameId ? (
                         <img
@@ -410,7 +399,9 @@ export default function HomePage() {
                                 {badge?.done && !active ? <Icon name="check" size={12} /> : index + 1}
                               </span>
                               <span className="project-stage__label">{step.label}</span>
-                              {badge?.count ? <span className="project-stage__count">{badge.count}</span> : null}
+                              <span className="project-stage__count">
+                                {badge?.count ? formatNumber(badge.count) : ""}
+                              </span>
                             </li>
                           );
                         })}
@@ -449,96 +440,33 @@ export default function HomePage() {
             </div>
           </section>
 
-          <aside className="home-ops-rail" aria-label="生产动态">
-            <section className="home-ops-card home-ops-card--attention">
-              <div className="home-ops-card__head">
-                <div>
-                  <span className="home-section-kicker">Attention</span>
-                  <h2>待处理</h2>
-                </div>
-                <span className="home-ops-card__status">
-                  <i aria-hidden="true" />
-                  实时
-                </span>
-              </div>
-              <div className="home-attention-list">
-                <div>
-                  <span>待人工复查</span>
-                  <strong>{formatNumber(totals.pending)}</strong>
-                  <small>抽样或存疑，需人工确认</small>
-                </div>
-                <div>
-                  <span>未标注素材</span>
-                  <strong>{formatNumber(totals.unlabeled)}</strong>
-                  <small>等待进入智能标注</small>
-                </div>
-                <div>
-                  <span>已训练项目</span>
-                  <strong>{formatNumber(totals.trained)}</strong>
-                  <small>已有模型版本可试用</small>
-                </div>
-              </div>
-            </section>
-
-            <section className="home-ops-card">
-              <div className="home-ops-card__head">
-                <div>
-                  <span className="home-section-kicker">Live task</span>
-                  <h2>运行任务</h2>
-                </div>
-                <Link href="/tasks">任务中心</Link>
-              </div>
-              {runningTasks[0] ? (
-                <div className="home-running-task">
-                  <div className="home-running-task__head">
-                    <span>{taskTypeLabel(runningTasks[0].task_type)}</span>
-                    <StatusBadge status={runningTasks[0].status} />
+          {attentionProject && (
+            <aside className="home-ops-rail home-ops-rail--attention-only" aria-label="优先任务">
+              <section className="home-ops-card home-ops-card--attention">
+                <div className="home-ops-card__head">
+                  <div>
+                    <span className="home-section-kicker">优先任务</span>
+                    <h2>待处理</h2>
                   </div>
-                  <strong>{runningTasks[0].projectName}</strong>
-                  <TaskProgress
-                    progress={runningTasks[0].progress}
-                    total={runningTasks[0].total}
-                    label="处理进度"
-                  />
-                  {runningTasks.length > 1 && (
-                    <p>另有 {runningTasks.length - 1} 个任务正在队列中</p>
-                  )}
+                  <span className="home-ops-card__status">
+                    <i aria-hidden="true" />
+                    实时
+                  </span>
                 </div>
-              ) : (
-                <div className="home-ops-empty">
-                  <span><Icon name="check" size={17} /></span>
-                  <strong>当前任务队列空闲</strong>
-                  <p>启动标注或训练后，可在这里查看实时进度。</p>
+                <div className="home-attention-list">
+                  <div className="home-attention-primary">
+                    <span>待人工复查</span>
+                    <strong>{formatNumber(totals.pending)}</strong>
+                    <small>复查「{attentionProject.project.name}」中的待确认帧</small>
+                    <Link href={`/projects/${attentionProject.project.id}/review`}>
+                      开始复查
+                      <Icon name="chevron-right" size={15} />
+                    </Link>
+                  </div>
                 </div>
-              )}
-            </section>
-
-            <section className="home-ops-card">
-              <div className="home-ops-card__head">
-                <div>
-                  <span className="home-section-kicker">Activity log</span>
-                  <h2>最近动态</h2>
-                </div>
-                <Link href="/tasks">全部</Link>
-              </div>
-              {recentTasks.length > 0 ? (
-                <ul className="home-activity-list">
-                  {recentTasks.slice(0, 4).map((task) => (
-                    <li key={task.id}>
-                      <span className={`home-activity-list__mark home-activity-list__mark--${task.status}`} />
-                      <div>
-                        <strong>{taskTypeLabel(task.task_type)}</strong>
-                        <span>{task.projectName}</span>
-                      </div>
-                      <StatusBadge status={task.status} />
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="home-activity-empty">尚无任务记录</p>
-              )}
-            </section>
-          </aside>
+              </section>
+            </aside>
+          )}
         </div>
       )}
 

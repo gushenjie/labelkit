@@ -343,61 +343,64 @@ summary:focus-visible {
   gap: 10px;
 }
 
+.app-commandbar__create {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
 .app-commandbar__menu,
 .app-commandbar__mobile-brand {
   display: none;
 }
 
 .app-breadcrumbs {
-  display: flex;
+  display: grid;
   min-width: 0;
-  align-items: center;
-  gap: 7px;
+  gap: 1px;
   color: var(--lk-subtle);
   font-size: 12px;
 }
 
-.app-breadcrumbs a,
-.app-breadcrumbs strong {
+.app-breadcrumbs__trail {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.app-breadcrumbs__trail a,
+.app-breadcrumbs__trail strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.app-breadcrumbs a {
+.app-breadcrumbs__trail a {
   max-width: 190px;
   color: var(--lk-muted);
   text-decoration: none;
 }
 
-.app-breadcrumbs a:hover {
+.app-breadcrumbs__trail a:hover {
   color: var(--lk-brand-700);
 }
 
-.app-breadcrumbs strong {
+.app-breadcrumbs__trail strong {
   max-width: 240px;
   color: #173746;
   font-size: 13px;
   font-weight: 680;
 }
 
-.app-commandbar__workspace {
-  display: inline-flex;
-  min-height: 32px;
-  align-items: center;
-  gap: 7px;
-  border-right: 1px solid var(--lk-border);
-  padding-right: 12px;
+.app-breadcrumbs p {
+  overflow: hidden;
+  margin: 0;
   color: var(--lk-muted);
-  font-size: 10px;
-}
-
-.app-commandbar__workspace i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--lk-success-600);
-  box-shadow: 0 0 0 3px var(--lk-success-50);
+  font-size: 11px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-sidebar__backdrop {
@@ -488,6 +491,19 @@ summary:focus-visible {
   grid-row: 2;
   margin: 0 auto;
   padding: 24px 28px 30px;
+}
+
+.app-main:has(.home-page) {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: none;
+  height: calc(100vh - var(--lk-shell-header));
+  max-height: calc(100vh - var(--lk-shell-header));
+  min-height: 0;
+  margin: 0;
+  padding: 16px 20px 16px 16px;
+  overflow: hidden;
 }
 
 .card {
@@ -831,23 +847,27 @@ input[type="file"]::file-selector-button:hover {
     border-left: 1px solid var(--lk-border);
   }
 
-  .app-breadcrumbs a,
-  .app-breadcrumbs svg {
+  .app-breadcrumbs__trail a,
+  .app-breadcrumbs__trail svg,
+  .app-breadcrumbs p {
     display: none;
   }
 
-  .app-breadcrumbs strong {
+  .app-breadcrumbs__trail strong {
     max-width: 110px;
     font-size: 12px;
-  }
-
-  .app-commandbar__workspace {
-    display: none;
   }
 
   .app-main {
     min-height: calc(100vh - var(--lk-shell-header));
     padding: 18px 18px 28px;
+  }
+
+  .app-main:has(.home-page) {
+    display: block;
+    height: auto;
+    max-height: none;
+    overflow: visible;
   }
 
   .card {

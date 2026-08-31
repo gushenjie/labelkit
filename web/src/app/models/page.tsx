@@ -5,7 +5,6 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useSearchParams } from "next/navigation";
 import { ModelTrialPreview, type TrialBox } from "@/components/ModelTrialPreview";
 import { YoloLabelPanel } from "@/components/YoloLabelPanel";
-import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel, PanelSection } from "@/components/ui/Panel";
 import { useToast } from "@/components/ui/ToastProvider";
 import { api, getApiBase, ModelVersion, Project } from "@/lib/api";
@@ -172,25 +171,6 @@ function GlobalModelsPageInner() {
 
   return (
     <div className="operations-page model-center-page">
-      <PageHeader
-        title="模型中心"
-        description="选版本、试效果——上传图片即时看检测框"
-        eyebrow="Model center"
-        action={
-          currentProject ? (
-            <Link href={`/projects/${projectId}/train`} className="btn-secondary">
-              <Icon name="chevron-left" size={15} />
-              训练与导出
-            </Link>
-          ) : (
-            <Link href="/" className="btn-secondary">
-              <Icon name="chevron-left" size={15} />
-              返回首页
-            </Link>
-          )
-        }
-      />
-
       {loadingProjects ? (
         <Panel>
           <PanelSection>
@@ -233,16 +213,32 @@ function GlobalModelsPageInner() {
             <div className="model-center__bar-meta">
               <span>{stats.total ?? 0} 张素材</span>
               <span>{models.length} 个版本</span>
+              {models.length > 0 && (
+                <Link href={`/projects/${projectId}/train`} className="model-center__train-link">
+                  训练与导出
+                  <Icon name="chevron-right" size={14} />
+                </Link>
+              )}
             </div>
           </div>
 
           {models.length === 0 ? (
-            <div className="model-center__empty">
-              <span><Icon name="package" size={28} /></span>
-              <strong>该项目还没有模型</strong>
-              <p>完成训练后版本会出现在左侧，可在此在线试用</p>
-              <Link href={`/projects/${projectId}/train`} className="btn-primary">去训练</Link>
-            </div>
+            <section className="model-center__empty" aria-label="模型库为空">
+              <div className="model-center__empty-copy">
+                <span><Icon name="package" size={28} /></span>
+                <div>
+                  <span className="model-center__empty-kicker">模型库</span>
+                  <strong>该项目还没有模型</strong>
+                  <p>完成训练后，模型版本会在这里沉淀，并可立即进行在线试用。</p>
+                </div>
+              </div>
+              <div className="model-center__empty-action">
+                <span>下一步</span>
+                <strong>训练第一个模型</strong>
+                <p>使用当前项目的已确认素材开始训练。</p>
+                <Link href={`/projects/${projectId}/train`} className="btn-primary">去训练</Link>
+              </div>
+            </section>
           ) : (
             <div className="model-center__workspace">
               <aside className="model-center__rail" aria-label="模型版本与指标">

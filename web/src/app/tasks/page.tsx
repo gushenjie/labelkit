@@ -1,9 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
-import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel, PanelSection } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { api, Task } from "@/lib/api";
@@ -81,23 +79,6 @@ export default function GlobalTasksPage() {
 
   return (
     <div className="operations-page task-center-page">
-      <PageHeader
-        title="任务中心"
-        description="查看所有项目的后台任务进度与历史"
-        eyebrow="Operations timeline"
-        action={
-          <Link href="/" className="btn-secondary">
-            <Icon name="chevron-left" size={15} />
-            返回项目
-          </Link>
-        }
-        meta={
-          runningCount > 0 ? (
-            <span className="health-chip health-chip--info">{runningCount} 个任务进行中</span>
-          ) : undefined
-        }
-      />
-
       <section className="operations-summary" aria-label="任务概览">
         <div>
           <span><Icon name="archive" size={17} /></span>
@@ -126,26 +107,20 @@ export default function GlobalTasksPage() {
           <Icon name="sliders" size={16} />
           <strong>筛选任务</strong>
         </div>
-        <label>
-          <span>项目</span>
-          <select className="input" value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
-            <option value="all">全部项目</option>
-            {projectOptions.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>状态</span>
-          <select className="input" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-            <option value="all">全部状态</option>
-            <option value="running">进行中</option>
-            <option value="completed">已完成</option>
-            <option value="failed">失败</option>
-            <option value="cancelled">已取消</option>
-            <option value="interrupted">已中断</option>
-          </select>
-        </label>
+        <select aria-label="按项目筛选" className="input" value={filterProject} onChange={(e) => setFilterProject(e.target.value)}>
+          <option value="all">全部项目</option>
+          {projectOptions.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <select aria-label="按状态筛选" className="input" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+          <option value="all">全部状态</option>
+          <option value="running">进行中</option>
+          <option value="completed">已完成</option>
+          <option value="failed">失败</option>
+          <option value="cancelled">已取消</option>
+          <option value="interrupted">已中断</option>
+        </select>
         <span className="operations-filterbar__result">{filtered.length} 条结果</span>
       </section>
 

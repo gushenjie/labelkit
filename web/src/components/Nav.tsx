@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Icon, type IconName } from "@/components/Icon";
-import { TaskTrayWidget } from "@/components/TaskTrayProvider";
 import { api, type Project } from "@/lib/api";
 
 type GlobalLink = {
@@ -92,6 +91,16 @@ export function Nav() {
   const breadcrumbLabel = projectId
     ? PROJECT_ROUTE_LABELS[projectRoute] ?? "项目概览"
     : currentGlobalLabel(pathname);
+  const isProjectManagement = pathname === "/";
+  const pageDescription = isProjectManagement
+    ? "管理视频素材、智能标注、人工复查与模型训练的完整生产流程"
+    : pathname.startsWith("/tasks")
+      ? "查看所有项目的后台任务进度与历史"
+      : pathname.startsWith("/models")
+        ? "查看项目模型版本，并在线试用检测效果"
+        : pathname.startsWith("/settings")
+          ? "配置标注服务访问凭证、模型参数与执行策略"
+      : "";
 
   return (
     <>
@@ -178,8 +187,9 @@ export function Nav() {
             <strong>LabelKit</strong>
           </Link>
           <nav className="app-breadcrumbs" aria-label="当前位置">
-            {projectId ? (
-              <>
+            <div className="app-breadcrumbs__trail">
+              {projectId ? (
+                <>
                 <Link href="/">项目管理</Link>
                 <Icon name="chevron-right" size={13} />
                 <Link href={`/projects/${projectId}`} title={project?.name}>
@@ -187,18 +197,25 @@ export function Nav() {
                 </Link>
                 <Icon name="chevron-right" size={13} />
                 <strong>{breadcrumbLabel}</strong>
-              </>
-            ) : (
-              <strong>{breadcrumbLabel}</strong>
-            )}
+                </>
+              ) : (
+                <strong>{breadcrumbLabel}</strong>
+              )}
+            </div>
+            {pageDescription && <p>{pageDescription}</p>}
           </nav>
         </div>
         <div className="app-commandbar__actions">
-          <span className="app-commandbar__workspace">
-            <i aria-hidden="true" />
-            本地工作区
-          </span>
-          <TaskTrayWidget />
+          {isProjectManagement && (
+            <button
+              type="button"
+              className="btn-primary app-commandbar__create"
+              onClick={() => window.dispatchEvent(new Event("open-create-project"))}
+            >
+              <Icon name="plus" size={16} />
+              新建项目
+            </button>
+          )}
         </div>
       </header>
 
