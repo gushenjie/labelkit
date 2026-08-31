@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { YoloLabelPanel } from "@/components/YoloLabelPanel";
 import { api, Frame, Task } from "@/lib/api";
 import { reviewPageUrl, reviewFilterForFrame } from "@/lib/review-nav";
-import { FRAME_STATUS_SIMPLE } from "@/lib/status";
+import { FRAME_STATUS_SIMPLE, countPendingReview } from "@/lib/status";
 import { ProjectPageHeader } from "@/components/ProjectPageHeader";
 import { Panel } from "@/components/ui/Panel";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
@@ -14,6 +14,7 @@ import { TaskProgress } from "@/components/ui/TaskProgress";
 import { Thumb } from "@/components/ui/Thumb";
 import { useToast } from "@/components/ui/ToastProvider";
 import { Icon } from "@/components/Icon";
+import { FrameLightbox } from "@/components/FrameLightbox";
 
 const EDITABLE_STATUSES = new Set([
   "llm_labeled",
@@ -44,9 +45,12 @@ export default function LabelPage() {
   const [recentFrames, setRecentFrames] = useState<Frame[]>([]);
   const [stopping, setStopping] = useState(false);
   const [selected, setSelected] = useState<Frame | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
   const [actionError, setActionError] = useState("");
 
   const unlabeledCount = frameStats.unlabeled ?? 0;
+  const pendingReviewCount = countPendingReview(frameStats);
 
   const goReview = (frame?: Frame) => {
     if (!id) return;
@@ -124,12 +128,17 @@ export default function LabelPage() {
     <div className="operations-page label-page">
       <ProjectPageHeader
         title="自动标注"
-        description={`未标注 ${unlabeledCount} 张 · 完成后进入人工确认`}
+        description={
+          pendingReviewCount > 0
+            ? `未标注 ${unlabeledCount} 张 · ${pendingReviewCount} 张待人工复查`
+            : `未标注 ${unlabeledCount} 张 · 完成后进入人工复查`
+        }
         eyebrow="Assisted labeling"
         action={
-          !running && processedCount > 0 ? (
+          pendingReviewCount > 0 ? (
             <button type="button" className="btn-primary" onClick={() => goReview()}>
-              进入人工确认
+              进入人工复查
+              <span className="label-review-cta__count">{pendingReviewCount}</span>
               <Icon name="chevron-right" size={15} />
             </button>
           ) : undefined
@@ -209,23 +218,54 @@ export default function LabelPage() {
               <span className="project-section-kicker">Recent output</span>
               <h2>最近标注结果</h2>
             </div>
-            <span>{recentFrames.length} 张</span>
+            <span>{recentFrames.length} 张预览 · 单击查看大图 · 双击进入复查</span>
+            {pendingReviewCount > 0 && (
+              <button type="button" className="btn-primary label-results__review-btn" onClick={() => goReview()}>
+                进入人工复查
+                <span className="label-review-cta__count">{pendingReviewCount}</span>
+              </button>
+            )}
           </div>
+          {pendingReviewCount > 0 && (
+            <p className="label-results__hint">
+              当前有 {pendingReviewCount} 张待确认，建议在「人工复查」中逐张核对标注框是否准确。
+            </p>
+          )}
           <div className="label-results__grid">
-            {recentFrames.map((f) => (
+            {recentFrames.map((f, frameIndex) => (
               <Thumb
                 key={f.id}
                 src={api.frameImageUrl(id!, f.id, true)}
                 alt={f.filename}
                 label={FRAME_STATUS_SIMPLE[f.status]}
                 selected={selected?.id === f.id}
-                onClick={() => setSelected(f)}
+                onClick={() => {
+                  setSelected(f);
+                  setLightboxIndex(frameIndex);
+                  setLightboxOpen(true);
+                }}
                 onDoubleClick={() => goReview(f)}
               />
             ))}
           </div>
         </Panel>
       )}
+      <FrameLightbox
+        open={lightboxOpen}
+        frames={recentFrames}
+        index={lightboxIndex}
+        projectId={id!}
+        onClose={() => setLightboxOpen(false)}
+        onIndexChange={(nextIndex) => {
+          setLightboxIndex(nextIndex);
+          const frame = recentFrames[nextIndex];
+          if (frame) setSelected(frame);
+        }}
+        onReview={(frame) => {
+          setLightboxOpen(false);
+          goReview(frame);
+        }}
+      />
     </div>
   );
 }

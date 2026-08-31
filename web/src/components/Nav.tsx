@@ -14,10 +14,10 @@ type GlobalLink = {
 };
 
 const GLOBAL_LINKS: GlobalLink[] = [
-  { href: "/", label: "项目", icon: "folder" },
+  { href: "/", label: "项目管理", icon: "folder" },
   { href: "/tasks", label: "任务中心", icon: "archive" },
-  { href: "/models", label: "模型库", icon: "package" },
-  { href: "/settings", label: "设置", icon: "settings" },
+  { href: "/models", label: "模型中心", icon: "package" },
+  { href: "/settings", label: "全局设置", icon: "settings" },
 ];
 
 const PROJECT_ROUTE_LABELS: Record<string, string> = {
@@ -36,9 +36,9 @@ function isGlobalLinkActive(pathname: string, href: string) {
 
 function currentGlobalLabel(pathname: string) {
   if (pathname.startsWith("/tasks")) return "任务中心";
-  if (pathname.startsWith("/models")) return "模型库";
+  if (pathname.startsWith("/models")) return "模型中心";
   if (pathname.startsWith("/settings")) return "全局设置";
-  return "项目";
+  return "项目管理";
 }
 
 export function Nav() {
@@ -180,7 +180,7 @@ export function Nav() {
           <nav className="app-breadcrumbs" aria-label="当前位置">
             {projectId ? (
               <>
-                <Link href="/">项目</Link>
+                <Link href="/">项目管理</Link>
                 <Icon name="chevron-right" size={13} />
                 <Link href={`/projects/${projectId}`} title={project?.name}>
                   {project?.name || "项目"}

@@ -1,5 +1,15 @@
 /** 帧标注流程状态（内部值，详情展开可见） */
 
+export const TASK_STATUS_ZH: Record<string, string> = {
+  pending: "等待中",
+  running: "进行中",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  paused: "已暂停",
+  interrupted: "已中断",
+};
+
 export const FRAME_STATUS_ZH: Record<string, string> = {
   unlabeled: "未标注",
   llm_labeled: "LLM已标",
@@ -24,7 +34,7 @@ export const FRAME_STATUS_SIMPLE: Record<string, string> = {
   no_target: "已确认",
 };
 
-export type ReviewFilter = "pending" | "rejected" | "confirmed" | "all";
+export type ReviewFilter = "pending" | "sample" | "rejected" | "confirmed" | "all";
 
 const PENDING_REVIEW = new Set([
   "auto_ok",
@@ -38,9 +48,33 @@ const CONFIRMED_REVIEW = new Set(["human_ok", "no_target"]);
 
 export function reviewStatuses(filter: ReviewFilter): string[] {
   if (filter === "pending") return [...PENDING_REVIEW];
+  if (filter === "sample") return ["needs_human"];
   if (filter === "rejected") return [...REJECTED_REVIEW];
   if (filter === "confirmed") return [...CONFIRMED_REVIEW];
   return [...PENDING_REVIEW, ...REJECTED_REVIEW, ...CONFIRMED_REVIEW];
+}
+
+export function countSampleReview(stats: Record<string, number>): number {
+  return stats.needs_human ?? 0;
+}
+
+/** 必须人工处理才能继续训练/导出的帧数（不含机器已通过的 auto_ok） */
+export function countBlockingReview(stats: Record<string, number>): number {
+  return (
+    (stats.llm_labeled ?? 0) +
+    (stats.needs_human ?? 0) +
+    (stats.auto_fixed ?? 0)
+  );
+}
+
+/** 可参与训练的已标注帧数 */
+export function countTrainable(stats: Record<string, number>): number {
+  return (
+    (stats.auto_ok ?? 0) +
+    (stats.auto_fixed ?? 0) +
+    (stats.human_ok ?? 0) +
+    (stats.no_target ?? 0)
+  );
 }
 
 export function countPendingReview(stats: Record<string, number>): number {
@@ -66,6 +100,7 @@ export function filterFramesForReview<T extends { status: string }>(
 ): T[] {
   const labeled = frames.filter((f) => f.status !== "unlabeled");
   if (filter === "all") return labeled;
+  if (filter === "sample") return labeled.filter((f) => f.status === "needs_human");
   if (filter === "pending") return labeled.filter((f) => PENDING_REVIEW.has(f.status));
   if (filter === "rejected") return labeled.filter((f) => REJECTED_REVIEW.has(f.status));
   return labeled.filter((f) => CONFIRMED_REVIEW.has(f.status));
@@ -75,11 +110,13 @@ export function filterFramesForReview<T extends { status: string }>(
 export function normalizeReviewFilter(param: string | null): ReviewFilter {
   if (param === "confirmed" || param === "human_ok") return "confirmed";
   if (param === "rejected" || param === "human_wrong") return "rejected";
+  if (param === "sample" || param === "needs_human") return "sample";
   if (param === "all") return "all";
   return "pending";
 }
 
 export const REVIEW_FILTERS: { value: ReviewFilter; label: string; hint: string }[] = [
+  { value: "sample", label: "抽样复查", hint: "公开数据风险抽样，确认完才能训练" },
   { value: "pending", label: "待确认", hint: "机器已打标，等你逐张确认" },
   { value: "rejected", label: "已驳回", hint: "点了 N 驳回的图，可手改框或 YOLO 修正" },
   { value: "confirmed", label: "已确认", hint: "人工确认完成，可参与训练" },

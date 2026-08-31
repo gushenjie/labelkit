@@ -11,7 +11,12 @@ from sqlalchemy.orm import sessionmaker
 
 from server.core.public_dataset_adapters import license_fingerprint
 from server.core.public_dataset_types import PublicDatasetCandidateDTO
-from server.core.public_dataset_workflow import evaluate_review, publish_import
+from server.core.public_dataset_workflow import (
+    evaluate_review,
+    publish_import,
+    resolve_suggested_mapping,
+    suggest_class_mapping,
+)
 from server.db.models import Base, Category, Frame, FrameStatus, Project
 from server.repositories.public_dataset_repository import PublicDatasetRepository
 
@@ -204,4 +209,49 @@ def test_publish_cancel_rolls_back_files_and_keeps_staging(tmp_path, monkeypatch
     assert session.query(Frame).count() == 0
     assert all(record.staging_path.joinpath(f"image-{index}.jpg").exists() for index in range(4))
     assert not list((tmp_path / "frames").rglob("public-*") if (tmp_path / "frames").exists() else [])
+    session.close()
+
+
+def test_suggest_class_mapping_matches_nest_to_bird_nest_alias():
+    mapping = suggest_class_mapping(
+        ({"class_id": 0, "name": "Nest"},),
+        ({"class_id": 0, "name": "鸟窝"},),
+    )
+    assert mapping == {"0": 0}
+
+
+def test_suggest_class_mapping_auto_maps_single_source_and_target():
+    mapping = suggest_class_mapping(
+        ({"class_id": 3, "name": "widget"},),
+        ({"class_id": 7, "name": "零件"},),
+    )
+    assert mapping == {"3": 7}
+
+
+def test_resolve_suggested_mapping_falls_back_when_llm_returns_null():
+    resolved = resolve_suggested_mapping(
+        [{"class_id": 0, "name": "Nest"}],
+        [{"class_id": 0, "name": "鸟窝"}],
+        {"0": None},
+    )
+    assert resolved == {"0": 0}
+
+
+def test_publish_rejects_all_ignored_when_dataset_has_labels(tmp_path):
+    session, repository, record = _prepared_import(tmp_path)
+    repository.update(
+        record.id,
+        quality_report={
+            **record.quality_report,
+            "annotation_count": 4,
+        },
+    )
+    with pytest.raises(RuntimeError, match="忽略"):
+        publish_import(
+            repository,
+            record.id,
+            class_mapping={"5": None},
+            warnings_confirmed=True,
+        )
+    assert session.query(Frame).count() == 0
     session.close()

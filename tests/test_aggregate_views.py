@@ -47,6 +47,7 @@ def test_dashboard_overview_aggregates_stats_and_latest_preview(monkeypatch, tmp
     assert overview.project.frame_count == 2
     assert overview.stats == {"unlabeled": 1, "needs_human": 1, "total": 2}
     assert overview.preview_frame_id == "newer"
+    assert overview.model_count == 0
 
 
 def test_global_task_list_includes_project_name():

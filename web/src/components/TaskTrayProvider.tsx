@@ -4,6 +4,7 @@ import Link from "next/link";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Task } from "@/lib/api";
 import { getNextActionForTask, taskTypeLabel } from "@/lib/workflow";
+import { TASK_STATUS_ZH } from "@/lib/status";
 import { useToast } from "@/components/ui/ToastProvider";
 
 export type TaskRow = Task & { projectName: string };
@@ -163,7 +164,11 @@ export function TaskTrayWidget() {
                     {recentTasks.slice(0, 4).map((t) => (
                       <li key={t.id}>
                         <span>{taskTypeLabel(t.task_type)}</span>
-                        <span className="task-tray__status">{t.status}</span>
+                        <span className="task-tray__status">
+                          {t.cancel_requested && t.status === "running"
+                            ? "取消中"
+                            : (TASK_STATUS_ZH[t.status] ?? t.status)}
+                        </span>
                       </li>
                     ))}
                   </ul>

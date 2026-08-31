@@ -1,7 +1,15 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8010";
+import { resolveApiBase } from "./api-base";
+
+/** 浏览器未配置时走同源 /api 代理；SSR 回退本机后端 */
+export function getApiBase(): string {
+  if (typeof window !== "undefined") {
+    return resolveApiBase();
+  }
+  return resolveApiBase() || "http://127.0.0.1:8010";
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${getApiBase()}${path}`, {
     ...options,
     headers: {
       ...(options?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
@@ -34,6 +42,7 @@ export type ProjectOverview = {
   project: Project;
   stats: Record<string, number>;
   preview_frame_id: string | null;
+  model_count: number;
 };
 
 export type Category = {
@@ -205,7 +214,7 @@ export const api = {
   ) =>
     new Promise<Video>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${API_BASE}/api/projects/${projectId}/videos/upload`);
+      xhr.open("POST", `${getApiBase()}/api/projects/${projectId}/videos/upload`);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
       };
@@ -304,7 +313,7 @@ export const api = {
   frameStats: (projectId: string) =>
     request<Record<string, number>>(`/api/projects/${projectId}/frames/stats`),
   frameImageUrl: (projectId: string, frameId: string, annotated = false) =>
-    `${API_BASE}/api/projects/${projectId}/frames/${frameId}/image?annotated=${annotated}`,
+    `${getApiBase()}/api/projects/${projectId}/frames/${frameId}/image?annotated=${annotated}`,
   frameFeedback: (projectId: string, frameId: string, status: string, note = "") =>
     request(`/api/projects/${projectId}/frames/${frameId}/feedback`, {
       method: "POST",

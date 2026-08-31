@@ -18,20 +18,23 @@ export function ProjectContextBar() {
   const { id } = useParams<{ id: string }>();
   const pathname = usePathname();
   const [stats, setStats] = useState<Record<string, number>>({});
+  const [modelCount, setModelCount] = useState(0);
 
   useEffect(() => {
     if (!id) return;
 
     let active = true;
     const load = () => {
-      api.frameStats(id)
-        .then((nextStats) => {
+      Promise.all([api.frameStats(id), api.listModels(id)])
+        .then(([nextStats, models]) => {
           if (!active) return;
           setStats(nextStats);
+          setModelCount(models.length);
         })
         .catch(() => {
           if (!active) return;
           setStats({});
+          setModelCount(0);
         });
     };
 
@@ -43,7 +46,7 @@ export function ProjectContextBar() {
     };
   }, [id]);
 
-  const stepBadges = useMemo(() => computeStepBadges(stats), [stats]);
+  const stepBadges = useMemo(() => computeStepBadges(stats, modelCount), [stats, modelCount]);
   const activeStepIndex = PROJECT_STEPS.findIndex((step) =>
     pathname.startsWith(`/projects/${id}/${step.slug}`),
   );

@@ -289,13 +289,18 @@ class PublicDatasetRepository:
     def discard(self, import_record: PublicImportDTO) -> int:
         if import_record.dataset_version_id or import_record.train_task_id:
             raise RuntimeError("该公开数据已进入数据版本或训练，不能放弃")
+        removed = self.remove_published_frames(import_record)
+        model = self._db.get(PublicDatasetImport, import_record.id)
+        if model:
+            model.state = "discarded"
+        self._db.flush()
+        return removed
+
+    def remove_published_frames(self, import_record: PublicImportDTO) -> int:
         frames = self.frames_for_import(import_record.id)
         for frame in frames:
             Path(frame.filepath).unlink(missing_ok=True)
             label_path_for_frame(import_record.project_id, frame).unlink(missing_ok=True)
             self._db.delete(frame)
-        model = self._db.get(PublicDatasetImport, import_record.id)
-        if model:
-            model.state = "discarded"
         self._db.flush()
         return len(frames)

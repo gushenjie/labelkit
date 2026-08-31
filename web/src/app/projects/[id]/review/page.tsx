@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, Annotation, Frame, Project, Task } from "@/lib/api";
+import { api, Annotation, Frame, Project, PublicDatasetImport, Task } from "@/lib/api";
 import { AnnotationEditor } from "@/components/AnnotationEditor";
 import { LlmLabelPanel } from "@/components/LlmLabelPanel";
 import { YoloLabelPanel } from "@/components/YoloLabelPanel";
@@ -18,6 +18,7 @@ import {
   countConfirmed,
   countPendingReview,
   countRejected,
+  countSampleReview,
   FRAME_STATUS_SIMPLE,
   normalizeReviewFilter,
   reviewStatuses,
@@ -27,6 +28,7 @@ import {
 
 export default function ReviewPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const frameParam = searchParams.get("frame");
   const filterParam = searchParams.get("filter") ?? searchParams.get("status");
@@ -53,6 +55,9 @@ export default function ReviewPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [showAutoReview, setShowAutoReview] = useState(false);
   const [relabelMode, setRelabelMode] = useState<"yolo" | "llm">("yolo");
+  const [annotationSidePanel, setAnnotationSidePanel] = useState<HTMLDivElement | null>(null);
+  const [publicImport, setPublicImport] = useState<PublicDatasetImport | null>(null);
+  const [approvingTrain, setApprovingTrain] = useState(false);
 
   const reviewable =
     (frameStats.llm_labeled ?? 0) + (frameStats.needs_human ?? 0) + (frameStats.auto_fixed ?? 0);
@@ -68,12 +73,47 @@ export default function ReviewPage() {
       return;
     }
     api.frameStats(id).then((stats) => {
-      if (countPendingReview(stats) > 0) setFilter("pending");
+      if (countSampleReview(stats) > 0) setFilter("sample");
+      else if (countPendingReview(stats) > 0) setFilter("pending");
       else if (countRejected(stats) > 0) setFilter("rejected");
       else if (countConfirmed(stats) > 0) setFilter("confirmed");
       else setFilter("all");
     });
   }, [id, filterParam]);
+
+  useEffect(() => {
+    if (!id) return;
+    api.listPublicDatasetImports(id)
+      .then((imports) => {
+        const active = imports.find((item) =>
+          ["review", "review_expanded", "training", "completed"].includes(item.state),
+        );
+        setPublicImport(active ?? imports[0] ?? null);
+      })
+      .catch(() => setPublicImport(null));
+  }, [id]);
+
+  const startTrainingFromReview = async () => {
+    if (!id || approvingTrain) return;
+    if (!publicImport) {
+      router.push(`/projects/${id}/materials`);
+      return;
+    }
+    if (publicImport.state === "training" || publicImport.state === "completed") {
+      router.push(`/projects/${id}/train`);
+      return;
+    }
+    setApprovingTrain(true);
+    try {
+      await api.approvePublicDatasetAndTrain(id, publicImport.id);
+      toast({ type: "success", message: "复查门禁通过，已创建数据版本并开始训练" });
+      router.push(`/projects/${id}/train`);
+    } catch (error) {
+      toast({ type: "error", message: `${error}` });
+    } finally {
+      setApprovingTrain(false);
+    }
+  };
 
   const loadFrames = useCallback(() => {
     if (!id || filter === null) return;
@@ -148,6 +188,7 @@ export default function ReviewPage() {
     const preload = (i: number) => {
       if (i < 0 || i >= frames.length) return;
       const img = new Image();
+      img.crossOrigin = "anonymous";
       img.src = api.frameImageUrl(id, frames[i].id, false);
     };
     preload(idx - 2);
@@ -182,9 +223,12 @@ export default function ReviewPage() {
     };
   }, [isEditing]);
 
-  const confirmDiscard = () => !isEditing || window.confirm("当前标注尚未保存，确定放弃修改吗？");
+  const confirmDiscard = useCallback(
+    () => !isEditing || window.confirm("当前标注尚未保存，确定放弃修改吗？"),
+    [isEditing],
+  );
 
-  const goFrame = (next: number) => {
+  const goFrame = useCallback((next: number) => {
     if (!confirmDiscard()) return;
     setIsEditing(false);
     if (next >= frames.length && nextCursor) {
@@ -192,7 +236,7 @@ export default function ReviewPage() {
     } else {
       setIdx(Math.max(0, Math.min(next, frames.length - 1)));
     }
-  };
+  }, [confirmDiscard, frames.length, loadNextPage, nextCursor, pageTotal]);
 
   const switchFilter = (next: ReviewFilter) => {
     if (!confirmDiscard()) return;
@@ -206,12 +250,12 @@ export default function ReviewPage() {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (e.key === "ArrowLeft") goFrame(Math.max(0, idx - 1));
+      if (e.key === "ArrowLeft") goFrame(idx - 1);
       if (e.key === "ArrowRight") goFrame(idx + 1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [idx, frames.length]);
+  }, [goFrame, idx]);
 
   const handleSave = async (annotations: Annotation[], frameStatus: string) => {
     if (!id || !current) return;
@@ -267,6 +311,40 @@ export default function ReviewPage() {
   const activeFilterMeta = REVIEW_FILTERS.find((f) => f.value === filter);
   const sessionMinutes = Math.max(1, Math.round((Date.now() - sessionStart.current) / 60000));
 
+  if (filter === "sample" && frames.length === 0 && countSampleReview(frameStats) === 0) {
+    return (
+      <div className="operations-page">
+        <ProjectPageHeader title="人工确认" description="公开数据风险抽样复查" eyebrow="Quality assurance" />
+        <Panel>
+          <div className="review-complete">
+            <h2>抽样复查完成</h2>
+            <p>
+              风险样本已全部确认（本次处理 {confirmedInSession} 张）。
+              点击下方按钮创建不可变数据版本并开始训练。
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 16, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={approvingTrain}
+                onClick={() => void startTrainingFromReview()}
+              >
+                {approvingTrain
+                  ? "正在创建版本并启动训练…"
+                  : publicImport?.state === "training"
+                    ? "查看训练进度"
+                    : "创建版本并开始训练"}
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => switchFilter("confirmed")}>
+                查看已确认
+              </button>
+            </div>
+          </div>
+        </Panel>
+      </div>
+    );
+  }
+
   if (filter === "pending" && frames.length === 0 && pendingCount === 0 && confirmedCount > 0) {
     return (
       <div className="operations-page">
@@ -288,10 +366,10 @@ export default function ReviewPage() {
   }
 
   return (
-    <div className="review-workspace">
+    <div className="review-workspace review-workspace--fit">
       <ProjectPageHeader
         title="人工确认"
-        description="逐张确认机器标注 · Y/N 快捷键 · ← → 翻页"
+        description="逐张确认 · Y 确认 · O 无目标 · N 驳回 · V/A 查看标注 · ← → 翻页"
         eyebrow="Quality assurance"
       />
 
@@ -302,9 +380,11 @@ export default function ReviewPage() {
         </p>
       )}
 
+      <div className="review-workspace__main">
       <div className="review-toolbar">
         {REVIEW_FILTERS.map((f) => {
           const count =
+            f.value === "sample" ? countSampleReview(frameStats) :
             f.value === "pending" ? pendingCount :
             f.value === "rejected" ? rejectedCount :
             f.value === "confirmed" ? confirmedCount : null;
@@ -373,6 +453,8 @@ export default function ReviewPage() {
                   onSave={handleSave}
                   onDirtyChange={setIsEditing}
                   darkCanvas
+                  compact
+                  sidePanel={annotationSidePanel}
                 />
               )}
             </div>
@@ -389,15 +471,11 @@ export default function ReviewPage() {
                     <p className="review-side__note">{current.review_note}</p>
                   )}
                   <dl className="review-side__stats">
-                    <div><dt>当前队列</dt><dd>{frames.length}</dd></div>
+                    <div><dt>复查进度</dt><dd>{idx + 1} / {pageTotal}</dd></div>
                     <div><dt>已确认</dt><dd>{confirmedCount}</dd></div>
                     <div><dt>已驳回</dt><dd>{rejectedCount}</dd></div>
                   </dl>
-                  <div className="review-shortcuts">
-                    <span>快捷操作</span>
-                    <div><kbd>Y</kbd>确认 <kbd>N</kbd>驳回 <kbd>0</kbd>无目标</div>
-                    <div><kbd>Del</kbd>删框 <kbd>←</kbd><kbd>→</kbd>翻页</div>
-                  </div>
+                  <div ref={setAnnotationSidePanel} className="review-side__annotations" />
                 </>
               )}
             </aside>
@@ -420,6 +498,7 @@ export default function ReviewPage() {
           </div>
         </>
       )}
+      </div>
 
       {filter === "rejected" && rejectedCount > 0 && (
         <Panel>

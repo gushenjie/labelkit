@@ -11,7 +11,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TaskProgress } from "@/components/ui/TaskProgress";
 import { useToast } from "@/components/ui/ToastProvider";
 import { api, Project } from "@/lib/api";
-import { countConfirmed, countPendingReview } from "@/lib/status";
+import { countBlockingReview, countTrainable } from "@/lib/status";
 import {
   computeContinueAction,
   computeStepBadges,
@@ -23,6 +23,7 @@ type ProjectMeta = {
   project: Project;
   stats: Record<string, number>;
   previewFrameId?: string;
+  modelCount: number;
 };
 
 const WORKFLOW_STEPS: { slug: WorkflowStep; label: string }[] = [
@@ -124,10 +125,11 @@ export default function HomePage() {
     try {
       const [overviews, settings] = await Promise.all([api.listProjectOverviews(), api.getSettings()]);
       setApiKeyMissing(!settings.dashscope_api_key_set);
-      setItems(overviews.map(({ project, stats, preview_frame_id }) => ({
+      setItems(overviews.map(({ project, stats, preview_frame_id, model_count }) => ({
         project,
         stats,
         previewFrameId: preview_frame_id ?? undefined,
+        modelCount: model_count ?? 0,
       })));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "项目数据加载失败");
@@ -162,20 +164,22 @@ export default function HomePage() {
   const totals = useMemo(
     () =>
       items.reduce(
-        (acc, { project, stats }) => ({
+        (acc, { project, stats, modelCount }) => ({
           frames: acc.frames + project.frame_count,
           storage: acc.storage + project.disk_usage_mb,
-          pending: acc.pending + countPendingReview(stats),
+          pending: acc.pending + countBlockingReview(stats),
           unlabeled: acc.unlabeled + (stats.unlabeled ?? 0),
+          trained: acc.trained + (modelCount > 0 ? 1 : 0),
           ready: acc.ready + (
-            countConfirmed(stats) > 0
-            && countPendingReview(stats) === 0
+            countTrainable(stats) > 0
+            && countBlockingReview(stats) === 0
             && (stats.unlabeled ?? 0) === 0
+            && modelCount === 0
               ? 1
               : 0
           ),
         }),
-        { frames: 0, storage: 0, pending: 0, unlabeled: 0, ready: 0 },
+        { frames: 0, storage: 0, pending: 0, unlabeled: 0, trained: 0, ready: 0 },
       ),
     [items],
   );
@@ -350,8 +354,8 @@ export default function HomePage() {
               ) : filteredItems.map((meta) => {
                 const { project } = meta;
                 const projectTasks = runningTasks.filter((task) => task.project_id === project.id);
-                const action = computeContinueAction(project.id, meta.stats, projectTasks);
-                const stageBadges = computeStepBadges(meta.stats);
+                const action = computeContinueAction(project.id, meta.stats, projectTasks, meta.modelCount);
+                const stageBadges = computeStepBadges(meta.stats, meta.modelCount);
 
                 return (
                   <article className="project-order" key={project.id}>
@@ -461,7 +465,7 @@ export default function HomePage() {
                 <div>
                   <span>待人工复查</span>
                   <strong>{formatNumber(totals.pending)}</strong>
-                  <small>机器已标注，等待确认</small>
+                  <small>抽样或存疑，需人工确认</small>
                 </div>
                 <div>
                   <span>未标注素材</span>
@@ -469,9 +473,9 @@ export default function HomePage() {
                   <small>等待进入智能标注</small>
                 </div>
                 <div>
-                  <span>可训练项目</span>
-                  <strong>{formatNumber(totals.ready)}</strong>
-                  <small>数据已经确认完成</small>
+                  <span>已训练项目</span>
+                  <strong>{formatNumber(totals.trained)}</strong>
+                  <small>已有模型版本可试用</small>
                 </div>
               </div>
             </section>

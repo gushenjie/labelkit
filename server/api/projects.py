@@ -19,7 +19,7 @@ from server.api.schemas import (
     ProjectUpdate,
 )
 from server.db.database import get_db, project_dir
-from server.db.models import Annotation, Category, Frame, Project, Video
+from server.db.models import Annotation, Category, Frame, ModelVersion, Project, Video
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -123,6 +123,10 @@ def list_project_overviews(db: Session = Depends(get_db)):
         .all()
     )
 
+    model_counts = dict(
+        db.query(ModelVersion.project_id, func.count(ModelVersion.id)).group_by(ModelVersion.project_id).all()
+    )
+
     overviews: list[ProjectOverviewOut] = []
     for project in projects:
         project_out = ProjectOut(
@@ -145,6 +149,7 @@ def list_project_overviews(db: Session = Depends(get_db)):
             project=project_out,
             stats=stats,
             preview_frame_id=preview_by_project.get(project.id),
+            model_count=model_counts.get(project.id, 0),
         ))
     return overviews
 

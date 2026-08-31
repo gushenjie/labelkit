@@ -1,4 +1,4 @@
-import { countConfirmed, countPendingReview } from "@/lib/status";
+import { countBlockingReview, countConfirmed, countTrainable } from "@/lib/status";
 import type { Task } from "@/lib/api";
 
 export type WorkflowStep = "materials" | "label" | "review" | "train";
@@ -57,6 +57,7 @@ export function computeContinueAction(
   projectId: string,
   stats: Record<string, number>,
   runningTasks: Task[],
+  modelCount = 0,
 ): ContinueAction {
   const running = runningTasks.find((t) => t.status === "running" || t.status === "pending");
   if (running) {
@@ -72,7 +73,8 @@ export function computeContinueAction(
 
   const total = stats.total ?? 0;
   const unlabeled = stats.unlabeled ?? 0;
-  const pending = countPendingReview(stats);
+  const blocking = countBlockingReview(stats);
+  const trainable = countTrainable(stats);
   const confirmed = countConfirmed(stats);
 
   if (total === 0) {
@@ -96,13 +98,34 @@ export function computeContinueAction(
     };
   }
 
-  if (pending > 0) {
+  if (blocking > 0) {
     return {
       step: "review",
       label: "继续人工确认",
-      description: `${pending} 张待确认`,
+      description: `${blocking} 张待确认`,
       href: `/projects/${projectId}/review`,
-      count: pending,
+      count: blocking,
+      primary: true,
+    };
+  }
+
+  if (modelCount > 0) {
+    return {
+      step: "train",
+      label: "查看模型",
+      description: `已有 ${modelCount} 个训练版本，可在线试用或导出`,
+      href: `/models?project=${projectId}`,
+      primary: true,
+    };
+  }
+
+  if (trainable > 0) {
+    return {
+      step: "train",
+      label: "开始训练",
+      description: `${trainable} 张已就绪，可以训练或导出`,
+      href: `/projects/${projectId}/train`,
+      count: trainable,
       primary: true,
     };
   }
@@ -133,16 +156,21 @@ export type StepBadge = {
   done?: boolean;
 };
 
-export function computeStepBadges(stats: Record<string, number>): StepBadge[] {
+export function computeStepBadges(
+  stats: Record<string, number>,
+  modelCount = 0,
+): StepBadge[] {
   const total = stats.total ?? 0;
   const unlabeled = stats.unlabeled ?? 0;
-  const pending = countPendingReview(stats);
+  const blocking = countBlockingReview(stats);
+  const trainable = countTrainable(stats);
   const confirmed = countConfirmed(stats);
+  const reviewDone = blocking === 0 && unlabeled === 0 && (confirmed > 0 || trainable > 0);
 
   return [
     { slug: "materials", done: total > 0 },
     { slug: "label", count: unlabeled > 0 ? unlabeled : undefined, done: total > 0 && unlabeled === 0 },
-    { slug: "review", count: pending > 0 ? pending : undefined, done: pending === 0 && confirmed > 0 },
-    { slug: "train", done: confirmed > 0 && pending === 0 && unlabeled === 0 },
+    { slug: "review", count: blocking > 0 ? blocking : undefined, done: reviewDone },
+    { slug: "train", done: modelCount > 0 },
   ];
 }

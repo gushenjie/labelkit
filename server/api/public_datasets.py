@@ -35,7 +35,7 @@ from server.core.public_dataset_types import PublicDatasetCandidateDTO, PublicIm
 from server.core.public_dataset_workflow import (
     evaluate_review,
     prepare_review_after_labeling,
-    suggest_class_mapping,
+    resolve_suggested_mapping,
 )
 from server.db.database import get_db
 from server.db.models import ProjectExecutionLease, ProjectTaskType, Task, TaskType
@@ -63,9 +63,11 @@ def _candidate_out(candidate: PublicDatasetCandidateDTO) -> PublicDatasetCandida
 
 def _import_out(repository: PublicDatasetRepository, record: PublicImportDTO) -> PublicDatasetImportOut:
     context = repository.project_context(record.project_id)
+    stored = record.workflow_metadata.get("suggested_mapping")
     suggested = (
-        record.workflow_metadata.get("suggested_mapping")
-        or (suggest_class_mapping(record.source_classes, context.categories) if context else {})
+        resolve_suggested_mapping(record.source_classes, context.categories, stored)
+        if context
+        else (stored if isinstance(stored, dict) else {})
     )
     image_count = int(record.quality_report.get("image_count") or 0)
     annotation_count = int(record.quality_report.get("annotation_count") or 0)
@@ -254,6 +256,11 @@ def publish_public_dataset(
     if record.state != "fetched":
         raise HTTPException(400, "公开数据尚未完成下载分析或已经发布")
     annotation_count = int(record.quality_report.get("annotation_count") or 0)
+    if annotation_count > 0 and all(value is None for value in body.class_mapping.values()):
+        raise HTTPException(
+            400,
+            "数据集含有标注，不能将所有来源类别设为「忽略」。请至少映射一个类别到项目类别。",
+        )
     if body.auto_label and annotation_count == 0:
         if not body.cost_confirmed:
             raise HTTPException(400, "必须确认 VLM 预估费用后才能自动标注")

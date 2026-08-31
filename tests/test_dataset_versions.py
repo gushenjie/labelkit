@@ -69,6 +69,46 @@ def test_detection_version_keeps_source_group_in_one_split_and_reproduces_labels
     assert all(len([line for line in text.splitlines() if line]) == 2 for text in first_labels)
 
 
+def test_detection_single_source_group_falls_back_to_frame_split(tmp_path, monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    project = Project(id="project", name="P", task_type=ProjectTaskType.DETECT)
+    session.add_all([project, Category(project_id=project.id, class_id=0, name="flame")])
+    for index in range(5):
+        image_path = tmp_path / f"frame-{index}.jpg"
+        _write_image(image_path, index * 50)
+        frame = Frame(
+            id=f"frame-{index}",
+            project_id=project.id,
+            filename=image_path.name,
+            filepath=str(image_path),
+            source_group_id="single-video",
+            status=FrameStatus.HUMAN_OK,
+        )
+        session.add(frame)
+        session.flush()
+        session.add(
+            Annotation(
+                frame_id=frame.id,
+                class_id=0,
+                x_center=0.5,
+                y_center=0.5,
+                width=0.2,
+                height=0.2,
+            )
+        )
+    session.commit()
+    monkeypatch.setattr(dataset_module, "dataset_versions_dir", lambda _project_id: tmp_path / "versions")
+    service = DatasetService(DatasetVersionRepository(session))
+
+    version = service.create_version(project.id, project.task_type, val_ratio=0.2)
+
+    splits = {entry["split"] for entry in version.manifest["frames"]}
+    assert splits == {"train", "val"}
+    assert len(version.manifest["frames"]) == 5
+
+
 def test_classification_split_covers_each_class_and_excludes_no_target(tmp_path, monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

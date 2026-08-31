@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel, PanelSection } from "@/components/ui/Panel";
@@ -49,12 +48,6 @@ export default function SettingsPage() {
         title="全局设置"
         description="LLM 标注 API 与并发参数"
         eyebrow="Platform configuration"
-        action={
-          <Link href="/" className="btn-secondary">
-            <Icon name="chevron-left" size={15} />
-            返回项目列表
-          </Link>
-        }
         meta={
           <span className={settings.dashscope_api_key_set ? "settings-health settings-health--ready" : "settings-health"}>
             <i aria-hidden="true" />
@@ -63,14 +56,7 @@ export default function SettingsPage() {
         }
       />
 
-      <div className="settings-page__body">
-        <nav className="settings-page__nav" aria-label="设置分组">
-          <a href="#api">API 密钥</a>
-          <a href="#model">模型参数</a>
-          <a href="#runtime">执行策略</a>
-        </nav>
-
-        <Panel className="settings-page__panel">
+      <Panel className="settings-page__panel">
           <PanelSection title="API 密钥" id="api">
             <div className="settings-section-intro">
               <span><Icon name="settings" size={18} /></span>
@@ -146,8 +132,7 @@ export default function SettingsPage() {
               </label>
             </div>
           </PanelSection>
-        </Panel>
-      </div>
+      </Panel>
 
       <div className="settings-page__savebar">
         <button className="btn-primary" onClick={save} disabled={saving}>

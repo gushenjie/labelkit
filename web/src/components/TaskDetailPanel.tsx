@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { api, Frame, Task } from "@/lib/api";
 import { FrameLightbox } from "@/components/FrameLightbox";
+import { DATASET_FORMAT_ZH, PUBLIC_IMPORT_STATE_ZH } from "@/lib/publicDatasetLabels";
 
 const TASK_LABEL: Record<string, string> = {
   extract: "提取素材",
@@ -62,10 +63,11 @@ function formatLogLines(log: string): string[] {
     .slice(-8);
 }
 
-/** 已有结构化结果摘要时，不再重复展示含路径的执行日志 */
+/** 已有结构化结果摘要时，不再重复展示简短执行日志 */
 function hideLogForTask(task: Task): boolean {
   if (task.status !== "completed" || !task.result) return false;
   if (task.task_type === "export" && task.result.stats) return true;
+  if (task.task_type === "train" && task.result.version != null) return true;
   return false;
 }
 
@@ -143,6 +145,12 @@ function TaskResultSummary({ task }: { task: Task }) {
   if (task.task_type === "train") {
     const dataset = r.dataset as { train?: number; val?: number; total?: number } | undefined;
     const version = r.version as number | undefined;
+    const metrics = r.metrics as Record<string, number> | undefined;
+    const logPath = r.log_path as string | undefined;
+    const outputDir = r.output_dir as string | undefined;
+    const map50 = metrics?.["metrics/mAP50(B)"];
+    const precision = metrics?.["metrics/precision(B)"];
+    const recall = metrics?.["metrics/recall(B)"];
     return (
       <ResultBlock title="训练结果">
         {version != null && <StatRow label="模型版本" value={`v${version}`} />}
@@ -152,9 +160,32 @@ function TaskResultSummary({ task }: { task: Task }) {
             value={`训练 ${dataset.train ?? 0} / 验证 ${dataset.val ?? 0}`}
           />
         )}
-        {r.model_path != null && r.model_path !== "" && (
-          <p className="mt-2 break-all text-xs text-subtle">{String(r.model_path)}</p>
+        {map50 != null && (
+          <StatRow label="验证 mAP50" value={`${(map50 * 100).toFixed(1)}%`} />
         )}
+        {precision != null && recall != null && (
+          <StatRow
+            label="精确率 / 召回率"
+            value={`${(precision * 100).toFixed(1)}% / ${(recall * 100).toFixed(1)}%`}
+          />
+        )}
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Link href={`/models?project=${task.project_id}`} className="btn-primary text-xs">
+            去模型中心 · 在线试用
+          </Link>
+          {(outputDir || logPath) && (
+            <button
+              type="button"
+              className="btn-secondary text-xs"
+              onClick={() => {
+                const target = outputDir || (logPath ? String(logPath).replace(/[/\\][^/\\]+$/, "") : "");
+                if (target) api.openPath(target).catch(() => {});
+              }}
+            >
+              打开训练输出目录
+            </button>
+          )}
+        </div>
       </ResultBlock>
     );
   }
@@ -164,6 +195,41 @@ function TaskResultSummary({ task }: { task: Task }) {
     return (
       <ResultBlock title="审查结果">
         {pass != null && <StatRow label="机器通过" value={`${pass} 张`} />}
+      </ResultBlock>
+    );
+  }
+
+  if (task.task_type === "public_fetch") {
+    const format = String(r.format ?? "");
+    const images = r.images as number | undefined;
+    return (
+      <ResultBlock title="下载分析结果">
+        {r.import_id != null && <StatRow label="导入记录" value={String(r.import_id)} />}
+        {format && (
+          <StatRow label="识别格式" value={DATASET_FORMAT_ZH[format] ?? format} />
+        )}
+        {images != null && <StatRow label="图片数量" value={`${images} 张`} />}
+      </ResultBlock>
+    );
+  }
+
+  if (task.task_type === "public_import") {
+    const state = String(r.state ?? "");
+    const published = r.published as number | undefined;
+    const reviewSamples = r.review_samples as number | undefined;
+    return (
+      <ResultBlock title="发布结果">
+        {r.import_id != null && <StatRow label="导入记录" value={String(r.import_id)} />}
+        {published != null && <StatRow label="已入库" value={`${published} 张`} />}
+        {state && (
+          <StatRow label="导入状态" value={PUBLIC_IMPORT_STATE_ZH[state] ?? state} />
+        )}
+        {reviewSamples != null && <StatRow label="抽样复查" value={`${reviewSamples} 张`} />}
+        {state === "needs_label" && (
+          <p className="mt-2 text-xs text-subtle">
+            素材已入库但未进入抽样复查，请检查类别映射是否误选「忽略」，或在素材管理中补标。
+          </p>
+        )}
       </ResultBlock>
     );
   }

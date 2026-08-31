@@ -119,6 +119,11 @@ def prepare_classify_dataset(
     return stats
 
 
+def _strip_ansi(text: str) -> str:
+    """去掉 Ultralytics 训练输出里的 ANSI 控制符，便于解析 epoch 进度。"""
+    return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]|\[K", "", text)
+
+
 def _terminate_process_tree(pid: int, timeout: float = 5.0) -> None:
     import psutil
 
@@ -187,8 +192,8 @@ def run_train_task(
         data_path = dataset_dir
     else:
         base_model = requested_model or "yolov8s.pt"
-        if stats["total"] < 10:
-            raise RuntimeError(f"可训练样本过少: {stats['total']}")
+        if stats["total"] < 5:
+            raise RuntimeError(f"可训练样本过少: {stats['total']}（检测任务至少需要 5 张）")
         if log:
             log(f"检测数据集: {stats}")
         data_path = dataset_dir / "dataset.yaml"
@@ -263,8 +268,9 @@ def run_train_task(
             output_file.write(line)
             output_file.flush()
             tail.append(line.rstrip())
-            epoch_match = re.match(r"^\s*(\d+)\s*/\s*(\d+)\b", line)
-            if epoch_match:
+            clean_line = _strip_ansi(line)
+            epoch_match = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s+\d+[GMK]?", clean_line)
+            if epoch_match and int(epoch_match.group(2)) == epochs:
                 task.progress = min(int(epoch_match.group(1)), epochs)
                 task.heartbeat_at = datetime.now(timezone.utc)
                 db.commit()

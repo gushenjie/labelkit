@@ -367,13 +367,14 @@ export default function TrainPage() {
           <PanelSection title="训练记录">
             {tasks.map((t) => (
               <div key={t.id} className="mb-3 text-sm">
-                <div className="flex justify-between">
+                <div className="flex justify-between gap-3">
                   <span className="text-brand-600">模型训练</span>
-                  <span className="text-muted">{TASK_STATUS_ZH[t.status] ?? t.status}</span>
+                  <span className="shrink-0 text-muted">
+                    {t.status === "running"
+                      ? `${TASK_STATUS_ZH[t.status]} · ${t.progress}/${t.total}`
+                      : (TASK_STATUS_ZH[t.status] ?? t.status)}
+                  </span>
                 </div>
-                {t.status === "running" && (
-                  <TaskProgress progress={t.progress} total={t.total} />
-                )}
                 {t.error && <p className="text-xs text-danger-600">{t.error}</p>}
               </div>
             ))}

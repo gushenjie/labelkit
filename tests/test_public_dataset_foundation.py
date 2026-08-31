@@ -79,6 +79,25 @@ def test_inspect_yolo_preserves_three_boxes_and_splits(tmp_path):
     assert not inspection.quality_report["blocking"]
 
 
+def test_inspect_roboflow_relative_yaml_paths(tmp_path):
+    for split in ("train", "valid", "test"):
+        image = tmp_path / split / "images" / f"{split}.jpg"
+        _image(image, 80)
+        label = tmp_path / split / "labels" / f"{split}.txt"
+        label.parent.mkdir(parents=True, exist_ok=True)
+        label.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+    (tmp_path / "data.yaml").write_text(
+        "train: ../train/images\nval: ../valid/images\ntest: ../test/images\nnames: ['Nest']\n",
+        encoding="utf-8",
+    )
+
+    inspection = inspect_dataset(tmp_path, "detect")
+
+    assert inspection.format == "yolo_detect"
+    assert len(inspection.entries) == 3
+    assert {entry.split for entry in inspection.entries} == {"train", "val", "test"}
+
+
 def test_inspect_coco_converts_bbox_without_losing_instances(tmp_path):
     image = tmp_path / "images" / "train" / "one.jpg"
     _image(image)

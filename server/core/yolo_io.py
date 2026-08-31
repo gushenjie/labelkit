@@ -9,15 +9,38 @@ from typing import TypeAlias
 YoloLabel: TypeAlias = tuple[int, float, float, float, float]
 
 
+def _polygon_to_yolo(parts: list[str]) -> tuple[float, float, float, float]:
+    coords = [float(value) for value in parts[1:]]
+    if len(coords) < 4 or len(coords) % 2 != 0:
+        raise ValueError("polygon 坐标无效")
+    xs = coords[0::2]
+    ys = coords[1::2]
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    width = max(xmax - xmin, 0.0)
+    height = max(ymax - ymin, 0.0)
+    xc = min(max(xmin + width / 2, 0.0), 1.0)
+    yc = min(max(ymin + height / 2, 0.0), 1.0)
+    width = min(max(width, 0.0), 1.0)
+    height = min(max(height, 0.0), 1.0)
+    return xc, yc, width, height
+
+
 def parse_labels(text: str) -> list[YoloLabel]:
-    """Parse every YOLO row, including repeated class IDs."""
+    """Parse YOLO rows; polygon/segmentation rows are converted to bounding boxes."""
     result: list[YoloLabel] = []
     for line in text.strip().splitlines():
         parts = line.split()
         if len(parts) < 5:
             continue
         cls_id = int(parts[0])
-        xc, yc, w, h = map(float, parts[1:5])
+        try:
+            if len(parts) == 5:
+                xc, yc, w, h = map(float, parts[1:5])
+            else:
+                xc, yc, w, h = _polygon_to_yolo(parts)
+        except ValueError:
+            continue
         result.append((cls_id, xc, yc, w, h))
     return result
 

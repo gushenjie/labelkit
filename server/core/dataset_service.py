@@ -149,12 +149,31 @@ class DatasetVersionRepository:
         )
 
 
+def _frame_level_split(frames: list[SnapshotFrameInput], val_ratio: float) -> dict[str, str]:
+    """单来源或 POC 小数据集：按帧划分 train/val（相邻帧可能相似，仅适合试运行）。"""
+    ordered = sorted(frames, key=lambda frame: frame.id)
+    count = len(ordered)
+    if count < 2:
+        raise RuntimeError("可训练样本不足：至少需要 2 张图片才能划分训练集与验证集")
+    ratio = max(0.05, min(0.5, val_ratio))
+    val_count = max(1, round(count * ratio))
+    val_count = min(val_count, count - 1)
+    step = count / val_count
+    val_ids = {ordered[int(i * step)].id for i in range(val_count)}
+    return {frame.id: ("val" if frame.id in val_ids else "train") for frame in ordered}
+
+
 def _grouped_split(frames: list[SnapshotFrameInput], val_ratio: float) -> dict[str, str]:
     groups: dict[str, list[SnapshotFrameInput]] = {}
     for frame in frames:
         groups.setdefault(frame.source_group_id, []).append(frame)
     if len(groups) < 2:
-        raise RuntimeError("至少需要两个独立来源组，才能避免训练集与验证集泄漏")
+        if len(frames) >= 2:
+            return _frame_level_split(frames, val_ratio)
+        raise RuntimeError(
+            "可训练样本不足：至少需要 2 张图片才能划分训练集与验证集。"
+            "多段视频/分批上传图片可获得更可靠的验证划分。"
+        )
     target = max(1, round(len(frames) * max(0.05, min(0.5, val_ratio))))
     ordered = sorted(groups, key=lambda group: hashlib.sha256(group.encode("utf-8")).hexdigest())
     val_groups: set[str] = set()

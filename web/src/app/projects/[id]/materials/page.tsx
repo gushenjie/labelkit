@@ -16,6 +16,7 @@ import { Icon } from "@/components/Icon";
 import { ProjectPageHeader } from "@/components/ProjectPageHeader";
 import { TaskProgress } from "@/components/ui/TaskProgress";
 import { useToast } from "@/components/ui/ToastProvider";
+import { formatDatasetFormat, formatPublicImportState, allSourceLabelsIgnored, classMappingSelectValue } from "@/lib/publicDatasetLabels";
 
 type UploadItem = {
   name: string;
@@ -61,6 +62,7 @@ export default function MaterialsPage() {
   const [licenseConfirmed, setLicenseConfirmed] = useState(false);
   const [publicImport, setPublicImport] = useState<PublicDatasetImport | null>(null);
   const [classMapping, setClassMapping] = useState<Record<string, number | null>>({});
+  const [mappingInitializedFor, setMappingInitializedFor] = useState<string | null>(null);
   const [warningsConfirmed, setWarningsConfirmed] = useState(false);
   const [autoLabel, setAutoLabel] = useState(false);
   const [costConfirmed, setCostConfirmed] = useState(false);
@@ -125,10 +127,17 @@ export default function MaterialsPage() {
   }, [id, publicImport?.id, publicImport?.state]);
 
   useEffect(() => {
-    if (publicImport?.state === "fetched" && Object.keys(classMapping).length === 0) {
-      setClassMapping(publicImport.suggested_mapping);
+    if (publicImport?.state !== "fetched") {
+      if (publicImport?.state === "discarded") {
+        setMappingInitializedFor(null);
+        setClassMapping({});
+      }
+      return;
     }
-  }, [publicImport?.id, publicImport?.state, publicImport?.suggested_mapping]);
+    if (mappingInitializedFor === publicImport.id) return;
+    setClassMapping(publicImport.suggested_mapping);
+    setMappingInitializedFor(publicImport.id);
+  }, [publicImport?.id, publicImport?.state, publicImport?.suggested_mapping, mappingInitializedFor]);
 
   const uploadVideosParallel = async (files: File[]) => {
     if (!id || files.length === 0) return;
@@ -293,6 +302,14 @@ export default function MaterialsPage() {
       toast({ type: "error", message: "请为每个来源类别选择项目类别或忽略" });
       return;
     }
+    const annotationCount = Number(publicImport.quality_report.annotation_count ?? 0);
+    if (allSourceLabelsIgnored(classMapping, publicImport.source_classes, annotationCount)) {
+      toast({
+        type: "error",
+        message: "数据集含有标注，不能全部设为「忽略」。请至少映射一个来源类别到项目类别。",
+      });
+      return;
+    }
     setPublicBusy(true);
     try {
       await api.publishPublicDataset(id, publicImport.id, {
@@ -320,6 +337,28 @@ export default function MaterialsPage() {
       toast({ type: "success", message: "复查门禁通过，已创建不可变数据版本并开始训练" });
     } catch (error) {
       toast({ type: "error", message: `${error}` });
+      const refreshed = await api.getPublicDatasetImport(id, publicImport.id).catch(() => null);
+      if (refreshed) setPublicImport(refreshed);
+    } finally {
+      setPublicBusy(false);
+    }
+  };
+
+  const publishAnnotationCount = publicImport ? Number(publicImport.quality_report.annotation_count ?? 0) : 0;
+  const publishClassDistribution = (publicImport?.quality_report?.class_distribution ?? {}) as Record<string, number>;
+  const publishLabelsFullyIgnored = publicImport
+    ? allSourceLabelsIgnored(classMapping, publicImport.source_classes, publishAnnotationCount)
+    : false;
+
+  const retryPublicFetch = async () => {
+    if (!id || !publicImport?.fetch_task_id) return;
+    setPublicBusy(true);
+    try {
+      await api.retryTask(id, publicImport.fetch_task_id);
+      setPublicImport({ ...publicImport, state: "fetching" });
+      toast({ type: "info", message: "已从断点续传下载，请勿关闭后端服务" });
+    } catch (error) {
+      toast({ type: "error", message: `续传下载失败：${error}` });
       const refreshed = await api.getPublicDatasetImport(id, publicImport.id).catch(() => null);
       if (refreshed) setPublicImport(refreshed);
     } finally {
@@ -750,8 +789,8 @@ export default function MaterialsPage() {
               </div>
 
               <div className="public-import-workflow__summary">
-                <div><small>当前状态</small><strong>{publicImport.state}</strong></div>
-                <div><small>识别格式</small><strong>{publicImport.detected_format || "分析中"}</strong></div>
+                <div><small>当前状态</small><strong>{formatPublicImportState(publicImport.state)}</strong></div>
+                <div><small>识别格式</small><strong>{publicImport.detected_format ? formatDatasetFormat(publicImport.detected_format) : "分析中"}</strong></div>
                 <div><small>下载 / 解压</small><strong>{formatBytes(publicImport.actual_download_bytes)} / {formatBytes(publicImport.extracted_bytes)}</strong></div>
                 <div><small>校验摘要</small><strong>{publicImport.artifact_checksum ? publicImport.artifact_checksum.slice(0, 12) : "待生成"}</strong></div>
               </div>
@@ -761,18 +800,25 @@ export default function MaterialsPage() {
               )}
 
               {["fetch_failed", "fetch_interrupted"].includes(publicImport.state) && (
-                <div className="public-import-workflow__notice public-import-workflow__notice--danger">下载或分析未完成。可在任务中心查看脱敏错误并安全重试，或放弃后重新选择候选。</div>
+                <div className="public-import-workflow__notice public-import-workflow__notice--danger">
+                  下载或分析未完成。可点击「续传下载」从断点继续，或在任务中心查看错误详情。
+                </div>
               )}
 
               {publicImport.state === "fetched" && (
                 <div className="public-mapping">
-                  <header><div><strong>确认类别映射与质量门禁</strong><p>每个来源类别都必须映射到现有项目类别或明确忽略，不会静默新建类别。</p></div></header>
+                  <header><div><strong>确认类别映射与质量门禁</strong><p>无需认识英文类别名：系统会按语义自动建议映射；请核对「映射到」是否正确，避免误选「忽略」导致标注丢失。</p></div></header>
                   <div className="public-mapping__quality">
                     <span>图片 <strong>{String(publicImport.quality_report.image_count ?? 0)}</strong></span>
                     <span>标注 <strong>{String(publicImport.quality_report.annotation_count ?? 0)}</strong></span>
                     <span>阻断 <strong>{Array.isArray(publicImport.quality_report.blocking) ? publicImport.quality_report.blocking.length : 0}</strong></span>
                     <span>警告 <strong>{Array.isArray(publicImport.quality_report.warnings) ? publicImport.quality_report.warnings.length : 0}</strong></span>
                   </div>
+                  {publishLabelsFullyIgnored && (
+                    <div className="public-mapping__issues public-mapping__issues--danger">
+                      数据集含有 {publishAnnotationCount} 个标注框，但所有来源类别都被设为「忽略」。发布后将变成全部未标注，请至少映射一个类别到项目类别。
+                    </div>
+                  )}
                   {Array.isArray(publicImport.quality_report.blocking) && publicImport.quality_report.blocking.length > 0 && (
                     <ul className="public-mapping__issues public-mapping__issues--danger">{publicImport.quality_report.blocking.map((item) => <li key={String(item)}>{String(item)}</li>)}</ul>
                   )}
@@ -780,9 +826,39 @@ export default function MaterialsPage() {
                     <ul className="public-mapping__issues">{publicImport.quality_report.warnings.map((item) => <li key={String(item)}>{String(item)}</li>)}</ul>
                   )}
                   <div className="public-mapping__rows">
-                    {publicImport.source_classes.map((sourceClass) => (
-                      <label key={sourceClass.class_id}><span>{sourceClass.name}<small>来源 ID {sourceClass.class_id}</small></span><select value={classMapping[String(sourceClass.class_id)] ?? "ignore"} onChange={(event) => setClassMapping((previous) => ({ ...previous, [String(sourceClass.class_id)]: event.target.value === "ignore" ? null : Number(event.target.value) }))}><option value="ignore">忽略此类别</option>{project?.categories.map((category) => <option key={category.class_id} value={category.class_id}>{category.name} · ID {category.class_id}</option>)}</select></label>
-                    ))}
+                    {publicImport.source_classes.map((sourceClass) => {
+                      const boxCount = publishClassDistribution[String(sourceClass.class_id)] ?? 0;
+                      const mappedId = classMapping[String(sourceClass.class_id)];
+                      const mappedName = mappedId == null
+                        ? null
+                        : project?.categories.find((category) => category.class_id === mappedId)?.name;
+                      return (
+                        <label key={sourceClass.class_id}>
+                          <span>
+                            {sourceClass.name}
+                            <small>
+                              来源 ID {sourceClass.class_id}
+                              {boxCount > 0 ? ` · 约 ${numberFormatter.format(boxCount)} 个标注框` : ""}
+                            </small>
+                          </span>
+                          <select
+                            value={classMappingSelectValue(classMapping, sourceClass.class_id)}
+                            onChange={(event) => setClassMapping((previous) => ({
+                              ...previous,
+                              [String(sourceClass.class_id)]: event.target.value === "ignore" ? null : Number(event.target.value),
+                            }))}
+                          >
+                            <option value="ignore">忽略此类别（不导入标注）</option>
+                            {project?.categories.map((category) => (
+                              <option key={category.class_id} value={String(category.class_id)}>
+                                映射到：{category.name} · ID {category.class_id}
+                              </option>
+                            ))}
+                          </select>
+                          {mappedName && <small className="public-mapping__hint">将导入为项目类别「{mappedName}」</small>}
+                        </label>
+                      );
+                    })}
                   </div>
                   {Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && <label className="public-mapping__check"><input type="checkbox" checked={warningsConfirmed} onChange={(event) => setWarningsConfirmed(event.target.checked)} />我已查看并接受质量报告中的警告</label>}
                   {Number(publicImport.quality_report.annotation_count ?? 0) === 0 && (
@@ -795,7 +871,7 @@ export default function MaterialsPage() {
                     <label><span>批大小</span><input type="number" min="1" max="1024" value={trainingParams.batch} onChange={(event) => setTrainingParams((previous) => ({ ...previous, batch: Number(event.target.value) }))} /></label>
                     <label><span>设备</span><select value={trainingParams.device} onChange={(event) => setTrainingParams((previous) => ({ ...previous, device: event.target.value }))}><option value="auto">自动</option><option value="cpu">CPU</option><option value="mps">MPS</option><option value="0">CUDA 0</option></select></label>
                   </div>
-                  <button type="button" className="btn-primary" disabled={publicBusy || (Array.isArray(publicImport.quality_report.blocking) && publicImport.quality_report.blocking.length > 0) || (Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && !warningsConfirmed) || (autoLabel && !costConfirmed)} onClick={startPublicPublish}>确认映射并发布到项目</button>
+                  <button type="button" className="btn-primary" disabled={publicBusy || (Array.isArray(publicImport.quality_report.blocking) && publicImport.quality_report.blocking.length > 0) || (Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && !warningsConfirmed) || (autoLabel && !costConfirmed) || publishLabelsFullyIgnored} onClick={startPublicPublish}>确认映射并发布到项目</button>
                 </div>
               )}
 
@@ -803,13 +879,21 @@ export default function MaterialsPage() {
               {publicImport.state === "publish_interrupted" && <div className="public-import-workflow__notice public-import-workflow__notice--danger">发布被中断，源 staging 仍保留；请在任务中心重试，系统会清理未提交的孤儿文件。</div>}
 
               {["review", "review_expanded"].includes(publicImport.state) && (
-                <div className="public-review-gate"><div><strong>需要完成风险抽样复查</strong><p>共有 {publicImport.review_frame_ids.length} 张固定样本。发现错误时系统会自动扩大受影响类别的复查范围。</p></div><div><Link href={`/projects/${id}/label?status=needs_human`} className="btn-secondary">打开抽样复查</Link><button type="button" className="btn-primary" disabled={publicBusy} onClick={approveAndTrain}>复查完成，创建版本并训练</button></div></div>
+                <div className="public-review-gate"><div><strong>需要完成风险抽样复查</strong><p>共有 {publicImport.review_frame_ids.length} 张固定样本。发现错误时系统会自动扩大受影响类别的复查范围。</p></div><div><Link href={`/projects/${id}/review?filter=sample`} className="btn-secondary">打开抽样复查</Link><button type="button" className="btn-primary" disabled={publicBusy} onClick={approveAndTrain}>复查完成，创建版本并训练</button></div></div>
               )}
 
               {publicImport.state === "full_review_required" && <div className="public-import-workflow__notice public-import-workflow__notice--danger">抽样持续发现错误，已禁止自动训练。请全量复查或放弃该数据集。</div>}
               {publicImport.state === "training" && <div className="public-import-workflow__notice"><Icon name="check" size={16} />不可变数据版本已创建，训练任务正在运行。</div>}
               {["training_failed", "training_cancelled", "training_interrupted"].includes(publicImport.state) && <div className="public-import-workflow__notice public-import-workflow__notice--danger">训练未完成，不可变数据版本仍然保留。请在任务中心查看原因并重试。</div>}
               {publicImport.state === "completed" && <div className="public-import-workflow__notice"><Icon name="check" size={16} />公开数据链路已完成，训练结果已关联来源和数据版本。</div>}
+
+              {["fetch_failed", "fetch_interrupted"].includes(publicImport.state) && (
+                <div className="public-import-workflow__actions">
+                  <button type="button" className="btn-primary" disabled={publicBusy || !publicImport.fetch_task_id} onClick={retryPublicFetch}>
+                    {publicBusy ? "正在续传…" : "续传下载"}
+                  </button>
+                </div>
+              )}
 
               {!publicImport.dataset_version_id && !(["fetching", "publishing", "training"].includes(publicImport.state)) && <button type="button" className="public-import-workflow__discard" disabled={publicBusy} onClick={discardPublicImport}>放弃本次公开数据</button>}
             </div>

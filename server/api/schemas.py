@@ -62,6 +62,7 @@ class ProjectOverviewOut(BaseModel):
     project: ProjectOut
     stats: dict[str, int] = Field(default_factory=dict)
     preview_frame_id: str | None = None
+    model_count: int = 0
 
 
 class VideoOut(BaseModel):

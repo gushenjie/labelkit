@@ -65,15 +65,31 @@ def fetch_and_inspect(
     extracted_dir = _validated_staging_path(record)
     root = extracted_dir.parent
     download_dir = root / "downloads"
-    if download_dir.exists():
+    partial_candidates = list(download_dir.glob("*.part")) if download_dir.exists() else []
+    complete_archives = [
+        path
+        for path in download_dir.glob("*")
+        if path.is_file() and path.suffix.lower() in {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz"}
+    ] if download_dir.exists() else []
+    resume_download = record.state in {"fetch_failed", "fetch_interrupted"} and (
+        any(path.stat().st_size > 0 for path in partial_candidates)
+        or any(path.stat().st_size > 0 for path in complete_archives)
+    )
+    if download_dir.exists() and not resume_download:
         shutil.rmtree(download_dir)
+    elif not download_dir.exists():
+        download_dir.mkdir(parents=True, exist_ok=True)
     if extracted_dir.exists():
         shutil.rmtree(extracted_dir)
-    download_dir.mkdir(parents=True)
-    extracted_dir.mkdir(parents=True)
+    if not download_dir.exists():
+        download_dir.mkdir(parents=True)
+    extracted_dir.mkdir(parents=True, exist_ok=True)
     repository.update(import_id, state="fetching")
     if log:
-        log("正在从公开数据源下载固定版本…")
+        if resume_download:
+            log("检测到未完成下载，将从断点续传…")
+        else:
+            log("正在从公开数据源下载固定版本…")
 
     def on_download(written: int, expected: int | None) -> None:
         if progress:
@@ -101,6 +117,11 @@ def fetch_and_inspect(
     _write_manifest(record, inspection)
     context = repository.project_context(record.project_id)
     llm_mapping = suggest_mapping_with_llm(inspection.classes, context.categories) if context else None
+    suggested_mapping = (
+        resolve_suggested_mapping(inspection.classes, context.categories, llm_mapping)
+        if context
+        else {}
+    )
     if log:
         log(
             f"识别为 {inspection.format}：{len(inspection.entries)} 张图片，"
@@ -118,23 +139,93 @@ def fetch_and_inspect(
         quality_report=inspection.quality_report,
         workflow_metadata={
             **record.workflow_metadata,
-            **({"suggested_mapping": llm_mapping} if llm_mapping is not None else {}),
+            **({"suggested_mapping": suggested_mapping} if suggested_mapping else {}),
         },
     )
 
 
+def _normalize_class_token(name: str) -> str:
+    return "".join(character for character in str(name).casefold() if character.isalnum())
+
+
+# 跨语言常见目标检测类别别名，用于 Nest→鸟窝 等场景
+_SEMANTIC_CLASS_ALIASES: tuple[frozenset[str], ...] = (
+    frozenset({"nest", "birdnest", "birdsnest", "鸟窝", "鸟巢", "niaowo", "niaochao"}),
+    frozenset({"person", "human", "pedestrian", "people", "人", "行人", "人体"}),
+    frozenset({"helmet", "hardhat", "安全帽", "头盔"}),
+    frozenset({"smoke", "fire", "smog", "烟", "烟雾", "火"}),
+    frozenset({"car", "vehicle", "automobile", "汽车", "车辆", "小车"}),
+)
+
+
+def _semantic_class_match(source_norm: str, target_norm: str) -> bool:
+    if not source_norm or not target_norm:
+        return False
+    if source_norm == target_norm:
+        return True
+    if len(source_norm) >= 3 and len(target_norm) >= 3:
+        if source_norm in target_norm or target_norm in source_norm:
+            return True
+    for group in _SEMANTIC_CLASS_ALIASES:
+        if source_norm in group and target_norm in group:
+            return True
+    return False
+
+
 def suggest_class_mapping(source_classes: tuple[dict, ...], target_categories: tuple[dict, ...]) -> dict[str, int | None]:
     targets = {
-        "".join(character for character in item["name"].casefold() if character.isalnum()): int(item["class_id"])
+        _normalize_class_token(item["name"]): int(item["class_id"])
         for item in target_categories
     }
     mapping: dict[str, int | None] = {}
     for source in source_classes:
-        normalized = "".join(
-            character for character in str(source["name"]).casefold() if character.isalnum()
-        )
-        mapping[str(source["class_id"])] = targets.get(normalized)
+        normalized = _normalize_class_token(str(source["name"]))
+        matched = targets.get(normalized)
+        if matched is None:
+            for target_norm, target_id in targets.items():
+                if _semantic_class_match(normalized, target_norm):
+                    matched = target_id
+                    break
+        mapping[str(source["class_id"])] = matched
+    if (
+        len(source_classes) == 1
+        and len(target_categories) == 1
+        and mapping.get(str(source_classes[0]["class_id"])) is None
+    ):
+        mapping[str(source_classes[0]["class_id"])] = int(target_categories[0]["class_id"])
     return mapping
+
+
+def resolve_suggested_mapping(
+    source_classes: tuple[dict, ...] | list[dict],
+    target_categories: tuple[dict, ...] | list[dict],
+    stored: dict[str, int | None] | None = None,
+) -> dict[str, int | None]:
+    """合并 LLM/历史建议与规则映射，空项回退到语义匹配与单类别默认对应。"""
+    sources = tuple(source_classes)
+    targets = tuple(target_categories)
+    rule_based = suggest_class_mapping(sources, targets)
+    stored = stored or {}
+    resolved: dict[str, int | None] = {}
+    for source in sources:
+        key = str(source["class_id"])
+        stored_value = stored.get(key) if isinstance(stored, dict) else None
+        if stored_value is not None:
+            resolved[key] = int(stored_value)
+        else:
+            resolved[key] = rule_based.get(key)
+    return resolved
+
+
+def _ensure_mapping_preserves_labels(record: PublicImportDTO, class_mapping: dict[str, int | None]) -> None:
+    annotation_count = int(record.quality_report.get("annotation_count") or 0)
+    if annotation_count <= 0:
+        return
+    if all(value is None for value in class_mapping.values()):
+        raise RuntimeError(
+            "数据集含有标注，但所有来源类别均被设为「忽略」。"
+            "请至少将一个来源类别映射到项目类别，否则会导入为全部未标注。"
+        )
 
 
 def _sample_indices(
@@ -178,6 +269,39 @@ def _sample_indices(
     return sorted(selected)
 
 
+def prepare_republish(
+    repository: PublicDatasetRepository,
+    import_id: str,
+    *,
+    class_mapping: dict[str, int | None],
+) -> PublicImportDTO:
+    """清理错误发布结果并回到「待映射发布」，保留已下载的 staging 与 manifest。"""
+    record = repository.get_by_id(import_id)
+    if not record:
+        raise RuntimeError(f"Public dataset import not found: {import_id}")
+    if record.dataset_version_id or record.train_task_id:
+        raise RuntimeError("该公开数据已进入数据版本或训练，不能重新发布")
+    if record.state not in {"needs_label", "publish_interrupted", "review", "review_expanded"}:
+        raise RuntimeError(f"当前状态「{record.state}」不支持重新发布")
+    context = repository.project_context(record.project_id)
+    if not context:
+        raise RuntimeError("Project not found")
+    resolved_mapping = resolve_suggested_mapping(
+        record.source_classes,
+        context.categories,
+        class_mapping,
+    )
+    _ensure_mapping_preserves_labels(record, resolved_mapping)
+    repository.remove_published_frames(record)
+    return repository.update(
+        import_id,
+        state="fetched",
+        class_mapping=resolved_mapping,
+        review_frame_ids=[],
+        import_task_id=None,
+    )
+
+
 def publish_import(
     repository: PublicDatasetRepository,
     import_id: str,
@@ -209,6 +333,7 @@ def publish_import(
     target_ids = {int(item["class_id"]) for item in context.categories}
     if any(value is not None and int(value) not in target_ids for value in class_mapping.values()):
         raise RuntimeError("类别映射引用了项目中不存在的类别")
+    _ensure_mapping_preserves_labels(record, class_mapping)
 
     manifest = _load_manifest(record)
     staging_root = _validated_staging_path(record)

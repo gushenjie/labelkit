@@ -12,9 +12,10 @@ type Props = {
   projectId: string;
   onClose: () => void;
   onIndexChange: (index: number) => void;
+  onReview?: (frame: Frame) => void;
 };
 
-export function FrameLightbox({ open, frames, index, projectId, onClose, onIndexChange }: Props) {
+export function FrameLightbox({ open, frames, index, projectId, onClose, onIndexChange, onReview }: Props) {
   const frame = frames[index];
   const total = frames.length;
 
@@ -73,14 +74,25 @@ export function FrameLightbox({ open, frames, index, projectId, onClose, onIndex
               {frame.annotations.length > 0 && `${frame.annotations.length} 个框`}
             </p>
           </div>
-          <button
-            type="button"
-            className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-            onClick={onClose}
-            aria-label="关闭"
-          >
-            <Icon name="x" size={18} />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {onReview && (
+              <button
+                type="button"
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800"
+                onClick={() => onReview(frame)}
+              >
+                进入人工复查
+              </button>
+            )}
+            <button
+              type="button"
+              className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+              onClick={onClose}
+              aria-label="关闭"
+            >
+              <Icon name="x" size={18} />
+            </button>
+          </div>
         </header>
 
         <div className="relative flex min-h-0 flex-1 items-center justify-center bg-black p-2">

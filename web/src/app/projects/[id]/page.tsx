@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { api, Frame, ModelVersion, Project, Task } from "@/lib/api";
-import { countConfirmed, countPendingReview, countRejected } from "@/lib/status";
+import { countBlockingReview, countConfirmed, countRejected } from "@/lib/status";
 import { computeContinueAction, taskTypeLabel, WorkflowStep } from "@/lib/workflow";
 import { Icon } from "@/components/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -162,19 +162,19 @@ export default function ProjectPage() {
 
   const total = stats.total ?? project.frame_count ?? 0;
   const unlabeled = stats.unlabeled ?? 0;
-  const pending = countPendingReview(stats);
+  const pending = countBlockingReview(stats);
   const confirmed = countConfirmed(stats);
   const rejected = countRejected(stats);
   const reviewed = confirmed + rejected;
   const reviewRate = total > 0 ? Math.round((reviewed / total) * 100) : 0;
-  const continueAction = computeContinueAction(id, stats, tasks);
+  const continueAction = computeContinueAction(id, stats, tasks, models.length);
   const activeTask = sortedTasks.find(
     (task) => task.status === "running" || task.status === "pending",
   );
   const currentStep = activeTask
     ? TASK_STEP[activeTask.task_type] ?? continueAction.step
     : continueAction.step;
-  const isTrainReady = total > 0 && unlabeled === 0 && pending === 0 && confirmed > 0;
+  const isTrainReady = total > 0 && unlabeled === 0 && pending === 0 && (confirmed > 0 || (stats.auto_ok ?? 0) > 0);
   const projectState = activeTask
     ? { label: "任务运行中", tone: "running" }
     : isTrainReady

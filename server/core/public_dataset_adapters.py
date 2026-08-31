@@ -18,7 +18,16 @@ from dataclasses import replace
 from pathlib import Path
 
 from server.config import settings
-from server.core.public_dataset_archive import ensure_disk_space, sha256_file, stream_download
+from server.core.public_dataset_archive import (
+    DOWNLOAD_MAX_ATTEMPTS,
+    ROBOFLOW_DOWNLOAD_TRUSTED_HOSTS,
+    clear_download_meta,
+    ensure_disk_space,
+    is_download_retryable,
+    read_download_meta,
+    sha256_file,
+    stream_download,
+)
 from server.core.public_dataset_types import PublicDatasetCandidateDTO, PublicImportDTO
 
 
@@ -685,18 +694,48 @@ def download_roboflow(
 ) -> tuple[list[Path], int, str]:
     workspace, project = import_record.source_ref.split("/", 1)
     format_name = "yolov5pytorch" if import_record.workflow_metadata.get("task_type") != "classify" else "folder"
-    payload = _roboflow_json(f"{workspace}/{project}/{import_record.source_version}/{format_name}")
-    link = ((payload.get("export") or {}).get("link") or "").strip()
-    if not link:
-        raise RuntimeError("Roboflow 未返回导出下载地址")
     archive = download_dir / "roboflow-dataset.zip"
-    written, checksum = stream_download(
-        link,
-        archive,
-        cancelled=cancelled,
-        progress=progress,
-    )
-    return [archive], written, checksum
+    partial = archive.with_suffix(archive.suffix + ".part")
+    if archive.is_file() and archive.stat().st_size > 0:
+        written = archive.stat().st_size
+        checksum = sha256_file(archive)
+        return [archive], written, checksum
+    last_error: Exception | None = None
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+        if cancelled and cancelled():
+            raise RuntimeError("任务已取消")
+        link = ""
+        if partial.is_file() and partial.stat().st_size > 0:
+            meta = read_download_meta(partial)
+            link = str(meta.get("url") or "").strip()
+        if not link:
+            payload = _roboflow_json(f"{workspace}/{project}/{import_record.source_version}/{format_name}")
+            link = ((payload.get("export") or {}).get("link") or "").strip()
+            if not link:
+                raise RuntimeError("Roboflow 未返回导出下载地址")
+        try:
+            written, checksum = stream_download(
+                link,
+                archive,
+                trusted_hosts=ROBOFLOW_DOWNLOAD_TRUSTED_HOSTS,
+                cancelled=cancelled,
+                progress=progress,
+                max_attempts=1,
+            )
+            return [archive], written, checksum
+        except Exception as error:
+            last_error = error
+            if not is_download_retryable(error):
+                break
+            if attempt >= DOWNLOAD_MAX_ATTEMPTS:
+                break
+            if partial.is_file() and partial.stat().st_size <= 0:
+                partial.unlink(missing_ok=True)
+                clear_download_meta(partial)
+            time.sleep(min(2**attempt, 10))
+    if last_error:
+        raise last_error
+    raise RuntimeError("Roboflow 下载失败")
 
 
 def download_public_import(

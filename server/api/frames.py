@@ -203,12 +203,11 @@ def frame_image(project_id: str, frame_id: str, annotated: bool = False, db: Ses
     if annotated and frame.annotations:
         categories = db.query(Category).filter(Category.project_id == project_id).all()
         lbl_path = label_path_for_frame(project_id, frame)
-        import cv2
+        from server.core.image_io import write_image_bgr
         from server.core.paths import cache_dir
         cache = cache_dir(project_id) / "preview" / f"{frame_id}.jpg"
-        cache.parent.mkdir(parents=True, exist_ok=True)
         img = draw_labeled_image(categories, path, lbl_path)
-        cv2.imwrite(str(cache), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        write_image_bgr(cache, img, quality=92)
         return FileResponse(cache)
     return FileResponse(path)
 

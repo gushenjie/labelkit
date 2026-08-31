@@ -14,7 +14,7 @@ export function Thumb({ src, alt, label, selected, onClick, onDoubleClick }: Pro
       className={selected ? "thumb thumb--selected" : "thumb"}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
-      title={alt}
+      title={`${alt}（单击查看大图）`}
     >
       <img src={src} alt={alt} />
       {label && <span className="thumb__label">{label}</span>}

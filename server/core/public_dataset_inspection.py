@@ -8,9 +8,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import cv2
+import numpy as np
 import yaml
 
 from server.core.dedup import compute_phash
+from server.core.image_io import read_image_bgr
 from server.core.public_dataset_archive import sha256_file
 from server.core.public_dataset_types import DatasetInspectionDTO, ManifestEntryDTO, SourceLabelDTO
 from server.core.yolo_io import parse_labels
@@ -37,7 +39,7 @@ def _images_under(path: Path) -> list[Path]:
 
 
 def _validate_image(path: Path) -> tuple[int, int]:
-    image = cv2.imread(str(path))
+    image = read_image_bgr(path)
     if image is None or image.size == 0:
         raise RuntimeError(f"图片损坏或无法读取: {path}")
     height, width = image.shape[:2]
@@ -88,6 +90,22 @@ def _resolve_yaml_path(yaml_path: Path, data: dict, value: str, extraction_root:
         base = yaml_path.parent / base
     path = Path(value)
     resolved = path if path.is_absolute() else base / path
+    candidates = [resolved]
+    if not path.is_absolute():
+        candidates.append(extraction_root / path)
+        stripped = path
+        while stripped.parts and stripped.parts[0] == "..":
+            stripped = Path(*stripped.parts[1:])
+        if stripped != path:
+            candidates.append(extraction_root / stripped)
+    for candidate in candidates:
+        try:
+            return _require_within(candidate, extraction_root, "YOLO 路径")
+        except RuntimeError:
+            continue
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
     return _require_within(resolved, extraction_root, "YOLO 路径")
 
 
