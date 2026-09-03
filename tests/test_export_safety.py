@@ -29,7 +29,7 @@ def test_nonempty_unmarked_directory_cannot_be_overwritten(tmp_path):
     target.mkdir()
     (target / "keep.txt").write_text("user data", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="未带 LabelKit 标记"):
+    with pytest.raises(RuntimeError, match="未带视炼标记"):
         _validate_existing_target(target, overwrite=True)
 
 

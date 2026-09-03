@@ -10,7 +10,7 @@ from server.config import settings
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run LabelKit with its required single API worker")
+    parser = argparse.ArgumentParser(description=f"Run {settings.app_name} with its required single API worker")
     parser.add_argument("--reload", action="store_true", help="development only")
     args = parser.parse_args()
     uvicorn.run(
@@ -18,6 +18,7 @@ def main() -> None:
         host=settings.api_host,
         port=settings.api_port,
         reload=args.reload,
+        reload_dirs=[str(settings.data_dir.parent / "server")] if args.reload else None,
         workers=1,
     )
 

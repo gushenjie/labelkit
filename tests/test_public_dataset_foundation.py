@@ -79,6 +79,7 @@ def test_inspect_yolo_preserves_three_boxes_and_splits(tmp_path):
     assert not inspection.quality_report["blocking"]
 
 
+
 def test_inspect_roboflow_relative_yaml_paths(tmp_path):
     for split in ("train", "valid", "test"):
         image = tmp_path / split / "images" / f"{split}.jpg"
@@ -123,6 +124,43 @@ def test_inspect_coco_converts_bbox_without_losing_instances(tmp_path):
     assert inspection.format == "coco_detect"
     assert len(inspection.entries) == 1
     assert len(inspection.entries[0].labels) == 3
+
+
+def test_inspect_cross_split_exact_duplicate_is_auto_fix_warning(tmp_path):
+    for split in ("train", "val"):
+        image = tmp_path / "images" / split / "same.jpg"
+        _image(image, 100)
+        label = tmp_path / "labels" / split / "same.txt"
+        label.parent.mkdir(parents=True, exist_ok=True)
+        label.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+    (tmp_path / "data.yaml").write_text(
+        "path: .\ntrain: images/train\nval: images/val\nnames: [target]\n",
+        encoding="utf-8",
+    )
+
+    inspection = inspect_dataset(tmp_path, "detect")
+
+    assert not inspection.quality_report["blocking"]
+    assert any("自动去重" in item for item in inspection.quality_report["warnings"])
+    assert inspection.quality_report["cross_split_duplicates"] == 1
+
+
+def test_inspect_yolo_skips_missing_declared_split(tmp_path):
+    image = tmp_path / "train" / "images" / "one.jpg"
+    _image(image)
+    label = tmp_path / "train" / "labels" / "one.txt"
+    label.parent.mkdir(parents=True, exist_ok=True)
+    label.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+    (tmp_path / "data.yaml").write_text(
+        "train: ../train/images\nval: ../valid/images\nnames: ['Fire']\n",
+        encoding="utf-8",
+    )
+
+    inspection = inspect_dataset(tmp_path, "detect")
+
+    assert len(inspection.entries) == 1
+    assert inspection.entries[0].split == "train"
+    assert any("已跳过" in item for item in inspection.quality_report["warnings"])
 
 
 def test_inspect_classification_directory(tmp_path):

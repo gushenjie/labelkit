@@ -90,7 +90,7 @@ async function seedReviewLabels(page: Page, project: Project): Promise<Frame[]> 
 
 async function confirmReviewAndRemainder(page: Page, project: Project, frames: Frame[]): Promise<void> {
   await page.goto(`/projects/${project.id}/review?filter=pending`);
-  await expect(page.getByRole("heading", { name: "人工确认" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "标注复核" })).toBeVisible();
   if (project.task_type === "classify") {
     await page.getByRole("button", { name: "square", exact: true }).click();
   }
@@ -153,8 +153,10 @@ async function trainThroughUi(page: Page, project: Project): Promise<Task> {
 async function exportAndTrial(page: Page, project: Project): Promise<void> {
   const exportPath = path.join(runtimeRoot, "exports", project.id);
   await page.goto(`/projects/${project.id}/train`);
-  await page.getByPlaceholder(/dataset/).fill(exportPath);
-  await page.getByRole("button", { name: "导出数据集" }).click();
+  await page.getByRole("button", { name: "导出数据集" }).first().click();
+  const exportDialog = page.getByRole("dialog");
+  await exportDialog.getByPlaceholder(/dataset/).fill(exportPath);
+  await exportDialog.getByRole("button", { name: "导出数据集" }).click();
   await page.getByRole("button", { name: "开始导出" }).click();
   await page.goto(`/projects/${project.id}/tasks`);
   const exportTask = await pollTask(page, project.id, "export");

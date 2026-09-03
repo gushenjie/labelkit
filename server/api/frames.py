@@ -13,8 +13,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
+from server.api.deps import get_optional_actor
 from server.api.schemas import AnnotationsUpdate, FrameFeedback, FrameOut, FramePage, LabelEstimate
 from server.config import settings
+from server.core.audit import record_audit
 from server.core.paths import label_path_for_frame
 from server.core.visualize import draw_labeled_image, save_review_image
 from server.core.yolo_io import YoloLabel, write_labels
@@ -213,7 +215,13 @@ def frame_image(project_id: str, frame_id: str, annotated: bool = False, db: Ses
 
 
 @router.post("/frames/{frame_id}/feedback")
-def frame_feedback(project_id: str, frame_id: str, body: FrameFeedback, db: Session = Depends(get_db)):
+def frame_feedback(
+    project_id: str,
+    frame_id: str,
+    body: FrameFeedback,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
     frame = db.get(Frame, frame_id)
     if not frame or frame.project_id != project_id:
         raise HTTPException(404, "Frame not found")
@@ -221,11 +229,27 @@ def frame_feedback(project_id: str, frame_id: str, body: FrameFeedback, db: Sess
     frame.note = body.note
     frame.source = "human"
     db.commit()
+    record_audit(
+        db,
+        actor=actor,
+        action="frame.feedback",
+        resource_type="frame",
+        resource_id=frame_id,
+        project_id=project_id,
+        summary=f"更新帧复核状态：{body.status.value if hasattr(body.status, 'value') else body.status}",
+        metadata={"note": body.note},
+    )
     return {"ok": True}
 
 
 @router.put("/frames/{frame_id}/annotations")
-def update_annotations(project_id: str, frame_id: str, body: AnnotationsUpdate, db: Session = Depends(get_db)):
+def update_annotations(
+    project_id: str,
+    frame_id: str,
+    body: AnnotationsUpdate,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
     frame = db.get(Frame, frame_id)
     if not frame or frame.project_id != project_id:
         raise HTTPException(404, "Frame not found")
@@ -304,6 +328,16 @@ def update_annotations(project_id: str, frame_id: str, body: AnnotationsUpdate, 
     frame.status = body.status
     frame.source = "human"
     db.commit()
+    record_audit(
+        db,
+        actor=actor,
+        action="frame.annotate",
+        resource_type="frame",
+        resource_id=frame_id,
+        project_id=project_id,
+        summary=f"保存帧标注：{len(validated)} 个目标",
+        metadata={"status": body.status.value if hasattr(body.status, "value") else body.status, "annotation_count": len(validated)},
+    )
     return {"ok": True}
 
 

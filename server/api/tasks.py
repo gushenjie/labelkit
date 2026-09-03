@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from server.api.deps import get_optional_actor
 from server.api.schemas import GlobalTaskOut, TaskCreate, TaskOut
+from server.core.audit import record_audit
 from server.db.database import get_db
 from server.db.models import (
     Project,
@@ -30,10 +32,26 @@ def list_all_tasks(db: Session = Depends(get_db)):
         .order_by(Task.created_at.desc())
         .all()
     )
-    return [
-        GlobalTaskOut(**TaskOut.model_validate(task).model_dump(), project_name=project_name)
-        for task, project_name in rows
-    ]
+    result = []
+    for task, project_name in rows:
+        assignee = str(task.params.get("assignee") or "自动流水线").strip()
+        priority = str(task.params.get("priority") or "").strip().lower()
+        if priority not in {"high", "medium", "low"}:
+            if task.status in {TaskStatus.FAILED, TaskStatus.INTERRUPTED}:
+                priority = "high"
+            elif task.status in {TaskStatus.RUNNING, TaskStatus.PAUSED}:
+                priority = "medium"
+            else:
+                priority = "low"
+        result.append(
+            GlobalTaskOut(
+                **TaskOut.model_validate(task).model_dump(),
+                project_name=project_name,
+                assignee=assignee,
+                priority=priority,
+            )
+        )
+    return result
 
 
 @router.get("", response_model=list[TaskOut])
@@ -43,7 +61,12 @@ def list_tasks(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=TaskOut)
-def create_task(project_id: str, body: TaskCreate, db: Session = Depends(get_db)):
+def create_task(
+    project_id: str,
+    body: TaskCreate,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -52,6 +75,18 @@ def create_task(project_id: str, body: TaskCreate, db: Session = Depends(get_db)
         task_type=body.task_type,
         params=body.params,
     )
+    if body.task_type == TaskType.EXTRACT:
+        running_extract = (
+            db.query(Task)
+            .filter(
+                Task.project_id == project_id,
+                Task.task_type == TaskType.EXTRACT,
+                Task.status.in_({TaskStatus.PENDING, TaskStatus.RUNNING}),
+            )
+            .first()
+        )
+        if running_extract:
+            raise HTTPException(409, "已有提取任务正在执行，请等待完成后再试")
     db.add(task)
     db.flush()
     db.add(ProjectExecutionLease(project_id=project_id, task_id=task.id))
@@ -62,6 +97,16 @@ def create_task(project_id: str, body: TaskCreate, db: Session = Depends(get_db)
         raise HTTPException(409, "该项目已有任务占用执行租约") from None
     db.refresh(task)
     TaskWorker.start(task.id)
+    record_audit(
+        db,
+        actor=actor,
+        action="task.create",
+        resource_type="task",
+        resource_id=task.id,
+        project_id=project_id,
+        summary=f"创建任务：{task.task_type.value}",
+        metadata={"task_type": task.task_type.value},
+    )
     return TaskOut.model_validate(task)
 
 
@@ -74,7 +119,12 @@ def get_task(project_id: str, task_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{task_id}/cancel")
-def cancel_task(project_id: str, task_id: str, db: Session = Depends(get_db)):
+def cancel_task(
+    project_id: str,
+    task_id: str,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
     task = db.get(Task, task_id)
     if not task or task.project_id != project_id:
         raise HTTPException(404, "Task not found")
@@ -84,11 +134,24 @@ def cancel_task(project_id: str, task_id: str, db: Session = Depends(get_db)):
     task.cancel_requested = True
     task.log = (task.log + "\n用户请求停止，当前张处理完后终止…").strip()
     db.commit()
+    record_audit(
+        db,
+        actor=actor,
+        action="task.cancel",
+        resource_type="task",
+        resource_id=task_id,
+        project_id=project_id,
+        summary=f"取消任务：{task.task_type.value}",
+    )
     return {"ok": True}
 
 
 @router.post("/cancel-running")
-def cancel_running_task(project_id: str, db: Session = Depends(get_db)):
+def cancel_running_task(
+    project_id: str,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
     """停止当前项目正在运行的任务（标注/审查等）。"""
     task = (
         db.query(Task)
@@ -102,11 +165,25 @@ def cancel_running_task(project_id: str, db: Session = Depends(get_db)):
     task.cancel_requested = True
     task.log = (task.log + "\n用户请求停止，当前张处理完后终止…").strip()
     db.commit()
+    record_audit(
+        db,
+        actor=actor,
+        action="task.cancel",
+        resource_type="task",
+        resource_id=task.id,
+        project_id=project_id,
+        summary=f"取消运行中任务：{task.task_type.value}",
+    )
     return {"ok": True, "task_id": task.id}
 
 
 @router.post("/{task_id}/retry", response_model=TaskOut)
-def retry_task(project_id: str, task_id: str, db: Session = Depends(get_db)):
+def retry_task(
+    project_id: str,
+    task_id: str,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
     original = db.get(Task, task_id)
     if not original or original.project_id != project_id:
         raise HTTPException(404, "Task not found")
@@ -147,4 +224,14 @@ def retry_task(project_id: str, task_id: str, db: Session = Depends(get_db)):
         raise HTTPException(409, "该项目已有任务占用执行租约") from None
     db.refresh(retry)
     TaskWorker.start(retry.id)
+    record_audit(
+        db,
+        actor=actor,
+        action="task.retry",
+        resource_type="task",
+        resource_id=retry.id,
+        project_id=project_id,
+        summary=f"重试任务：{retry.task_type.value}",
+        metadata={"retry_of_task_id": original.id},
+    )
     return TaskOut.model_validate(retry)

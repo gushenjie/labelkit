@@ -286,6 +286,14 @@ class PublicDatasetRepository:
         )
         self._db.flush()
 
+    def set_frame_status(self, frame_ids: list[str], status: FrameStatus) -> None:
+        if not frame_ids:
+            return
+        self._db.query(Frame).filter(Frame.id.in_(frame_ids)).update(
+            {Frame.status: status}, synchronize_session=False
+        )
+        self._db.flush()
+
     def discard(self, import_record: PublicImportDTO) -> int:
         if import_record.dataset_version_id or import_record.train_task_id:
             raise RuntimeError("该公开数据已进入数据版本或训练，不能放弃")
@@ -304,3 +312,23 @@ class PublicDatasetRepository:
             self._db.delete(frame)
         self._db.flush()
         return len(frames)
+
+    def count_frames_by_status(self, project_id: str, status: FrameStatus) -> int:
+        return (
+            self._db.query(Frame)
+            .filter(Frame.project_id == project_id, Frame.status == status)
+            .count()
+        )
+
+    def find_by_fingerprint(self, project_id: str, fingerprint: str) -> PublicImportDTO | None:
+        model = (
+            self._db.query(PublicDatasetImport)
+            .filter(
+                PublicDatasetImport.project_id == project_id,
+                PublicDatasetImport.license_fingerprint == fingerprint,
+                PublicDatasetImport.state != "discarded",
+            )
+            .order_by(PublicDatasetImport.created_at.desc(), PublicDatasetImport.id.desc())
+            .first()
+        )
+        return _dto(model) if model else None

@@ -30,7 +30,7 @@ def _resolve_export_target(project_id: str, task: Task) -> Path:
         raise RuntimeError("禁止导出到磁盘根目录")
     data_root = settings.data_dir.resolve(strict=False)
     if target == data_root or data_root in target.parents:
-        raise RuntimeError("禁止导出到 LabelKit 项目数据目录")
+        raise RuntimeError("禁止导出到视炼项目数据目录")
     return target
 
 
@@ -42,9 +42,9 @@ def _validate_existing_target(target: Path, overwrite: bool) -> None:
     if not any(target.iterdir()):
         return
     if not (target / EXPORT_MARKER).is_file():
-        raise RuntimeError(f"拒绝覆盖未带 LabelKit 标记的非空目录: {target}")
+        raise RuntimeError(f"拒绝覆盖未带视炼标记的非空目录: {target}")
     if not overwrite:
-        raise RuntimeError(f"目录中已有 LabelKit 导出: {target}，请确认覆盖")
+        raise RuntimeError(f"目录中已有视炼导出: {target}，请确认覆盖")
 
 
 def _publish_export(staging: Path, target: Path, task_id: str) -> None:

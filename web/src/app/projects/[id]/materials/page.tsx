@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   api,
   Project,
@@ -14,9 +14,14 @@ import {
 } from "@/lib/api";
 import { Icon } from "@/components/Icon";
 import { ProjectPageHeader } from "@/components/ProjectPageHeader";
+import { WorkflowNextButton } from "@/components/WorkflowNextButton";
+import { WORKFLOW_STEPS } from "@/lib/workflow";
+import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { TaskProgress } from "@/components/ui/TaskProgress";
+import { LoadingScreen } from "@/components/ui/LoadingScreen";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/ToastProvider";
-import { formatDatasetFormat, formatPublicImportState, allSourceLabelsIgnored, classMappingSelectValue } from "@/lib/publicDatasetLabels";
+import { formatDatasetFormat, allSourceLabelsIgnored, classMappingSelectValue, candidatePreviewUrl, formatCandidateClasses, formatCompactCount } from "@/lib/publicDatasetLabels";
 
 type UploadItem = {
   name: string;
@@ -26,9 +31,30 @@ type UploadItem = {
 
 type MaterialSource = "local" | "public";
 
+function isZipFile(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return (
+    name.endsWith(".zip") ||
+    file.type === "application/zip" ||
+    file.type === "application/x-zip-compressed"
+  );
+}
+
+function isImageUploadFile(file: File): boolean {
+  return file.type.startsWith("image/") || isZipFile(file);
+}
+
 const DISCOVERY_EXAMPLES = ["厂区入侵检测", "烟雾识别", "反光衣检测", "鸟窝检测"];
 const numberFormatter = new Intl.NumberFormat("zh-CN");
 const ROBOFLOW_URL_RE = /^https:\/\/(?:universe|app)\.roboflow\.com\//i;
+/** 抽帧与去重默认策略，与后端 task_worker 默认值保持一致 */
+const DEFAULT_EXTRACT_PARAMS = {
+  target_fps: 1,
+  max_frames: 0,
+  threshold: 8,
+  auto_dedup: true,
+  split: "train" as const,
+};
 
 function formatBytes(bytes: number | null | undefined) {
   if (bytes == null) return "大小未知";
@@ -37,15 +63,599 @@ function formatBytes(bytes: number | null | undefined) {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
+function publicImportCardStatus(state: string): string | null {
+  if (state === "discarded") return null;
+  if (["review", "review_expanded"].includes(state)) return "待复核";
+  if (state === "training") return "训练中";
+  if (state === "completed") return "已导入";
+  if (["fetching", "fetched", "publishing", "needs_label"].includes(state)) return "导入中";
+  return null;
+}
+
+const PUBLIC_DIALOG_STATES = ["fetching", "fetched", "publishing", "needs_label"] as const;
+const PUBLIC_REVIEW_STATES = ["review", "review_expanded", "full_review_required"] as const;
+
+function isPublicDialogState(state: string): boolean {
+  return (PUBLIC_DIALOG_STATES as readonly string[]).includes(state);
+}
+
+function isPublicReviewState(state: string): boolean {
+  return (PUBLIC_REVIEW_STATES as readonly string[]).includes(state);
+}
+
+function upsertPublicImport(list: PublicDatasetImport[], next: PublicDatasetImport): PublicDatasetImport[] {
+  const index = list.findIndex((item) => item.id === next.id);
+  if (index < 0) return [...list, next];
+  return list.map((item) => (item.id === next.id ? next : item));
+}
+
+function qualityReportCounts(report: Record<string, unknown>, key: string): Record<string, number> {
+  const raw = report[key];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .map(([name, value]) => [name, Number(value)] as [string, number])
+      .filter(([, value]) => Number.isFinite(value) && value > 0),
+  );
+}
+
+const SPLIT_LABELS: Record<string, string> = {
+  train: "训练",
+  val: "验证",
+  test: "测试",
+};
+
+function DistributionBars({
+  items,
+  emptyText,
+}: {
+  items: Array<{ key: string; label: string; count: number }>;
+  emptyText: string;
+}) {
+  const total = items.reduce((sum, item) => sum + item.count, 0);
+  if (total <= 0) {
+    return <p className="materials-public-dist__empty">{emptyText}</p>;
+  }
+  return (
+    <ul className="materials-public-dist__bars">
+      {items.map((item) => (
+        <li key={item.key}>
+          <span>
+            {item.label}
+            <strong>{numberFormatter.format(item.count)}</strong>
+          </span>
+          <i style={{ width: `${Math.max(4, Math.round((item.count / total) * 100))}%` }} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function qualityReportMessages(report: Record<string, unknown>, key: "blocking" | "warnings"): string[] {
+  const items = report[key];
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => String(item)).filter(Boolean);
+}
+
+function explainImportIssue(message: string, kind: "blocking" | "warning"): string {
+  if (message.includes("自动去重")) {
+    return message;
+  }
+  if (message.includes("跨 split")) {
+    return kind === "blocking"
+      ? `${message}。同一图片不能同时出现在训练集和验证集，这份数据无法直接导入，请换其他数据集。`
+      : `${message}。建议换一份划分更干净的数据集，或确认接受风险后再导入。`;
+  }
+  if (message.includes("空标签")) {
+    return `${message}。部分图片没有标注框，导入后可能需要补标或复核。`;
+  }
+  if (message.includes("极小框")) {
+    return `${message}。部分标注框过小，导入后建议重点抽样复核。`;
+  }
+  return message;
+}
+
+function MaterialsUploadDialog({
+  uploads,
+  uploading,
+  onClose,
+}: {
+  uploads: UploadItem[];
+  uploading: boolean;
+  onClose: () => void;
+}) {
+  const finishedCount = uploads.filter((item) => item.done).length;
+  const allDone = uploads.length > 0 && uploads.every((item) => item.done);
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !uploading) onClose();
+      }}
+    >
+      <div className="materials-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="materials-upload-title">
+        <header className="materials-upload-dialog__head">
+          <div>
+            <h2 id="materials-upload-title">上传进度</h2>
+            <p>{uploading ? "正在上传，请勿关闭页面" : allDone ? "全部上传完成" : "部分文件上传失败"}</p>
+          </div>
+          <span className="materials-upload-dialog__count">{finishedCount} / {uploads.length}</span>
+        </header>
+        <div className="materials-upload-dialog__body">
+          {uploads.map((item) => (
+            <div key={item.name} className="materials-upload-dialog__item">
+              <div className="materials-upload-dialog__item-head">
+                <span title={item.name}>{item.name}</span>
+                <strong>{item.done ? "完成" : uploading ? `${item.pct}%` : "失败"}</strong>
+              </div>
+              <div className="materials-upload-dialog__bar">
+                <div
+                  className={`materials-upload-dialog__bar-fill ${item.done ? "is-done" : ""}`}
+                  style={{ width: `${item.done ? 100 : item.pct}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+        <footer className="materials-upload-dialog__footer">
+          <span>{uploading ? "上传完成后将自动关闭" : allDone ? "即将自动关闭…" : "可关闭窗口后重试失败文件"}</span>
+          <button type="button" className="btn-secondary" disabled={uploading} onClick={onClose}>
+            关闭
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+type PublicDatasetImportDialogProps = {
+  publicImport: PublicDatasetImport;
+  project: Project | null;
+  publicBusy: boolean;
+  fetchProgress: { progress: number; total: number } | null;
+  classMapping: Record<string, number | null>;
+  setClassMapping: Dispatch<SetStateAction<Record<string, number | null>>>;
+  publishAnnotationCount: number;
+  publishClassDistribution: Record<string, number>;
+  publishLabelsFullyIgnored: boolean;
+  publishBlockingIssues: string[];
+  publishWarnings: string[];
+  canDiscard: boolean;
+  canPublish: boolean;
+  onDiscard: () => void;
+  onPublish: () => void;
+};
+
+function PublicDatasetImportDialog({
+  publicImport,
+  project,
+  publicBusy,
+  fetchProgress,
+  classMapping,
+  setClassMapping,
+  publishAnnotationCount,
+  publishClassDistribution,
+  publishLabelsFullyIgnored,
+  publishBlockingIssues,
+  publishWarnings,
+  canDiscard,
+  canPublish,
+  onDiscard,
+  onPublish,
+}: PublicDatasetImportDialogProps) {
+  const title = publicImport.title || "公开数据集";
+  const expectedBytes = publicImport.expected_download_bytes ?? fetchProgress?.total ?? 0;
+  const downloadedBytes = fetchProgress?.progress ?? publicImport.actual_download_bytes ?? 0;
+  const hasByteProgress = expectedBytes > 0;
+  const downloadPercent = hasByteProgress
+    ? Math.min(100, Math.round((downloadedBytes / expectedBytes) * 100))
+    : null;
+  const downloadFinished = hasByteProgress && downloadedBytes >= expectedBytes;
+  const subtitle = publicImport.state === "fetching"
+    ? downloadFinished
+      ? "下载完成，正在解压并分析…"
+      : "正在下载并分析…"
+    : publicImport.state === "fetched"
+      ? `${String(publicImport.quality_report.image_count ?? 0)} 张 · ${publishAnnotationCount} 条标注${publicImport.detected_format ? ` · ${formatDatasetFormat(publicImport.detected_format)}` : ""}`
+      : "正在发布并写入项目…";
+
+  const handleBackdropClose = () => {
+    if (!canDiscard || publicBusy) return;
+    onDiscard();
+  };
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) handleBackdropClose();
+      }}
+    >
+      <div
+        className="materials-public-import-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="public-import-dialog-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="materials-public-import-dialog__head">
+          <div>
+            <h2 id="public-import-dialog-title">{title}</h2>
+            <p>{subtitle}</p>
+          </div>
+          {canDiscard && (
+            <button
+              type="button"
+              className="modal-close-button"
+              aria-label="关闭并放弃导入"
+              disabled={publicBusy}
+              onClick={onDiscard}
+            >
+              <Icon name="x" size={18} />
+            </button>
+          )}
+        </header>
+
+        <div className="materials-public-import-dialog__body lk-scrollbar">
+          {publicImport.state === "fetching" && (
+            <div className="materials-public-import-dialog__loading">
+              <Icon name="sparkles" size={36} className="text-[#10A88F] animate-pulse" />
+              <strong>
+                {downloadFinished
+                  ? "正在解压并分析数据集"
+                  : "正在下载数据集"}
+              </strong>
+              {hasByteProgress && (
+                <div className="materials-public-import-dialog__progress" aria-label="下载进度">
+                  <div className="materials-public-import-dialog__progress-head">
+                    <span>{downloadFinished ? "下载已完成" : "下载进度"}</span>
+                    <strong>{downloadPercent}%</strong>
+                  </div>
+                  <div className="materials-public-import-dialog__progress-bar">
+                    <div
+                      className={`materials-public-import-dialog__progress-fill${downloadFinished ? " is-done" : ""}`}
+                      style={{ width: `${downloadPercent ?? 0}%` }}
+                    />
+                  </div>
+                  <span className="materials-public-import-dialog__progress-meta">
+                    {formatBytes(downloadedBytes)} / {formatBytes(expectedBytes)}
+                  </span>
+                </div>
+              )}
+              <span>
+                {downloadFinished
+                  ? "分析完成后会自动显示标签确认"
+                  : "完成后会自动显示标签确认"}
+              </span>
+            </div>
+          )}
+
+          {publicImport.state === "fetched" && (
+            <section className="materials-public-mapping materials-public-mapping--dialog">
+              <header className="materials-public-mapping__head">
+                <div>
+                  <h3>确认标签导入</h3>
+                  <p>数据集里的检测标签需要对应到你项目的类别。名称一致时一般保持默认即可。</p>
+                </div>
+              </header>
+
+              {(() => {
+                const splitCounts = qualityReportCounts(publicImport.quality_report, "split_distribution");
+                const splitItems = (["train", "val", "test"] as const)
+                  .filter((split) => (splitCounts[split] ?? 0) > 0)
+                  .map((split) => ({
+                    key: split,
+                    label: SPLIT_LABELS[split],
+                    count: splitCounts[split],
+                  }));
+                const classItems = publicImport.source_classes
+                  .map((sourceClass) => ({
+                    key: String(sourceClass.class_id),
+                    label: sourceClass.name,
+                    count: publishClassDistribution[String(sourceClass.class_id)] ?? 0,
+                  }))
+                  .filter((item) => item.count > 0);
+                const hasVal = (splitCounts.val ?? 0) > 0;
+                if (splitItems.length === 0 && classItems.length === 0) return null;
+                return (
+                  <div className="materials-public-dist">
+                    {splitItems.length > 0 && (
+                      <div>
+                        <strong>图片划分</strong>
+                        <DistributionBars items={splitItems} emptyText="未识别到划分信息" />
+                        {!hasVal && (
+                          <p className="materials-public-dist__note">没有验证集，导入后训练时会由项目自行划分。</p>
+                        )}
+                      </div>
+                    )}
+                    {classItems.length > 0 && (
+                      <div>
+                        <strong>标签数量</strong>
+                        <DistributionBars items={classItems} emptyText="暂无标注" />
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {publishBlockingIssues.length > 0 && (
+                <div className="materials-public-mapping__issues materials-public-mapping__issues--danger">
+                  <strong>无法导入的原因</strong>
+                  <ul>
+                    {publishBlockingIssues.map((issue) => (
+                      <li key={issue}>{explainImportIssue(issue, "blocking")}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {publishWarnings.length > 0 && (
+                <div className="materials-public-mapping__issues materials-public-mapping__issues--warning">
+                  <strong>质量提示（可继续导入）</strong>
+                  <ul>
+                    {publishWarnings.map((issue) => (
+                      <li key={issue}>{explainImportIssue(issue, "warning")}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {publishLabelsFullyIgnored && (
+                <div className="materials-public-mapping__warning">
+                  不能全部选「不导入」。请至少保留一个标签导入到项目类别。
+                </div>
+              )}
+
+              <div className="materials-public-mapping__columns" aria-hidden="true">
+                <span>数据集标签</span>
+                <span>导入为</span>
+              </div>
+
+              <div className="materials-public-mapping__list">
+                {publicImport.source_classes.map((sourceClass) => {
+                  const labelCount = publishClassDistribution[String(sourceClass.class_id)] ?? 0;
+                  const mappedClassId = classMapping[String(sourceClass.class_id)];
+                  const mappedName = mappedClassId == null
+                    ? null
+                    : project?.categories.find((category) => category.class_id === mappedClassId)?.name;
+                  return (
+                    <div key={sourceClass.class_id} className="materials-public-mapping__row">
+                      <div className="materials-public-mapping__source">
+                        <strong>{sourceClass.name}</strong>
+                        <span>{labelCount > 0 ? `${numberFormatter.format(labelCount)} 条标注` : "暂无标注"}</span>
+                      </div>
+                      <select
+                        className="input materials-public-mapping__select"
+                        aria-label={`将 ${sourceClass.name} 导入为`}
+                        value={classMappingSelectValue(classMapping, sourceClass.class_id)}
+                        onChange={(event) => setClassMapping((previous) => ({
+                          ...previous,
+                          [String(sourceClass.class_id)]: event.target.value === "ignore" ? null : Number(event.target.value),
+                        }))}
+                      >
+                        <option value="ignore">不导入</option>
+                        {project?.categories.map((category) => (
+                          <option key={category.class_id} value={String(category.class_id)}>
+                            {category.name}
+                          </option>
+                        ))}
+                      </select>
+                      {mappedName && labelCount > 0 && (
+                        <p className="materials-public-mapping__hint">
+                          {sourceClass.name} 的 {numberFormatter.format(labelCount)} 条标注将导入为「{mappedName}」
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p className="materials-public-mapping__footer">
+                导入后，图片和标注会加入当前项目，可在「本地素材」中查看。
+              </p>
+            </section>
+          )}
+
+          {["publishing", "needs_label"].includes(publicImport.state) && (
+            <div className="materials-public-import__status">
+              <Icon name="sparkles" size={16} className="text-[#10A88F]" />
+              正在发布并写入项目…
+            </div>
+          )}
+        </div>
+
+        <footer className="materials-public-import-dialog__footer">
+          {canDiscard && (
+            <button type="button" className="btn-secondary" disabled={publicBusy} onClick={onDiscard}>
+              放弃
+            </button>
+          )}
+          {publicImport.state === "fetched" && (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={publicBusy || !canPublish}
+              onClick={onPublish}
+            >
+              发布到项目
+            </button>
+          )}
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function PublicDatasetCandidatePreview({ candidate }: { candidate: PublicDatasetCandidate }) {
+  const initialPreview = candidatePreviewUrl(candidate);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(initialPreview);
+  const [loading, setLoading] = useState(!initialPreview && candidate.provider === "roboflow");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setPreviewUrl(initialPreview);
+    setFailed(false);
+    if (initialPreview || candidate.provider !== "roboflow") {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    api.roboflowPreview(candidate.source_ref, candidate.source_version)
+      .then((data) => {
+        if (cancelled) return;
+        const url = candidatePreviewUrl({
+          annotation_thumbnail: data.annotation_thumbnail,
+          thumbnail: data.thumbnail,
+        });
+        if (url) setPreviewUrl(url);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    candidate.provider,
+    candidate.source_ref,
+    candidate.source_version,
+    candidate.thumbnail,
+    candidate.annotation_thumbnail,
+    initialPreview,
+  ]);
+
+  const placeholderLabel = candidate.classes[0] || candidate.title || "数据集";
+
+  return (
+    <div className="w-full h-full relative">
+      {previewUrl && !failed ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={previewUrl}
+          alt=""
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <div className="w-full h-full flex flex-col items-center justify-center bg-[#F4FAF8] text-[#10A88F]/50 gap-2 p-4 text-center">
+          <Icon name="image" size={26} />
+          <span className="text-[10px] font-medium truncate max-w-full text-[#17343A]/60">{placeholderLabel}</span>
+          {loading && <span className="text-[10px] text-[#10A88F]/70 animate-pulse">加载预览…</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PublicDatasetCandidateCard({
+  candidate,
+  recommended,
+  selected,
+  importStatus,
+  onSelect,
+}: {
+  candidate: PublicDatasetCandidate;
+  recommended: boolean;
+  selected: boolean;
+  importStatus: string | null;
+  onSelect: () => void;
+}) {
+  const classPreview = formatCandidateClasses(candidate.classes ?? [], 3);
+  const hasDownloadSize = candidate.download_bytes != null && candidate.download_bytes > 0;
+  const hasStars = candidate.stars != null && candidate.stars > 0;
+  const showFooter = hasDownloadSize || hasStars;
+
+  return (
+    <article
+      className={`cursor-pointer rounded-xl border p-4 transition-all flex flex-col ${
+        selected 
+          ? 'bg-white border-[#10A88F] shadow-[0_8px_32px_rgba(16,168,143,0.12)] ring-1 ring-[#10A88F] scale-[1.02] z-10' 
+          : 'bg-white/80 border-white hover:border-[#CFF4EC] hover:bg-white shadow-[0_4px_24px_rgba(16,168,143,0.04)] hover:shadow-[0_8px_32px_rgba(16,168,143,0.08)]'
+      }`}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onSelect();
+      }}
+    >
+      <div className="w-full aspect-video rounded-lg overflow-hidden bg-[#F4FAF8] border border-[#CFF4EC]/50 mb-3 shrink-0 relative group shadow-sm">
+        <PublicDatasetCandidatePreview candidate={candidate} />
+        <div className="absolute top-2 left-2 flex gap-1 z-20">
+          <span className="text-[10px] font-bold bg-black/60 backdrop-blur-md text-white px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1">
+            <Icon name="image" size={10} /> {candidate.image_count ? `${numberFormatter.format(candidate.image_count)}` : "未知"}
+          </span>
+          {recommended && !importStatus && (
+            <span className="text-[10px] font-bold bg-[#10A88F]/90 backdrop-blur-md text-white px-1.5 py-0.5 rounded shadow-sm">
+              推荐
+            </span>
+          )}
+        </div>
+        {importStatus && (
+          <div className="absolute top-2 right-2 z-20">
+            <span
+              className={`public-dataset-card__import-badge public-dataset-card__import-badge--${
+                importStatus === "待复核" ? "review" : importStatus === "导入中" ? "progress" : "done"
+              }`}
+            >
+              <Icon name={importStatus === "待复核" ? "clock" : "check"} size={10} />
+              {importStatus}
+            </span>
+          </div>
+        )}
+        <div className="absolute bottom-2 right-2 z-20">
+          <span className="text-[10px] font-bold bg-black/60 backdrop-blur-md text-white px-1.5 py-0.5 rounded shadow-sm">v{candidate.source_version}</span>
+        </div>
+      </div>
+
+      <h4 className="text-sm font-bold text-[#075F5A] mb-2 truncate group-hover:text-[#10A88F] transition-colors" title={candidate.title}>{candidate.title}</h4>
+                                        
+                                        <div className="text-xs text-[#17343A]/70 mb-2 flex-1 flex flex-col gap-1.5">
+                                          <div className="flex items-start gap-1.5"><Icon name="check" size={12} className="text-[#10A88F] mt-0.5 shrink-0" /><span className="line-clamp-2 leading-relaxed">{candidate.recommendation_reason?.replace(/^最推荐\s*·\s*/, "") || candidate.description || "暂无相关描述信息"}</span></div>
+                                        </div>
+
+                                        {classPreview.visible.length > 0 && (
+                                          <div className="flex flex-wrap gap-1 mt-auto mb-3" aria-label="数据集类别">
+                                            {classPreview.visible.map((className) => <span key={className} className="px-1.5 py-0.5 bg-[#f0f4f3] text-[#17343A]/60 rounded text-[10px] truncate max-w-[80px] border border-[#e4e7ec]/50 shadow-sm">{className}</span>)}
+                                            {classPreview.overflow > 0 && <span className="px-1.5 py-0.5 bg-[#f0f4f3] text-[#17343A]/60 rounded text-[10px] border border-[#e4e7ec]/50 shadow-sm">+{classPreview.overflow}</span>}
+                                          </div>
+                                        )}
+
+                                        {showFooter && (
+                                          <div className="flex items-center gap-2 pt-3 border-t border-[#e4e7ec] mt-auto">
+                                            {hasDownloadSize && (
+                                              <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#17343A]/60">
+                                                <Icon name="database" size={12} className="text-[#10A88F]/70" /> {formatBytes(candidate.download_bytes)}
+                                              </div>
+                                            )}
+                                            {hasStars && (
+                                              <div className="flex items-center gap-1 text-[11px] font-bold text-[#17343A]/60" title="收藏">
+                                                <Icon name="star" size={12} className="text-[#10A88F]/70" /> {formatCompactCount(candidate.stars!)}
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
+    </article>
+  );
+}
+
 export default function MaterialsPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [project, setProject] = useState<Project | null>(null);
   const [videos, setVideos] = useState<Video[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [targetFps, setTargetFps] = useState(1);
-  const [maxFrames, setMaxFrames] = useState(0);
-  const [dedupThreshold, setDedupThreshold] = useState(8);
   const [running, setRunning] = useState(false);
   const [frameStats, setFrameStats] = useState<Record<string, number>>({});
   const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(new Set());
@@ -59,18 +669,35 @@ export default function MaterialsPage() {
   const [discoveryErrors, setDiscoveryErrors] = useState<Record<string, string>>({});
   const [discovering, setDiscovering] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<PublicDatasetCandidate | null>(null);
-  const [licenseConfirmed, setLicenseConfirmed] = useState(false);
-  const [publicImport, setPublicImport] = useState<PublicDatasetImport | null>(null);
+  const [publicImports, setPublicImports] = useState<PublicDatasetImport[]>([]);
   const [classMapping, setClassMapping] = useState<Record<string, number | null>>({});
   const [mappingInitializedFor, setMappingInitializedFor] = useState<string | null>(null);
-  const [warningsConfirmed, setWarningsConfirmed] = useState(false);
   const [autoLabel, setAutoLabel] = useState(false);
   const [costConfirmed, setCostConfirmed] = useState(false);
   const [trainingParams, setTrainingParams] = useState({ epochs: 80, imgsz: 640, batch: 8, device: "auto" });
   const [publicBusy, setPublicBusy] = useState(false);
+  const [fetchTaskProgress, setFetchTaskProgress] = useState<{ progress: number; total: number } | null>(null);
   const [sourceMode, setSourceMode] = useState<MaterialSource>("local");
+  const [deletingVideoId, setDeletingVideoId] = useState<string | null>(null);
   const videoRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
+  const selectionInitializedRef = useRef(false);
+  const prevPublicImportStatesRef = useRef<Record<string, string>>({});
+
+  const dialogImport = useMemo(
+    () => publicImports.find((item) => isPublicDialogState(item.state)) ?? null,
+    [publicImports],
+  );
+  const pendingReviewImports = useMemo(
+    () => publicImports.filter((item) => isPublicReviewState(item.state)),
+    [publicImports],
+  );
+  const selectedCandidateImport = useMemo(
+    () => (selectedCandidate
+      ? publicImports.find((item) => item.license_fingerprint === selectedCandidate.license_fingerprint) ?? null
+      : null),
+    [publicImports, selectedCandidate],
+  );
 
   const refresh = () => {
     if (!id) return;
@@ -79,7 +706,9 @@ export default function MaterialsPage() {
       setSelectedVideoIds((previous) => {
         const valid = new Set(items.map((item) => item.id));
         const next = new Set([...previous].filter((videoId) => valid.has(videoId)));
-        if (next.size === 0) {
+        // 仅首次进入页面时默认勾选未提取视频；轮询刷新不再覆盖用户手动取消的勾选
+        if (!selectionInitializedRef.current) {
+          selectionInitializedRef.current = true;
           items.forEach((video) => {
             if ((video.extracted_count ?? 0) === 0) next.add(video.id);
           });
@@ -101,43 +730,105 @@ export default function MaterialsPage() {
 
   useEffect(() => {
     if (!id) return;
+    selectionInitializedRef.current = false;
     api.getProject(id).then(setProject);
     api.publicDatasetProviders().then(setProviders).catch(() => setProviders([]));
     api.listPublicDatasetImports(id).then((imports) => {
-      const latest = imports.find((item) => item.state !== "discarded");
-      if (latest) {
-        setPublicImport(latest);
+      const active = imports.filter((item) => item.state !== "discarded");
+      setPublicImports(active);
+      if (active.length > 0) {
         setSourceMode("public");
-        setShowDiscoveryPlan(true);
+        if (active.some((item) => isPublicDialogState(item.state))) {
+          setShowDiscoveryPlan(true);
+        }
       }
     }).catch(() => undefined);
     refresh();
-    const timer = window.setInterval(refresh, 3000);
-    return () => window.clearInterval(timer);
   }, [id]);
 
   useEffect(() => {
-    if (!id || !publicImport || ["discarded", "training", "completed"].includes(publicImport.state)) return;
-    const timer = window.setInterval(() => {
-      api.getPublicDatasetImport(id, publicImport.id).then((next) => {
-        setPublicImport(next);
-      }).catch(() => undefined);
-    }, 1500);
+    if (!id || !running) return;
+    const timer = window.setInterval(refresh, 2000);
     return () => window.clearInterval(timer);
-  }, [id, publicImport?.id, publicImport?.state]);
+  }, [id, running]);
 
   useEffect(() => {
-    if (publicImport?.state !== "fetched") {
-      if (publicImport?.state === "discarded") {
-        setMappingInitializedFor(null);
-        setClassMapping({});
-      }
+    if (!id || sourceMode !== "public") return;
+    let active = true;
+    const poll = () => {
+      api.listPublicDatasetImports(id).then((imports) => {
+        if (!active) return;
+        setPublicImports(imports.filter((item) => item.state !== "discarded"));
+      }).catch(() => undefined);
+    };
+    poll();
+    const timer = window.setInterval(poll, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [id, sourceMode]);
+
+  useEffect(() => {
+    if (dialogImport?.state !== "fetched") {
       return;
     }
-    if (mappingInitializedFor === publicImport.id) return;
-    setClassMapping(publicImport.suggested_mapping);
-    setMappingInitializedFor(publicImport.id);
-  }, [publicImport?.id, publicImport?.state, publicImport?.suggested_mapping, mappingInitializedFor]);
+    if (mappingInitializedFor === dialogImport.id) return;
+    setClassMapping(dialogImport.suggested_mapping);
+    setMappingInitializedFor(dialogImport.id);
+  }, [dialogImport?.id, dialogImport?.state, dialogImport?.suggested_mapping, mappingInitializedFor]);
+
+  useEffect(() => {
+    if (!id) return;
+    for (const item of publicImports) {
+      const previousState = prevPublicImportStatesRef.current[item.id];
+      prevPublicImportStatesRef.current[item.id] = item.state;
+      if (previousState === "publishing" && isPublicReviewState(item.state)) {
+        const sampleCount = item.review_frame_ids?.length ?? 0;
+        toast({
+          type: "info",
+          message: sampleCount > 0
+            ? `「${item.title}」已导入，项目抽样复核新增 ${sampleCount} 张`
+            : `「${item.title}」已导入，请前往标注复核`,
+        });
+        router.push(`/projects/${id}/review?filter=sample`);
+        break;
+      }
+    }
+  }, [id, publicImports, router, toast]);
+
+  useEffect(() => {
+    if (!id || !dialogImport || dialogImport.state !== "fetching" || !dialogImport.fetch_task_id) {
+      setFetchTaskProgress(null);
+      return;
+    }
+    let active = true;
+    const taskId = dialogImport.fetch_task_id;
+    const poll = () => {
+      api.getTask(id, taskId).then((task) => {
+        if (!active) return;
+        setFetchTaskProgress({ progress: task.progress ?? 0, total: task.total ?? 0 });
+      }).catch(() => undefined);
+    };
+    poll();
+    const timer = window.setInterval(poll, 800);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [id, dialogImport?.id, dialogImport?.state, dialogImport?.fetch_task_id]);
+
+  const closeUploadDialog = () => {
+    if (uploading) return;
+    setUploads([]);
+  };
+
+  useEffect(() => {
+    if (uploading || uploads.length === 0) return;
+    if (!uploads.every((item) => item.done)) return;
+    const timer = window.setTimeout(() => setUploads([]), 1500);
+    return () => window.clearTimeout(timer);
+  }, [uploading, uploads]);
 
   const uploadVideosParallel = async (files: File[]) => {
     if (!id || files.length === 0) return;
@@ -178,28 +869,64 @@ export default function MaterialsPage() {
   };
 
   const uploadImages = async (files: File[]) => {
-    if (files.length === 0 || !id) return;
+    const uploadable = files.filter(isImageUploadFile);
+    if (uploadable.length === 0 || !id) return;
     setUploading(true);
-    setUploads(files.map((file) => ({ name: file.name, pct: 35, done: false })));
+    setUploads(uploadable.map((file) => ({ name: file.name, pct: 35, done: false })));
     try {
-      await api.uploadImages(id, files);
-      setUploads(files.map((file) => ({ name: file.name, pct: 100, done: true })));
+      const result = await api.uploadImages(id, uploadable);
+      setUploads(uploadable.map((file) => ({ name: file.name, pct: 100, done: true })));
       refresh();
-      toast({ type: "success", message: `已上传 ${files.length} 张图片` });
+      toast({ type: "success", message: `已上传 ${result.uploaded} 张图片` });
     } catch (error) {
       toast({ type: "error", message: `图片上传失败：${error}` });
     } finally {
       setUploading(false);
+      if (imageRef.current) imageRef.current.value = "";
     }
   };
 
   const handleDroppedFiles = (files: File[]) => {
     const videoFiles = files.filter((file) => file.type.startsWith("video/"));
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const imageFiles = files.filter(isImageUploadFile);
     if (videoFiles.length > 0) void uploadVideosParallel(videoFiles);
     if (imageFiles.length > 0) void uploadImages(imageFiles);
     if (videoFiles.length === 0 && imageFiles.length === 0) {
-      toast({ type: "error", message: "请选择视频或图片文件" });
+      toast({ type: "error", message: "请选择视频、图片或 ZIP 压缩包" });
+    }
+  };
+
+  const deleteVideo = async (video: Video) => {
+    if (!id) return;
+    const extracted = video.extracted_count ?? 0;
+    const confirmed = await confirm({
+      title: "删除视频",
+      message:
+        extracted > 0
+          ? `确定删除「${video.filename}」？将同时删除该视频及已提取的 ${extracted} 张素材，不可恢复。`
+          : `确定删除「${video.filename}」？删除后不可恢复。`,
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    setDeletingVideoId(video.id);
+    try {
+      const result = await api.deleteVideo(id, video.id);
+      setSelectedVideoIds((previous) => {
+        const next = new Set(previous);
+        next.delete(video.id);
+        return next;
+      });
+      refresh();
+      toast({
+        type: "success",
+        message: result.removed_frames > 0 ? `视频已删除，并清理 ${result.removed_frames} 张关联素材` : "视频已删除",
+      });
+    } catch (error) {
+      toast({ type: "error", message: `删除失败：${error}` });
+    } finally {
+      setDeletingVideoId(null);
     }
   };
 
@@ -213,16 +940,16 @@ export default function MaterialsPage() {
       toast({ type: "error", message: "请至少选择一个视频" });
       return;
     }
-    await api.createTask(id, "extract", {
-      video_ids: videoIds,
-      target_fps: targetFps,
-      max_frames: maxFrames,
-      threshold: dedupThreshold,
-      auto_dedup: true,
-      split: "train",
-    });
-    refresh();
-    toast({ type: "info", message: "提取任务已启动，可在顶栏查看进度" });
+    try {
+      await api.createTask(id, "extract", {
+        video_ids: videoIds,
+        ...DEFAULT_EXTRACT_PARAMS,
+      });
+      refresh();
+      toast({ type: "success", message: "提取任务已启动，进度可在页面上方查看" });
+    } catch (error) {
+      toast({ type: "error", message: `提取失败：${error}` });
+    }
   };
 
   const kaggleAvailable = providers.some((item) => item.provider === "kaggle" && item.available);
@@ -235,8 +962,8 @@ export default function MaterialsPage() {
       toast({
         type: "error",
         message: keywordDiscoveryAvailable
-          ? "请先描述希望识别的目标或场景，也可粘贴 Roboflow URL"
-          : "请先配置 Roboflow 或 Kaggle 凭据",
+          ? "请先描述希望识别的目标或场景，也可粘贴数据集链接"
+          : "公开数据集检索暂不可用，请联系管理员配置",
       });
       return;
     }
@@ -248,18 +975,16 @@ export default function MaterialsPage() {
       setShowDiscoveryPlan(true);
       setCandidates([]);
       setSelectedCandidate(null);
-      setLicenseConfirmed(false);
       setDiscoveryErrors({
         providers: "当前未配置可用的公开数据源凭据",
       });
-      toast({ type: "error", message: "请先配置 Roboflow 或 Kaggle 凭据" });
+      toast({ type: "error", message: "公开数据集检索暂不可用，请联系管理员配置" });
       return;
     }
 
     setDiscovering(true);
     setShowDiscoveryPlan(true);
     setSelectedCandidate(null);
-    setLicenseConfirmed(false);
     try {
       const result = await api.discoverPublicDatasets(
         id,
@@ -283,11 +1008,20 @@ export default function MaterialsPage() {
   };
 
   const startPublicFetch = async () => {
-    if (!id || !selectedCandidate || !licenseConfirmed) return;
+    if (!id || !selectedCandidate) return;
+    const confirmed = await confirm({
+      title: "确认下载数据集",
+      message: `将下载「${selectedCandidate.title}」v${selectedCandidate.source_version} 并开始分析，是否继续？`,
+      confirmLabel: "开始下载",
+    });
+    if (!confirmed) return;
     setPublicBusy(true);
     try {
       const created = await api.fetchPublicDataset(id, selectedCandidate);
-      setPublicImport(created);
+      setPublicImports((previous) => upsertPublicImport(previous, created));
+      setShowDiscoveryPlan(true);
+      setMappingInitializedFor(null);
+      setClassMapping({});
       toast({ type: "info", message: "已开始下载固定版本并执行安全检查" });
     } catch (error) {
       toast({ type: "error", message: `无法开始下载：${error}` });
@@ -297,13 +1031,13 @@ export default function MaterialsPage() {
   };
 
   const startPublicPublish = async () => {
-    if (!id || !publicImport) return;
-    if (publicImport.source_classes.some((item) => !(String(item.class_id) in classMapping))) {
+    if (!id || !dialogImport) return;
+    if (dialogImport.source_classes.some((item) => !(String(item.class_id) in classMapping))) {
       toast({ type: "error", message: "请为每个来源类别选择项目类别或忽略" });
       return;
     }
-    const annotationCount = Number(publicImport.quality_report.annotation_count ?? 0);
-    if (allSourceLabelsIgnored(classMapping, publicImport.source_classes, annotationCount)) {
+    const annotationCount = Number(dialogImport.quality_report.annotation_count ?? 0);
+    if (allSourceLabelsIgnored(classMapping, dialogImport.source_classes, annotationCount)) {
       toast({
         type: "error",
         message: "数据集含有标注，不能全部设为「忽略」。请至少映射一个来源类别到项目类别。",
@@ -312,14 +1046,14 @@ export default function MaterialsPage() {
     }
     setPublicBusy(true);
     try {
-      await api.publishPublicDataset(id, publicImport.id, {
+      await api.publishPublicDataset(id, dialogImport.id, {
         class_mapping: classMapping,
-        warnings_confirmed: warningsConfirmed,
+        warnings_confirmed: true,
         auto_label: autoLabel,
         cost_confirmed: costConfirmed,
         training_params: trainingParams,
       });
-      setPublicImport({ ...publicImport, state: "publishing" });
+      setPublicImports((previous) => upsertPublicImport(previous, { ...dialogImport, state: "publishing" }));
       toast({ type: "info", message: "正在原子发布公开数据，可在任务中心查看进度" });
     } catch (error) {
       toast({ type: "error", message: `公开数据发布失败：${error}` });
@@ -328,56 +1062,76 @@ export default function MaterialsPage() {
     }
   };
 
-  const approveAndTrain = async () => {
-    if (!id || !publicImport) return;
-    setPublicBusy(true);
-    try {
-      const task = await api.approvePublicDatasetAndTrain(id, publicImport.id);
-      setPublicImport({ ...publicImport, state: "training", train_task_id: task.id });
-      toast({ type: "success", message: "复查门禁通过，已创建不可变数据版本并开始训练" });
-    } catch (error) {
-      toast({ type: "error", message: `${error}` });
-      const refreshed = await api.getPublicDatasetImport(id, publicImport.id).catch(() => null);
-      if (refreshed) setPublicImport(refreshed);
-    } finally {
-      setPublicBusy(false);
-    }
-  };
-
-  const publishAnnotationCount = publicImport ? Number(publicImport.quality_report.annotation_count ?? 0) : 0;
-  const publishClassDistribution = (publicImport?.quality_report?.class_distribution ?? {}) as Record<string, number>;
-  const publishLabelsFullyIgnored = publicImport
-    ? allSourceLabelsIgnored(classMapping, publicImport.source_classes, publishAnnotationCount)
+  const publishAnnotationCount = dialogImport ? Number(dialogImport.quality_report.annotation_count ?? 0) : 0;
+  const publishClassDistribution = (dialogImport?.quality_report?.class_distribution ?? {}) as Record<string, number>;
+  const publishLabelsFullyIgnored = dialogImport
+    ? allSourceLabelsIgnored(classMapping, dialogImport.source_classes, publishAnnotationCount)
     : false;
+  const publishBlockingIssues = dialogImport
+    ? qualityReportMessages(dialogImport.quality_report, "blocking")
+    : [];
+  const publishWarnings = dialogImport
+    ? qualityReportMessages(dialogImport.quality_report, "warnings")
+    : [];
+  const canDiscardPublicImport = Boolean(
+    dialogImport
+    && !dialogImport.dataset_version_id
+    && !["fetching", "publishing", "training"].includes(dialogImport.state),
+  );
+  const canPublishPublicImport = Boolean(
+    dialogImport?.state === "fetched"
+    && publishBlockingIssues.length === 0
+    && !publishLabelsFullyIgnored,
+  );
+  const showPublicImportDialog = Boolean(dialogImport);
+  const sampleReviewPending = frameStats.needs_human ?? 0;
+  const canStartPublicFetch = Boolean(
+    selectedCandidate
+    && !selectedCandidateImport
+    && !dialogImport,
+  );
+  const selectedImportInReview = Boolean(
+    selectedCandidateImport && isPublicReviewState(selectedCandidateImport.state),
+  );
 
   const retryPublicFetch = async () => {
-    if (!id || !publicImport?.fetch_task_id) return;
+    if (!id || !dialogImport?.fetch_task_id) return;
     setPublicBusy(true);
     try {
-      await api.retryTask(id, publicImport.fetch_task_id);
-      setPublicImport({ ...publicImport, state: "fetching" });
+      await api.retryTask(id, dialogImport.fetch_task_id);
+      setPublicImports((previous) => upsertPublicImport(previous, { ...dialogImport, state: "fetching" }));
       toast({ type: "info", message: "已从断点续传下载，请勿关闭后端服务" });
     } catch (error) {
       toast({ type: "error", message: `续传下载失败：${error}` });
-      const refreshed = await api.getPublicDatasetImport(id, publicImport.id).catch(() => null);
-      if (refreshed) setPublicImport(refreshed);
+      const refreshed = await api.getPublicDatasetImport(id, dialogImport.id).catch(() => null);
+      if (refreshed) setPublicImports((previous) => upsertPublicImport(previous, refreshed));
     } finally {
       setPublicBusy(false);
     }
   };
 
   const discardPublicImport = async () => {
-    if (!id || !publicImport) return;
+    if (!id || !dialogImport) return;
+    const confirmed = await confirm({
+      title: "放弃导入",
+      message: "确定放弃本次公开数据导入？已下载的临时文件会被清理，不影响项目已有素材。",
+      confirmLabel: "放弃",
+    });
+    if (!confirmed) return;
     setPublicBusy(true);
     try {
-      await api.discardPublicDataset(id, publicImport.id);
-      setPublicImport(null);
-      setSelectedCandidate(null);
-      setClassMapping({});
-      toast({ type: "success", message: "已安全放弃本次公开数据，不影响项目历史素材" });
+      await api.discardPublicDataset(id, dialogImport.id);
+      setPublicImports((previous) => previous.filter((item) => item.id !== dialogImport.id));
+      if (mappingInitializedFor === dialogImport.id) {
+        setMappingInitializedFor(null);
+        setClassMapping({});
+      }
+      toast({ type: "success", message: "已放弃本次导入，可继续选择其他数据集" });
       refresh();
+      return true;
     } catch (error) {
       toast({ type: "error", message: `${error}` });
+      return false;
     } finally {
       setPublicBusy(false);
     }
@@ -389,640 +1143,413 @@ export default function MaterialsPage() {
   const readyFrames = frameStats.total ?? 0;
   const projectTypeLabel = project?.task_type === "classify" ? "图像分类" : "目标检测";
   const categoryNames = project?.categories.map((category) => category.name).join("、");
+  const materialsCopy = WORKFLOW_STEPS.find((step) => step.slug === "materials")!;
 
   return (
-    <div className="materials-hub">
-      <ProjectPageHeader
-        title="素材管理"
-        description="从本地采集或公开数据源建立项目数据集"
-        action={
-          readyFrames > 0 ? (
-            <Link href={`/projects/${id}/label`} className="btn-primary">
-              下一步：自动标注
-            </Link>
-          ) : undefined
-        }
-        meta={
-          <div className="materials-hub__meta">
-            <span>{projectTypeLabel}</span>
-            <span>{categoryNames || "尚未定义类别"}</span>
+    <div className="materials-workspace materials-workspace--fit materials-page">
+      <div className="materials-workspace__glow materials-workspace__glow--left" aria-hidden="true" />
+      <div className="materials-workspace__glow materials-workspace__glow--right" aria-hidden="true" />
+
+      <div className="materials-workspace__inner">
+        <ProjectPageHeader
+          title="素材准备"
+          eyebrow="Data Preparation"
+          description={materialsCopy.pageDescription}
+          showContext={true}
+          action={
+            readyFrames > 0 ? (
+              <WorkflowNextButton href={`/projects/${id}/label`} label="AI 预标注" />
+            ) : (
+              <WorkflowNextButton label="AI 预标注" disabled disabledHint="等待素材" />
+            )
+          }
+          meta={
+            <div className="flex flex-wrap gap-3">
+              <span className="flex items-center gap-1.5 bg-[#F4FAF8] border border-[#CFF4EC] px-3 py-1.5 rounded-lg text-sm text-[#075F5A] shadow-sm">
+                <small className="text-[#17343A]/50 text-xs">{projectTypeLabel}</small>
+                <strong>{categoryNames || "尚未定义类别"}</strong>
+              </span>
+              <span className="flex items-center gap-1.5 bg-white border border-[#e4e7ec] px-3 py-1.5 rounded-lg text-sm text-[#17343A] shadow-sm">
+                <Icon name="image" size={14} className="text-[#10A88F]" />
+                <strong>{numberFormatter.format(readyFrames)}</strong>
+                <small className="text-[#17343A]/50 text-xs">可用帧</small>
+              </span>
+              <span className="flex items-center gap-1.5 bg-white border border-[#e4e7ec] px-3 py-1.5 rounded-lg text-sm text-[#17343A] shadow-sm">
+                <Icon name="video" size={14} className="text-[#10A88F]" />
+                <strong>{videos.length}</strong>
+                <small className="text-[#17343A]/50 text-xs">个视频</small>
+              </span>
+            </div>
+          }
+        />
+
+        {activeExtract && (
+          <div className="materials-extract-banner">
+            <span className="materials-extract-banner__label">
+              <Icon name="clock" size={14} className="materials-extract-banner__icon" />
+              正在提取可标注帧
+            </span>
+            <TaskProgress progress={activeExtract.progress} total={activeExtract.total} label="提取进度" />
           </div>
-        }
+        )}
+
+        <div className="materials-workspace__main">
+          <div className="materials-workspace__toolbar">
+            <SegmentedControl
+              options={[
+                { value: "local" as const, label: "本地素材" },
+                { value: "public" as const, label: "公开数据" },
+              ]}
+              value={sourceMode}
+              onChange={setSourceMode}
+              disabled={uploading || running}
+            />
+          </div>
+
+          <div className="materials-workspace__content">
+            {sourceMode === "local" && (
+              <>
+                <div 
+                  className={`materials-panel materials-panel--local ${dragOver ? "materials-panel--drag" : ""}`}
+                  onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOver(false);
+                    handleDroppedFiles(Array.from(e.dataTransfer.files));
+                  }}
+                >
+                  {dragOver && (
+                    <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/50 backdrop-blur-sm">
+                      <div className="text-center p-8 bg-white border border-[#CFF4EC] rounded-2xl shadow-xl shadow-[#10A88F]/10">
+                        <div className="w-16 h-16 bg-[#F4FAF8] text-[#10A88F] rounded-full flex items-center justify-center mx-auto mb-4">
+                          <Icon name="upload" size={32} />
+                        </div>
+                        <h3 className="text-xl font-bold text-[#075F5A] mb-2">释放鼠标，立即上传</h3>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="materials-panel__head">
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-base font-bold text-[#075F5A] flex items-center gap-2">
+                        <Icon name="video" size={16} className="text-[#10A88F]" /> 
+                        已上传的视频与图片
+                      </h2>
+                      <span className="text-[10px] font-bold text-[#10A88F] bg-[#10A88F]/10 px-2 py-0.5 rounded uppercase tracking-wider">{videos.length} ITEMS</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#e4e7ec] text-[#344054] rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors shadow-sm" onClick={() => videoRef.current?.click()}>
+                        <Icon name="video" size={14} /> 选视频
+                      </button>
+                      <button
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#e4e7ec] text-[#344054] rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors shadow-sm"
+                        title="支持多选图片或 ZIP 压缩包批量上传"
+                        onClick={() => imageRef.current?.click()}
+                      >
+                        <Icon name="image" size={14} /> 图片/压缩包
+                      </button>
+                      <div className="w-px h-5 bg-[#e4e7ec] mx-1"></div>
+                      <button 
+                        className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm ${selectedVideoIds.size > 0 ? 'bg-[#10A88F] text-white hover:bg-[#078D82] shadow-[#10A88F]/20' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                        onClick={() => void startPrepare()} 
+                        disabled={selectedVideoIds.size === 0 || running || uploading}
+                      >
+                        <Icon name="play" size={14} /> 开始提取
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="materials-panel__body materials-panel__body--local">
+                    {videos.length === 0 ? (
+                      <div className="materials-local-dropzone materials-local-dropzone--fill">
+                        <Icon name="upload" size={28} className="text-[#10A88F]/70" />
+                        <strong>拖拽文件到这里上传</strong>
+                        <span>MP4、MOV、AVI、JPG、PNG、ZIP 等</span>
+                      </div>
+                    ) : (
+                      <div className="bg-white border border-[#f0f4f3] rounded-xl overflow-hidden shadow-sm">
+                        <table className="materials-video-table w-full text-left border-collapse">
+                              <thead>
+                                <tr className="border-b border-[#f0f4f3] bg-[#f4faf8]/50">
+                                  <th className="w-12">
+                                     <input type="checkbox" className="rounded border-gray-300 text-[#10A88F] focus:ring-[#10A88F]" onChange={() => setSelectedVideoIds(new Set(videos.map(v => v.id)))} />
+                                  </th>
+                                  <th className="w-[148px]">封面</th>
+                                  <th className="materials-video-table__filename">文件名</th>
+                                  <th className="w-24">大小</th>
+                                  <th className="w-24">时长</th>
+                                  <th className="w-24">原片帧</th>
+                                  <th className="w-24">已提取</th>
+                                  <th className="w-20 text-center">操作</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {videos.map((video) => (
+                                  <tr key={video.id} className="border-b border-[#f0f4f3] hover:bg-gray-50/50 transition-colors">
+                                    <td>
+                                      <input
+                                        type="checkbox"
+                                        className="rounded border-gray-300 text-[#10A88F] focus:ring-[#10A88F]"
+                                        checked={selectedVideoIds.has(video.id)}
+                                        onChange={() => setSelectedVideoIds(prev => {
+                                          const next = new Set(prev);
+                                          if (next.has(video.id)) next.delete(video.id); else next.add(video.id);
+                                          return next;
+                                        })}
+                                      />
+                                    </td>
+                                    <td>
+                                      <div className="materials-video-table__thumb">
+                                        <img src={api.videoThumbnailUrl(id as string, video.id)} alt="" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+                                        <span className="materials-video-table__thumb-icon"><Icon name="video" size={16} /></span>
+                                      </div>
+                                    </td>
+                                    <td className="materials-video-table__filename" title={video.filename}>{video.filename}</td>
+                                    <td className="text-[#17343A]/70 text-sm tabular-nums">{formatBytes(video.file_bytes)}</td>
+                                    <td className="text-[#17343A]/70 text-sm tabular-nums">{video.duration_sec ? `${video.duration_sec.toFixed(1)}s` : "—"}</td>
+                                    <td className="text-[#17343A]/70 text-sm tabular-nums">{video.frame_count ?? "—"}</td>
+                                    <td>
+                                      {video.extracted_count ? (
+                                        <span className="text-[#10A88F] font-bold bg-[#10A88F]/10 px-2 py-0.5 rounded-md text-xs">{video.extracted_count}</span>
+                                      ) : <span className="text-gray-400 text-sm">0</span>}
+                                    </td>
+                                    <td className="text-center">
+                                      <button
+                                        type="button"
+                                        className="materials-video-table__delete"
+                                        title="删除视频"
+                                        disabled={deletingVideoId === video.id || running || uploading}
+                                        onClick={() => void deleteVideo(video)}
+                                      >
+                                        <Icon name="trash" size={18} />
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {sourceMode === "public" && (
+              <div className="materials-public-layout">
+                <aside className="materials-public-layout__search">
+                  <div className="bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-5">
+                    <h2 className="text-base font-bold text-[#075F5A] mb-1">公开数据检索</h2>
+                    <p className="text-xs text-[#17343A]/70 mb-4">输入你想识别的目标或场景名称</p>
+                    
+                    <div className="materials-public-search-field">
+                      <textarea
+                        className="input materials-public-search-input"
+                        rows={2}
+                        value={discoveryIntent}
+                        placeholder="例如：反光衣检测"
+                        onChange={(e) => { setDiscoveryIntent(e.target.value); setShowDiscoveryPlan(false); }}
+                      />
+                      <button 
+                        type="button"
+                        className="materials-public-search-field__action"
+                        disabled={discovering}
+                        onClick={buildDiscoveryPlan}
+                      >
+                        <Icon name="search" size={14} />
+                      </button>
+                    </div>
+                    
+                    <div className="flex flex-wrap gap-1.5">
+                      {publicExamples.map(ex => (
+                        <button key={ex} onClick={() => { setDiscoveryIntent(ex); setShowDiscoveryPlan(false); }} className="px-2 py-0.5 bg-white border border-[#e4e7ec] rounded text-[11px] font-medium text-[#17343A]/70 hover:border-[#10A88F] hover:text-[#10A88F] transition-colors">
+                          {ex}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </aside>
+
+                <section className="materials-panel materials-public-layout__panel">
+                   <div className="materials-panel__head">
+                     <div className="materials-panel__head-copy">
+                       <h2 className="text-base font-bold text-[#075F5A] flex items-center gap-2">
+                         <Icon name="database" size={16} className="text-[#10A88F]" /> 
+                         {selectedCandidate ? "数据集详情" : showDiscoveryPlan ? "建议搜索词" : discoveryIntent ? "检索结果" : "数据探索"}
+                       </h2>
+                       {showDiscoveryPlan && !discovering && candidates.length > 0 && !selectedCandidate && (
+                         <p className="materials-panel__head-hint">选择一张数据集卡片，再点右上角「下载并分析」开始导入；可多次追加不同数据集</p>
+                       )}
+                       {canStartPublicFetch && (
+                         <p className="materials-panel__head-hint">
+                           已选：{selectedCandidate!.title} · v{selectedCandidate!.source_version}
+                         </p>
+                       )}
+                       {selectedImportInReview && selectedCandidateImport && (
+                         <p className="materials-panel__head-hint">
+                           已选：{selectedCandidate!.title} · v{selectedCandidate!.source_version}（已导入，可在项目抽样复核中处理）
+                         </p>
+                       )}
+                       {selectedCandidateImport && isPublicDialogState(selectedCandidateImport.state) && (
+                         <p className="materials-panel__head-hint">
+                           「{selectedCandidateImport.title}」正在导入，请在弹窗继续操作
+                         </p>
+                       )}
+                       {dialogImport && (
+                         <p className="materials-panel__head-hint">正在导入「{dialogImport.title}」，可在弹窗继续操作</p>
+                       )}
+                       {pendingReviewImports.length > 0 && !selectedCandidate && (
+                         <p className="materials-panel__head-hint">
+                           项目内 {pendingReviewImports.length} 批公开数据待复核，共 {sampleReviewPending} 张抽样帧
+                         </p>
+                       )}
+                     </div>
+                     <div className="materials-panel__head-actions">
+                       {canStartPublicFetch && (
+                         <button
+                           type="button"
+                           className="btn-primary materials-panel__head-action"
+                           disabled={publicBusy || Boolean(dialogImport)}
+                           onClick={startPublicFetch}
+                         >
+                           {publicBusy ? "正在创建任务…" : "下载并分析"}
+                         </button>
+                       )}
+                       {selectedImportInReview && (
+                         <Link
+                           href={`/projects/${id}/review?filter=sample`}
+                           className="btn-primary materials-panel__head-action"
+                         >
+                           前往抽样复核
+                         </Link>
+                       )}
+                       {pendingReviewImports.length > 0 && !selectedCandidate && sampleReviewPending > 0 && (
+                         <Link
+                           href={`/projects/${id}/review?filter=sample`}
+                           className="btn-secondary materials-panel__head-action"
+                         >
+                           去复核
+                         </Link>
+                       )}
+                     </div>
+                   </div>
+                  <div className="materials-public-layout__body lk-scrollbar">
+                     {!showDiscoveryPlan && !discovering && (
+                       <div className="materials-public-layout__placeholder">
+                         <div className="w-16 h-16 bg-[#F4FAF8] rounded-full flex items-center justify-center mb-4 shadow-sm border border-white">
+                           <Icon name="search" size={24} className="text-[#10A88F]" />
+                         </div>
+                         <p className="text-base font-bold text-[#075F5A]">输入左侧关键词并检索</p>
+                       </div>
+                     )}
+
+                     {showDiscoveryPlan && discovering && (
+                       <div className="materials-public-layout__placeholder materials-public-layout__placeholder--loading">
+                         <LoadingScreen fullScreen={false} message="正在分析候选数据集…" />
+                       </div>
+                     )}
+
+                     {showDiscoveryPlan && !discovering && candidates.length === 0 && publicImports.length === 0 && (
+                       <div className="materials-public-layout__placeholder">
+                         <div className="w-16 h-16 bg-[#fef3f2] rounded-full flex items-center justify-center mb-4 shadow-sm border border-white">
+                           <Icon name="audit" size={24} className="text-[#d92d20]" />
+                         </div>
+                         <p className="text-base font-bold text-[#d92d20] mb-2">暂未获得可验证的候选</p>
+                         <p className="text-sm text-[#17343A]/60 max-w-md text-center">
+                           {Object.values(discoveryErrors).map((message) => message.replace(/Kaggle|Roboflow/gi, "公开数据源")).join("；") || "可换个检索词试试。"}
+                         </p>
+                       </div>
+                     )}
+
+                     {showDiscoveryPlan && !discovering && candidates.length > 0 && (
+                       <div className="materials-public-layout__results">
+                         {discoveryErrors.roboflow_filtered && (
+                           <p className="materials-public-layout__filter-note">
+                             {discoveryErrors.roboflow_filtered.replace(/Roboflow/gi, "公开数据源")}
+                           </p>
+                         )}
+                         <div className="public-dataset-grid">
+                           {candidates.map((candidate, index) => {
+                             const matchedImport = publicImports.find(
+                               (item) => item.license_fingerprint === candidate.license_fingerprint,
+                             );
+                             const importStatus = matchedImport
+                               ? publicImportCardStatus(matchedImport.state)
+                               : null;
+                             return (
+                             <PublicDatasetCandidateCard
+                               key={`${candidate.provider}:${candidate.source_ref}:${candidate.source_version}`}
+                               candidate={candidate}
+                               recommended={index === 0}
+                               selected={selectedCandidate?.license_fingerprint === candidate.license_fingerprint}
+                               importStatus={importStatus}
+                               onSelect={() => setSelectedCandidate(candidate)}
+                             />
+                             );
+                           })}
+                         </div>
+                       </div>
+                     )}
+
+                     {showDiscoveryPlan && dialogImport && candidates.length === 0 && (
+                       <div className="materials-public-layout__placeholder">
+                         <div className="w-16 h-16 bg-[#F4FAF8] rounded-full flex items-center justify-center mb-4 shadow-sm border border-white">
+                           <Icon name="database" size={24} className="text-[#10A88F]" />
+                         </div>
+                         <p className="text-base font-bold text-[#075F5A]">正在导入「{dialogImport.title}」</p>
+                         <p className="text-sm text-[#17343A]/60">请在弹窗中继续，或放弃后重新检索</p>
+                       </div>
+                     )}
+                   </div>
+                </section>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <input
+        ref={videoRef}
+        type="file"
+        accept="video/*"
+        multiple
+        hidden
+        onChange={(event) => void uploadVideosParallel(Array.from(event.target.files ?? []))}
+      />
+      <input
+        ref={imageRef}
+        type="file"
+        accept="image/*,.zip,application/zip,application/x-zip-compressed"
+        multiple
+        hidden
+        onChange={(event) => void uploadImages(Array.from(event.target.files ?? []))}
       />
 
-      <section className="materials-assets" aria-label="数据资产概览">
-        <div>
-          <span className="materials-assets__icon"><Icon name="image" size={17} /></span>
-          <span><strong>{numberFormatter.format(readyFrames)}</strong><small>可用数据帧</small></span>
-        </div>
-        <div>
-          <span className="materials-assets__icon"><Icon name="video" size={17} /></span>
-          <span><strong>{videos.length}</strong><small>已上传视频</small></span>
-        </div>
-        <div>
-          <span className="materials-assets__icon"><Icon name="database" size={17} /></span>
-          <span><strong>{project?.disk_usage_mb.toFixed(2) ?? "0.00"} MB</strong><small>项目存储占用</small></span>
-        </div>
-        <div className={readyFrames > 0 ? "materials-assets__state materials-assets__state--ready" : "materials-assets__state"}>
-          <i aria-hidden="true" />
-          <span><strong>{readyFrames > 0 ? "数据已就绪" : "等待素材"}</strong><small>{readyFrames > 0 ? "可以进入智能标注" : "选择一种数据获取方式"}</small></span>
-        </div>
-      </section>
-
-      {activeExtract && (
-        <section className="materials-live-task">
-          <div>
-            <span className="project-section-kicker">Live processing</span>
-            <strong>正在从视频提取可标注帧</strong>
-          </div>
-          <TaskProgress
-            progress={activeExtract.progress}
-            total={activeExtract.total}
-            label="提取进度"
-          />
-        </section>
-      )}
-
-      <section className={`materials-intake materials-intake--${sourceMode}`} aria-label="素材获取工作区">
-        <header className="materials-intake__head">
-          <div>
-            <span className="project-section-kicker">Data intake</span>
-            <h2>{sourceMode === "local" ? "导入本地素材" : "寻找公开数据集"}</h2>
-            <p>
-              {sourceMode === "local"
-                ? "接入现场监控、巡检视频或已有图片数据集"
-                : "描述目标与场景，由智能体生成公开数据检索方案"}
-            </p>
-          </div>
-          <div className="materials-source-switch" role="tablist" aria-label="素材获取方式">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceMode === "local"}
-              className={sourceMode === "local" ? "materials-source-switch__item materials-source-switch__item--active" : "materials-source-switch__item"}
-              onClick={() => setSourceMode("local")}
-            >
-              <Icon name="upload" size={15} />
-              <span><strong>本地素材</strong><small>上传文件</small></span>
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceMode === "public"}
-              className={sourceMode === "public" ? "materials-source-switch__item materials-source-switch__item--active" : "materials-source-switch__item"}
-              onClick={() => setSourceMode("public")}
-            >
-              <Icon name="sparkles" size={15} />
-              <span><strong>公开数据</strong><small>智能发现</small></span>
-            </button>
-          </div>
-        </header>
-
-        {sourceMode === "local" && (
-          <div className="materials-intake__body" role="tabpanel">
-            <div
-              className={dragOver ? "materials-dropzone materials-dropzone--active" : "materials-dropzone"}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragOver(true);
-              }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDragOver(false);
-                handleDroppedFiles(Array.from(event.dataTransfer.files));
-              }}
-            >
-              <span className="materials-dropzone__icon"><Icon name="upload" size={24} /></span>
-              <strong>拖拽视频或图片到这里</strong>
-              <p>支持批量混合上传，原始素材将保留在当前项目内</p>
-              <div>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={uploading}
-                  onClick={() => videoRef.current?.click()}
-                >
-                  <Icon name="video" size={15} />
-                  选择视频
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={uploading}
-                  onClick={() => imageRef.current?.click()}
-                >
-                  <Icon name="image" size={15} />
-                  选择图片
-                </button>
-              </div>
-              <small>MP4、MOV、AVI · JPG、PNG、WEBP</small>
-              <input
-                ref={videoRef}
-                type="file"
-                accept="video/*"
-                multiple
-                hidden
-                onChange={(event) =>
-                  void uploadVideosParallel(Array.from(event.target.files ?? []))
-                }
-              />
-              <input
-                ref={imageRef}
-                type="file"
-                accept="image/*"
-                multiple
-                hidden
-                onChange={(event) =>
-                  void uploadImages(Array.from(event.target.files ?? []))
-                }
-              />
-            </div>
-
-            <aside className="materials-intake__rail" aria-label="本地素材处理说明">
-              <div className="materials-rail-summary">
-                <span className="materials-rail-summary__icon"><Icon name="video" size={18} /></span>
-                <div>
-                  <span className="project-section-kicker">Local source</span>
-                  <h3>从现场素材开始</h3>
-                  <p>适合监控录像、巡检视频和现场采集图片。</p>
-                </div>
-              </div>
-              <div className="materials-source-types" aria-label="支持的素材类型">
-                <span>监控视频</span>
-                <span>巡检录像</span>
-                <span>现场图片</span>
-              </div>
-              <ol className="materials-ingest-flow">
-                <li><strong>01</strong><span><b>上传入库</b><small>保留原始文件与来源信息</small></span></li>
-                <li><strong>02</strong><span><b>视频抽帧</b><small>按设置帧率生成可标注图像</small></span></li>
-                <li><strong>03</strong><span><b>自动去重</b><small>过滤相似帧，减少重复标注</small></span></li>
-              </ol>
-              <div className="materials-rail-note">
-                <Icon name="check" size={13} />
-                上传完成后可统一配置抽帧参数
-              </div>
-            </aside>
-          </div>
-        )}
-
-        {sourceMode === "public" && (
-          <div className="materials-intake__body" role="tabpanel">
-            <div className="materials-ai-composer">
-              <div className="materials-ai-composer__badge">
-                <Icon name="sparkles" size={15} />
-                AI data scout
-                <em>受控自动化</em>
-              </div>
-              <h3>描述你想识别的目标或场景</h3>
-              <p>
-                {roboflowAvailable
-                  ? "已支持 Roboflow 关键词检索；也可直接粘贴带版本号的 Universe URL。"
-                  : kaggleAvailable
-                    ? "可用关键词检索 Kaggle，或粘贴 Roboflow URL。"
-                    : "请先配置 Roboflow 或 Kaggle 凭据后再检索。"}
-              </p>
-                <label className="materials-ai-prompt">
-                  <span>识别需求</span>
-                  <textarea
-                    rows={3}
-                    value={discoveryIntent}
-                    placeholder="例如：鸟窝检测、烟雾识别；或 https://universe.roboflow.com/workspace/project/1"
-                    onChange={(event) => {
-                      setDiscoveryIntent(event.target.value);
-                      setShowDiscoveryPlan(false);
-                    }}
-                  />
-                </label>
-
-                <div className="materials-ai-examples">
-                  <span>快速填写</span>
-                  {publicExamples.map((example) => (
-                    <button
-                      key={example}
-                      type="button"
-                      onClick={() => {
-                        setDiscoveryIntent(example);
-                        setShowDiscoveryPlan(false);
-                      }}
-                    >
-                      {example}
-                    </button>
-                  ))}
-                </div>
-              <div className="materials-ai-composer__action">
-                <button type="button" disabled={discovering} onClick={buildDiscoveryPlan}>
-                  <Icon name="sparkles" size={16} />
-                  {discovering ? "正在检索…" : "查找公开数据"}
-                </button>
-                <span>检索不会下载；选择固定版本并确认许可后才开始</span>
-              </div>
-            </div>
-
-            <aside className="materials-intake__rail" aria-label="公开数据发现说明">
-              <div className="materials-rail-summary">
-                <span className="materials-rail-summary__icon"><Icon name="database" size={18} /></span>
-                <div>
-                  <span className="project-section-kicker">Public source</span>
-                  <h3>面向任务筛选数据</h3>
-                  <p>
-                    {roboflowAvailable
-                      ? "Roboflow 支持关键词自动检索公开数据集，无需再手动找链接。"
-                      : "优先比较类别覆盖、场景接近度和许可证。"}
-                  </p>
-                </div>
-              </div>
-              <div className="materials-provider-list">
-                {providers.map((provider) => (
-                  <span key={provider.provider}>
-                    <i>{provider.provider === "roboflow" ? "R" : "K"}</i>
-                    {provider.provider === "roboflow" ? "Roboflow" : "Kaggle"}
-                    <small>{provider.available ? "可用" : "未配置"}</small>
-                  </span>
-                ))}
-              </div>
-              <ol className="materials-ingest-flow">
-                <li><strong>01</strong><span><b>理解需求</b><small>提取目标、场景与任务类型</small></span></li>
-                <li><strong>02</strong><span><b>比较候选</b><small>按匹配度与数据质量排序</small></span></li>
-                <li><strong>03</strong><span><b>导入训练</b><small>确认许可后统一格式入库</small></span></li>
-              </ol>
-              <div className="materials-rail-note">
-                <Icon name="check" size={13} />
-                {roboflowAvailable ? "Roboflow 已配置，可直接关键词检索" : "推荐结果会说明规模、格式与许可"}
-              </div>
-            </aside>
-          </div>
-        )}
-      </section>
-
       {uploads.length > 0 && (
-        <section className="materials-upload-queue" aria-label="上传队列">
-          <header>
-            <div>
-              <span className="project-section-kicker">Upload queue</span>
-              <h2>上传队列</h2>
-            </div>
-            <span>{uploads.filter((item) => item.done).length} / {uploads.length} 完成</span>
-          </header>
-          <ul>
-            {uploads.map((item) => (
-              <li key={item.name}>
-                <span className={item.done ? "materials-upload-queue__state materials-upload-queue__state--done" : "materials-upload-queue__state"}>
-                  {item.done ? <Icon name="check" size={14} /> : <Icon name="upload" size={14} />}
-                </span>
-                <strong>{item.name}</strong>
-                <div><span style={{ width: `${item.pct}%` }} /></div>
-                <em>{item.done ? "完成" : `${item.pct}%`}</em>
-              </li>
-            ))}
-          </ul>
-        </section>
+        <MaterialsUploadDialog uploads={uploads} uploading={uploading} onClose={closeUploadDialog} />
       )}
 
-      {showDiscoveryPlan && (
-        <section className="materials-discovery-plan">
-          <header>
-            <div>
-              <span className="project-section-kicker">Discovery blueprint</span>
-              <h2>公开数据检索方案</h2>
-            </div>
-            <span>{publicImport ? `导入状态 · ${publicImport.state}` : "等待数据源授权"}</span>
-          </header>
-
-          <div className="materials-discovery-plan__intent">
-            <span><Icon name="sparkles" size={17} /></span>
-            <div>
-              <small>{publicImport ? "已恢复最近一次公开导入" : "智能体已理解需求"}</small>
-              <strong>{publicImport?.title || discoveryIntent}</strong>
-            </div>
-          </div>
-
-          <div className="materials-discovery-plan__checks">
-            <div><span>任务匹配</span><strong>{projectTypeLabel}</strong><small>优先匹配项目任务类型</small></div>
-            <div><span>类别覆盖</span><strong>{categoryNames || "从需求推断"}</strong><small>比较类别与场景覆盖度</small></div>
-            <div><span>格式适配</span><strong>YOLO / COCO</strong><small>导入时自动统一数据格式</small></div>
-            <div><span>合规检查</span><strong>许可证优先</strong><small>过滤用途不明确的数据集</small></div>
-          </div>
-
-          {discovering && (
-            <div className="materials-discovery-plan__empty">
-              <span><Icon name="sparkles" size={22} /></span>
-              <div><strong>正在读取官方数据源元数据</strong><p>只比较候选，不会在此阶段下载文件。</p></div>
-            </div>
-          )}
-
-          {!discovering && candidates.length === 0 && !publicImport && (
-            <div className="materials-discovery-plan__empty">
-              <span><Icon name="database" size={22} /></span>
-              <div>
-                <strong>暂未获得可验证的候选</strong>
-                <p>
-                  {Object.values(discoveryErrors).join("；")
-                    || "可换个检索词，或粘贴带固定版本号的 Roboflow URL。"}
-                </p>
-              </div>
-            </div>
-          )}
-
-          {candidates.length > 0 && !publicImport && (
-            <div className="public-candidates">
-              {candidates.map((candidate, index) => {
-                const selected = selectedCandidate?.license_fingerprint === candidate.license_fingerprint;
-                return (
-                  <button
-                    type="button"
-                    key={`${candidate.provider}:${candidate.source_ref}:${candidate.source_version}`}
-                    className={
-                      selected
-                        ? "public-candidate public-candidate--selected"
-                        : index === 0
-                          ? "public-candidate public-candidate--recommended"
-                          : "public-candidate"
-                    }
-                    onClick={() => {
-                      setSelectedCandidate(candidate);
-                      setLicenseConfirmed(false);
-                    }}
-                  >
-                    <span className="public-candidate__provider">{candidate.provider}</span>
-                    {index === 0 && <span className="public-candidate__badge">最推荐</span>}
-                    <strong>{candidate.title}</strong>
-                    <p>{candidate.recommendation_reason || candidate.description || candidate.source_ref}</p>
-                    <div>
-                      <span>v{candidate.source_version}</span>
-                      <span>{candidate.image_count ? `${numberFormatter.format(candidate.image_count)} 张` : "图片数待分析"}</span>
-                      <span>{formatBytes(candidate.download_bytes)}</span>
-                      <span>{candidate.license_name || "许可未知"}</span>
-                      {candidate.classes?.length > 0 && <span>{candidate.classes.slice(0, 3).join(" / ")}</span>}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {selectedCandidate && !publicImport && (
-            <div className="public-confirmation">
-              <div>
-                <strong>确认数据来源与许可</strong>
-                <p>固定版本 {selectedCandidate.source_version} · {selectedCandidate.license_name || "许可未知"}。平台仅展示来源元数据，不构成法律意见。</p>
-                <a href={selectedCandidate.source_url} target="_blank" rel="noreferrer">查看原始数据页面</a>
-              </div>
-              <label>
-                <input type="checkbox" checked={licenseConfirmed} onChange={(event) => setLicenseConfirmed(event.target.checked)} />
-                我已核对许可、署名要求和底层图片权利，并同意下载分析
-              </label>
-              <button type="button" className="btn-primary" disabled={!licenseConfirmed || publicBusy} onClick={startPublicFetch}>
-                {publicBusy ? "正在创建任务…" : "下载并安全分析"}
-              </button>
-            </div>
-          )}
-
-          {publicImport && (
-            <div className="public-import-workflow">
-              <div className="public-import-workflow__steps" aria-label="公开数据导入进度">
-                {["发现", "下载分析", "映射发布", "抽样复查", "版本训练"].map((step, index) => {
-                  const progressIndex = ["created", "fetching", "fetched", "publishing", "needs_label", "review", "review_expanded", "training", "completed"].indexOf(publicImport.state);
-                  const thresholds = [0, 1, 3, 5, 7];
-                  return <span key={step} className={progressIndex >= thresholds[index] ? "is-active" : ""}><i>{index + 1}</i>{step}</span>;
-                })}
-              </div>
-
-              <div className="public-import-workflow__summary">
-                <div><small>当前状态</small><strong>{formatPublicImportState(publicImport.state)}</strong></div>
-                <div><small>识别格式</small><strong>{publicImport.detected_format ? formatDatasetFormat(publicImport.detected_format) : "分析中"}</strong></div>
-                <div><small>下载 / 解压</small><strong>{formatBytes(publicImport.actual_download_bytes)} / {formatBytes(publicImport.extracted_bytes)}</strong></div>
-                <div><small>校验摘要</small><strong>{publicImport.artifact_checksum ? publicImport.artifact_checksum.slice(0, 12) : "待生成"}</strong></div>
-              </div>
-
-              {["created", "fetching"].includes(publicImport.state) && (
-                <div className="public-import-workflow__notice"><Icon name="database" size={16} />正在下载固定版本、校验摘要并执行安全解压。此阶段不会创建项目帧。</div>
-              )}
-
-              {["fetch_failed", "fetch_interrupted"].includes(publicImport.state) && (
-                <div className="public-import-workflow__notice public-import-workflow__notice--danger">
-                  下载或分析未完成。可点击「续传下载」从断点继续，或在任务中心查看错误详情。
-                </div>
-              )}
-
-              {publicImport.state === "fetched" && (
-                <div className="public-mapping">
-                  <header><div><strong>确认类别映射与质量门禁</strong><p>无需认识英文类别名：系统会按语义自动建议映射；请核对「映射到」是否正确，避免误选「忽略」导致标注丢失。</p></div></header>
-                  <div className="public-mapping__quality">
-                    <span>图片 <strong>{String(publicImport.quality_report.image_count ?? 0)}</strong></span>
-                    <span>标注 <strong>{String(publicImport.quality_report.annotation_count ?? 0)}</strong></span>
-                    <span>阻断 <strong>{Array.isArray(publicImport.quality_report.blocking) ? publicImport.quality_report.blocking.length : 0}</strong></span>
-                    <span>警告 <strong>{Array.isArray(publicImport.quality_report.warnings) ? publicImport.quality_report.warnings.length : 0}</strong></span>
-                  </div>
-                  {publishLabelsFullyIgnored && (
-                    <div className="public-mapping__issues public-mapping__issues--danger">
-                      数据集含有 {publishAnnotationCount} 个标注框，但所有来源类别都被设为「忽略」。发布后将变成全部未标注，请至少映射一个类别到项目类别。
-                    </div>
-                  )}
-                  {Array.isArray(publicImport.quality_report.blocking) && publicImport.quality_report.blocking.length > 0 && (
-                    <ul className="public-mapping__issues public-mapping__issues--danger">{publicImport.quality_report.blocking.map((item) => <li key={String(item)}>{String(item)}</li>)}</ul>
-                  )}
-                  {Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && (
-                    <ul className="public-mapping__issues">{publicImport.quality_report.warnings.map((item) => <li key={String(item)}>{String(item)}</li>)}</ul>
-                  )}
-                  <div className="public-mapping__rows">
-                    {publicImport.source_classes.map((sourceClass) => {
-                      const boxCount = publishClassDistribution[String(sourceClass.class_id)] ?? 0;
-                      const mappedId = classMapping[String(sourceClass.class_id)];
-                      const mappedName = mappedId == null
-                        ? null
-                        : project?.categories.find((category) => category.class_id === mappedId)?.name;
-                      return (
-                        <label key={sourceClass.class_id}>
-                          <span>
-                            {sourceClass.name}
-                            <small>
-                              来源 ID {sourceClass.class_id}
-                              {boxCount > 0 ? ` · 约 ${numberFormatter.format(boxCount)} 个标注框` : ""}
-                            </small>
-                          </span>
-                          <select
-                            value={classMappingSelectValue(classMapping, sourceClass.class_id)}
-                            onChange={(event) => setClassMapping((previous) => ({
-                              ...previous,
-                              [String(sourceClass.class_id)]: event.target.value === "ignore" ? null : Number(event.target.value),
-                            }))}
-                          >
-                            <option value="ignore">忽略此类别（不导入标注）</option>
-                            {project?.categories.map((category) => (
-                              <option key={category.class_id} value={String(category.class_id)}>
-                                映射到：{category.name} · ID {category.class_id}
-                              </option>
-                            ))}
-                          </select>
-                          {mappedName && <small className="public-mapping__hint">将导入为项目类别「{mappedName}」</small>}
-                        </label>
-                      );
-                    })}
-                  </div>
-                  {Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && <label className="public-mapping__check"><input type="checkbox" checked={warningsConfirmed} onChange={(event) => setWarningsConfirmed(event.target.checked)} />我已查看并接受质量报告中的警告</label>}
-                  {Number(publicImport.quality_report.annotation_count ?? 0) === 0 && (
-                    <div className="public-mapping__cost"><label><input type="checkbox" checked={autoLabel} onChange={(event) => setAutoLabel(event.target.checked)} />导入后对本次数据执行 VLM 自动标注</label>{autoLabel && <label><input type="checkbox" checked={costConfirmed} onChange={(event) => setCostConfirmed(event.target.checked)} />我确认预估费用约 ¥{publicImport.estimated_vlm_cost.toFixed(2)}</label>}</div>
-                  )}
-                  <div className="public-training-params">
-                    <strong>训练参数</strong>
-                    <label><span>轮次</span><input type="number" min="1" max="1000" value={trainingParams.epochs} onChange={(event) => setTrainingParams((previous) => ({ ...previous, epochs: Number(event.target.value) }))} /></label>
-                    <label><span>图像尺寸</span><input type="number" min="32" max="4096" step="32" value={trainingParams.imgsz} onChange={(event) => setTrainingParams((previous) => ({ ...previous, imgsz: Number(event.target.value) }))} /></label>
-                    <label><span>批大小</span><input type="number" min="1" max="1024" value={trainingParams.batch} onChange={(event) => setTrainingParams((previous) => ({ ...previous, batch: Number(event.target.value) }))} /></label>
-                    <label><span>设备</span><select value={trainingParams.device} onChange={(event) => setTrainingParams((previous) => ({ ...previous, device: event.target.value }))}><option value="auto">自动</option><option value="cpu">CPU</option><option value="mps">MPS</option><option value="0">CUDA 0</option></select></label>
-                  </div>
-                  <button type="button" className="btn-primary" disabled={publicBusy || (Array.isArray(publicImport.quality_report.blocking) && publicImport.quality_report.blocking.length > 0) || (Array.isArray(publicImport.quality_report.warnings) && publicImport.quality_report.warnings.length > 0 && !warningsConfirmed) || (autoLabel && !costConfirmed) || publishLabelsFullyIgnored} onClick={startPublicPublish}>确认映射并发布到项目</button>
-                </div>
-              )}
-
-              {["publishing", "needs_label"].includes(publicImport.state) && <div className="public-import-workflow__notice"><Icon name="sparkles" size={16} />{publicImport.state === "publishing" ? "正在事务化发布素材和标注。" : "素材已导入为未标注数据，请完成标注后再创建训练版本。"}</div>}
-              {publicImport.state === "publish_interrupted" && <div className="public-import-workflow__notice public-import-workflow__notice--danger">发布被中断，源 staging 仍保留；请在任务中心重试，系统会清理未提交的孤儿文件。</div>}
-
-              {["review", "review_expanded"].includes(publicImport.state) && (
-                <div className="public-review-gate"><div><strong>需要完成风险抽样复查</strong><p>共有 {publicImport.review_frame_ids.length} 张固定样本。发现错误时系统会自动扩大受影响类别的复查范围。</p></div><div><Link href={`/projects/${id}/review?filter=sample`} className="btn-secondary">打开抽样复查</Link><button type="button" className="btn-primary" disabled={publicBusy} onClick={approveAndTrain}>复查完成，创建版本并训练</button></div></div>
-              )}
-
-              {publicImport.state === "full_review_required" && <div className="public-import-workflow__notice public-import-workflow__notice--danger">抽样持续发现错误，已禁止自动训练。请全量复查或放弃该数据集。</div>}
-              {publicImport.state === "training" && <div className="public-import-workflow__notice"><Icon name="check" size={16} />不可变数据版本已创建，训练任务正在运行。</div>}
-              {["training_failed", "training_cancelled", "training_interrupted"].includes(publicImport.state) && <div className="public-import-workflow__notice public-import-workflow__notice--danger">训练未完成，不可变数据版本仍然保留。请在任务中心查看原因并重试。</div>}
-              {publicImport.state === "completed" && <div className="public-import-workflow__notice"><Icon name="check" size={16} />公开数据链路已完成，训练结果已关联来源和数据版本。</div>}
-
-              {["fetch_failed", "fetch_interrupted"].includes(publicImport.state) && (
-                <div className="public-import-workflow__actions">
-                  <button type="button" className="btn-primary" disabled={publicBusy || !publicImport.fetch_task_id} onClick={retryPublicFetch}>
-                    {publicBusy ? "正在续传…" : "续传下载"}
-                  </button>
-                </div>
-              )}
-
-              {!publicImport.dataset_version_id && !(["fetching", "publishing", "training"].includes(publicImport.state)) && <button type="button" className="public-import-workflow__discard" disabled={publicBusy} onClick={discardPublicImport}>放弃本次公开数据</button>}
-            </div>
-          )}
-        </section>
+      {showPublicImportDialog && dialogImport && (
+        <PublicDatasetImportDialog
+          publicImport={dialogImport}
+          project={project}
+          publicBusy={publicBusy}
+          fetchProgress={fetchTaskProgress}
+          classMapping={classMapping}
+          setClassMapping={setClassMapping}
+          publishAnnotationCount={publishAnnotationCount}
+          publishClassDistribution={publishClassDistribution}
+          publishLabelsFullyIgnored={publishLabelsFullyIgnored}
+          publishBlockingIssues={publishBlockingIssues}
+          publishWarnings={publishWarnings}
+          canDiscard={canDiscardPublicImport}
+          canPublish={canPublishPublicImport}
+          onDiscard={discardPublicImport}
+          onPublish={startPublicPublish}
+        />
       )}
 
-      {videos.length > 0 && (
-        <div className="materials-processing-grid">
-          <section className="materials-video-panel">
-            <header>
-              <div>
-                <span className="project-section-kicker">Video inventory</span>
-                <h2>已上传视频</h2>
-              </div>
-              <div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSelectedVideoIds(
-                      new Set(
-                        videos
-                          .filter((video) => (video.extracted_count ?? 0) === 0)
-                          .map((video) => video.id),
-                      ),
-                    )
-                  }
-                >
-                  仅选未提取
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedVideoIds(new Set(videos.map((video) => video.id)))}
-                >
-                  全选
-                </button>
-              </div>
-            </header>
-            <div className="materials-table-wrap">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th aria-label="选择" />
-                    <th>文件名</th>
-                    <th>时长</th>
-                    <th>原片帧</th>
-                    <th>已提取</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {videos.map((video) => (
-                    <tr key={video.id}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          aria-label={`选择视频 ${video.filename}`}
-                          checked={selectedVideoIds.has(video.id)}
-                          onChange={() =>
-                            setSelectedVideoIds((previous) => {
-                              const next = new Set(previous);
-                              if (next.has(video.id)) next.delete(video.id);
-                              else next.add(video.id);
-                              return next;
-                            })
-                          }
-                        />
-                      </td>
-                      <td>{video.filename}</td>
-                      <td>{video.duration_sec ? `${video.duration_sec.toFixed(1)}s` : "—"}</td>
-                      <td>{video.frame_count ?? "—"}</td>
-                      <td>{video.extracted_count ?? 0}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section className="materials-extract-panel">
-            <header>
-              <span className="project-section-kicker">Frame strategy</span>
-              <h2>抽帧与去重策略</h2>
-              <p>对选中视频生成可用于标注的训练素材</p>
-            </header>
-            <label>
-              <span>每秒抽取帧数</span>
-              <input
-                className="input"
-                type="number"
-                step="0.1"
-                min="0.1"
-                value={targetFps}
-                onChange={(event) => setTargetFps(Number(event.target.value))}
-              />
-            </label>
-            <label>
-              <span>最多保留帧数</span>
-              <input
-                className="input"
-                type="number"
-                min="0"
-                value={maxFrames}
-                onChange={(event) => setMaxFrames(Number(event.target.value))}
-              />
-              <small>填写 0 表示不限制</small>
-            </label>
-            <label>
-              <span>重复判定阈值</span>
-              <input
-                className="input"
-                type="number"
-                min="1"
-                max="20"
-                value={dedupThreshold}
-                onChange={(event) => setDedupThreshold(Number(event.target.value))}
-              />
-              <small>感知哈希距离不超过该值即判为重复；数值越大，删除越多</small>
-            </label>
-            <button
-              type="button"
-              className="btn-primary"
-              disabled={running || uploading || selectedVideoIds.size === 0}
-              onClick={startPrepare}
-            >
-              {running ? "提取中…" : `开始提取 ${selectedVideoIds.size} 个视频`}
-            </button>
-          </section>
-        </div>
-      )}
     </div>
   );
 }

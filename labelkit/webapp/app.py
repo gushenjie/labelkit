@@ -189,7 +189,7 @@ def run_server(config_path: str | Path, port: int = 8765, open_browser: bool = T
     loaded = load_env(config_path)
     config = load_config(config_path)
     url = f"http://127.0.0.1:{port}"
-    print(f"LabelKit review: {url}")
+    print(f"视炼 review: {url}")
     print(f"Project: {config.name}")
     print(f"State: {config.state_dir / 'state.json'}")
     if loaded:

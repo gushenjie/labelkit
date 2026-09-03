@@ -116,6 +116,7 @@ class TaskWorker:
                 TaskType.DERIVE_CLASSIFY: cls._handle_derive_classify,
                 TaskType.PUBLIC_FETCH: cls._handle_public_fetch,
                 TaskType.PUBLIC_IMPORT: cls._handle_public_import,
+                TaskType.DATASET_SNAPSHOT: cls._handle_dataset_snapshot,
             }.get(task.task_type)
 
             if not handler:
@@ -192,6 +193,46 @@ class TaskWorker:
         return bool(db.query(Task.cancel_requested).filter(Task.id == task_id).scalar())
 
     @classmethod
+    def _is_rebuildable_frame(cls, frame: Frame) -> bool:
+        return frame.status == FrameStatus.UNLABELED and not frame.annotations
+
+    @classmethod
+    def _purge_rebuildable_video_frames(cls, db: Session, project_id: str, video_id: str) -> int:
+        """删除可安全重建的未标注帧，便于同一视频重复抽帧。"""
+        old_frames = db.query(Frame).filter(Frame.video_id == video_id).all()
+        removed = 0
+        for frame in old_frames:
+            if not cls._is_rebuildable_frame(frame):
+                continue
+            cls._delete_frame_artifacts(project_id, frame)
+            db.delete(frame)
+            removed += 1
+        if removed:
+            db.flush()
+        return removed
+
+    @classmethod
+    def _release_storage_key(
+        cls,
+        db: Session,
+        project_id: str,
+        video_id: str,
+        storage_key: str,
+    ) -> None:
+        existing = db.query(Frame).filter(Frame.storage_key == storage_key).one_or_none()
+        if not existing:
+            return
+        if existing.video_id != video_id:
+            raise RuntimeError(f"帧标识冲突: {storage_key}")
+        if not cls._is_rebuildable_frame(existing):
+            raise RuntimeError(
+                "该视频已有标注或复查进度，无法重复抽帧；请仅对未标注素材重试，或新建项目"
+            )
+        cls._delete_frame_artifacts(project_id, existing)
+        db.delete(existing)
+        db.flush()
+
+    @classmethod
     def _handle_extract(cls, db: Session, task: Task) -> None:
         project = db.get(Project, task.project_id)
         if not project:
@@ -215,21 +256,9 @@ class TaskWorker:
         for i, video in enumerate(videos):
             if cls._cancelled(db, task.id):
                 break
-            # 只清理可安全重建的未标注帧；历史确认帧和任何带标注帧必须保留。
-            old_frames = (
-                db.query(Frame)
-                .filter(
-                    Frame.video_id == video.id,
-                    Frame.status == FrameStatus.UNLABELED,
-                    ~Frame.annotations.any(),
-                )
-                .all()
-            )
-            for frame in old_frames:
-                cls._delete_frame_artifacts(project.id, frame)
-                db.delete(frame)
-            if old_frames:
-                db.flush()
+            removed = cls._purge_rebuildable_video_frames(db, project.id, video.id)
+            if removed:
+                cls._append_log(db, task, f"清理旧素材: {video.filename} -> {removed} 张")
 
             out_dir = frames_dir(project.id, split)
             prefix = video.storage_key or video.id
@@ -241,6 +270,7 @@ class TaskWorker:
                 prefix=prefix,
             )
             for j, p in enumerate(paths):
+                cls._release_storage_key(db, project.id, video.id, p.stem)
                 phash = compute_phash(p)
                 frame = Frame(
                     project_id=project.id,
@@ -411,6 +441,12 @@ class TaskWorker:
             log=lambda m: cls._append_log(db, task, m),
             cancelled=lambda: cls._cancelled(db, task.id),
         )
+
+    @classmethod
+    def _handle_dataset_snapshot(cls, db: Session, task: Task) -> None:
+        from server.core.dataset_service import run_dataset_snapshot_task
+
+        run_dataset_snapshot_task(db, task)
 
     @classmethod
     def _handle_relabel(cls, db: Session, task: Task) -> None:

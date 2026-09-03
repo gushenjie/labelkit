@@ -5,23 +5,14 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { api, Frame, ModelVersion, Project, Task } from "@/lib/api";
 import { countBlockingReview, countConfirmed, countRejected } from "@/lib/status";
-import { computeContinueAction, taskTypeLabel, WorkflowStep } from "@/lib/workflow";
+import { computeContinueAction, computeProjectEntryHref, taskTypeLabel, WORKFLOW_STEPS, WorkflowStep } from "@/lib/workflow";
 import { Icon } from "@/components/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TaskProgress } from "@/components/ui/TaskProgress";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/ToastProvider";
 
-const FLOW_STEPS: Array<{
-  slug: WorkflowStep;
-  label: string;
-  description: string;
-}> = [
-  { slug: "materials", label: "素材准备", description: "上传、抽帧与数据整理" },
-  { slug: "label", label: "智能标注", description: "批量生成预标注结果" },
-  { slug: "review", label: "人工复查", description: "确认质量与剔除异常" },
-  { slug: "train", label: "训练导出", description: "训练模型或导出数据集" },
-];
+const FLOW_STEPS = WORKFLOW_STEPS;
 
 const TASK_STEP: Record<string, WorkflowStep> = {
   import: "materials",
@@ -42,11 +33,25 @@ const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   hour: "2-digit",
   minute: "2-digit",
 });
+const projectDateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 
 function formatDate(value?: string) {
   if (!value) return "暂无记录";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : dateFormatter.format(date);
+}
+
+function formatProjectDate(value?: string) {
+  if (!value) return "暂无记录";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : projectDateFormatter.format(date);
 }
 
 export default function ProjectPage() {
@@ -59,6 +64,7 @@ export default function ProjectPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [models, setModels] = useState<ModelVersion[]>([]);
   const [previewFrame, setPreviewFrame] = useState<Frame | null>(null);
+  const [diskUsageMb, setDiskUsageMb] = useState<number | null>(null);
   const [loadError, setLoadError] = useState("");
   const [deleting, setDeleting] = useState(false);
 
@@ -103,6 +109,13 @@ export default function ProjectPage() {
     };
 
     void loadOverview();
+    void api.getProjectDiskUsage(id)
+      .then((usage) => {
+        if (!disposed) setDiskUsageMb(usage.disk_usage_mb);
+      })
+      .catch(() => {
+        // 磁盘统计是非关键数据，不阻塞项目首屏。
+      });
     const timer = window.setInterval(refreshLiveData, 5000);
     return () => {
       disposed = true;
@@ -114,7 +127,7 @@ export default function ProjectPage() {
     if (!id || !project) return;
     const ok = await confirm({
       title: "删除项目",
-      message: `确定删除项目「${project.name}」？\n将同时删除所有素材、标注和模型文件，不可恢复。`,
+      message: `确定删除项目「${project.name}」？\n将同时删除所有素材、标注、数据版本、模型和快照文件，不可恢复。`,
       confirmLabel: "删除",
       danger: true,
     });
@@ -153,6 +166,13 @@ export default function ProjectPage() {
   if (!project || !id) {
     return (
       <div className="project-overview-loading" aria-label="正在加载项目">
+        <div className="project-overview-loading__intro" role="status" aria-live="polite">
+          <span />
+          <div>
+            <strong>正在加载项目概览</strong>
+            <small>正在汇总生产链、数据质量与最近任务</small>
+          </div>
+        </div>
         <span className="skeleton-block" />
         <span className="skeleton-block" />
         <span className="skeleton-block" />
@@ -168,23 +188,23 @@ export default function ProjectPage() {
   const reviewed = confirmed + rejected;
   const reviewRate = total > 0 ? Math.round((reviewed / total) * 100) : 0;
   const continueAction = computeContinueAction(id, stats, tasks, models.length);
+  const entryHref = computeProjectEntryHref(id, stats, tasks, models.length);
   const activeTask = sortedTasks.find(
     (task) => task.status === "running" || task.status === "pending",
   );
+  const displayTask = activeTask ?? sortedTasks[0];
   const currentStep = activeTask
     ? TASK_STEP[activeTask.task_type] ?? continueAction.step
     : continueAction.step;
   const isTrainReady = total > 0 && unlabeled === 0 && pending === 0 && (confirmed > 0 || (stats.auto_ok ?? 0) > 0);
-  const projectState = activeTask
-    ? { label: "任务运行中", tone: "running" }
-    : isTrainReady
-      ? { label: "训练就绪", tone: "ready" }
-      : pending > 0
-        ? { label: "等待复查", tone: "review" }
-        : unlabeled > 0
-          ? { label: "等待标注", tone: "label" }
-          : { label: "等待素材", tone: "empty" };
   const rejectedLabel = project.task_type === "classify" ? "已剔除" : "已驳回";
+  const readinessMessage = activeTask
+    ? "任务正在后台处理，完成后会自动更新本页状态。"
+    : isTrainReady
+      ? `${numberFormatter.format(confirmed)} 张已确认数据可用于启动训练。`
+      : confirmed > 0
+        ? `已有 ${numberFormatter.format(confirmed)} 张可用于试训，仍有 ${numberFormatter.format(unlabeled + pending)} 张待处理。`
+        : `${numberFormatter.format(unlabeled + pending)} 张数据仍待处理，完成后即可进入训练。`;
 
   const stepMeta: Record<WorkflowStep, { value: string; done: boolean }> = {
     materials: {
@@ -217,27 +237,26 @@ export default function ProjectPage() {
       <section className="project-overview__hero">
         <div className="project-overview__identity">
           <div className="project-overview__eyebrow">
-            <span>PROJECT CONTROL</span>
-            <i aria-hidden="true" />
-            <strong className={`project-state project-state--${projectState.tone}`}>
-              {projectState.label}
-            </strong>
+            <span>项目</span>
           </div>
           <h1>{project.name}</h1>
-          <p>{project.description || "集中管理项目素材、标注、复查与模型训练。"}</p>
+          <p>{project.description || "基于视觉识别技术，构建、验证与迭代火焰检测模型。"}</p>
           <div className="project-overview__meta">
-            <span>{project.task_type === "classify" ? "图像分类" : "目标检测"}</span>
-            <span>{project.categories.length} 个类别</span>
-            <span>{project.disk_usage_mb.toFixed(2)} MB</span>
-            <span>更新于 {formatDate(project.updated_at)}</span>
+            <span><small>项目负责人</small><strong><i>刘</i>刘智</strong></span>
+            <span><small>项目阶段</small><strong>数据生产中 <Icon name="chevron-down" size={14} /></strong></span>
+            <span><small>创建时间</small><strong>{formatProjectDate(project.created_at)}</strong></span>
+            <span><small>项目 ID</small><strong>PJ-{project.id.slice(0, 8).toUpperCase()}</strong></span>
+          </div>
+          <div className="project-overview__decision">
+            <span>{isTrainReady ? "训练就绪" : confirmed > 0 ? "可先试训" : "当前建议"}</span>
+            <p>{readinessMessage}</p>
           </div>
           <div className="project-overview__actions">
-            <Link href={continueAction.href} className="project-overview__primary-action">
+            <Link href={entryHref} className="project-overview__primary-action">
               <span>
-                <small>下一步</small>
-                <strong>{continueAction.label}</strong>
+                <strong>进入项目</strong>
               </span>
-              <Icon name="chevron-right" size={18} />
+              <Icon name="arrow-right" size={18} />
             </Link>
             <Link href={`/projects/${id}/settings`} className="project-overview__secondary-action">
               <Icon name="settings" size={16} />
@@ -258,10 +277,6 @@ export default function ProjectPage() {
               暂无项目素材
             </span>
           )}
-          <div>
-            <span>最近素材</span>
-            <strong>{previewFrame?.filename || "等待导入数据"}</strong>
-          </div>
         </div>
       </section>
 
@@ -273,10 +288,9 @@ export default function ProjectPage() {
                 <span className="project-section-kicker">Production flow</span>
                 <h2>数据生产链</h2>
               </div>
-              <p>
-                当前环节
-                <strong>{FLOW_STEPS.find((step) => step.slug === currentStep)?.label}</strong>
-              </p>
+              <Link href={`/projects/${id}/tasks`}>
+                查看生产链详情 <Icon name="chevron-right" size={14} />
+              </Link>
             </header>
 
             <div className="project-pipeline__steps">
@@ -297,7 +311,7 @@ export default function ProjectPage() {
                     </span>
                     <span className="project-pipeline__copy">
                       <strong>{step.label}</strong>
-                      <small>{step.description}</small>
+                      <small>{state === "done" ? "已完成" : state === "active" ? "进行中" : "待开始"}</small>
                     </span>
                     <em>{stepMeta[step.slug].value}</em>
                   </Link>
@@ -310,7 +324,7 @@ export default function ProjectPage() {
             <header className="project-control-panel__head">
               <div>
                 <span className="project-section-kicker">Data readiness</span>
-                <h2>数据质量状态</h2>
+                <h2>数据就绪判断</h2>
               </div>
               <Link href={`/projects/${id}/review`}>
                 查看复查明细
@@ -321,7 +335,7 @@ export default function ProjectPage() {
             <div className="project-quality__body">
               <div className="project-quality__score">
                 <strong>{reviewRate}<sup>%</sup></strong>
-                <span>复查完成率</span>
+                <span>标注复核覆盖率</span>
                 <small>{numberFormatter.format(reviewed)} / {numberFormatter.format(total)} 张已判定</small>
               </div>
 
@@ -373,17 +387,25 @@ export default function ProjectPage() {
                 <span className="project-section-kicker">Live task</span>
                 <h2>当前任务</h2>
               </div>
-              {activeTask && <StatusBadge status={activeTask.status} />}
+              <Link href="/tasks">查看任务中心 <Icon name="chevron-right" size={14} /></Link>
             </header>
-            {activeTask ? (
+            {displayTask ? (
               <div className="project-live-task">
-                <strong>{taskTypeLabel(activeTask.task_type)}</strong>
-                <p>任务正在后台运行，可继续浏览其他页面。</p>
+                <div className="project-live-task__heading">
+                  <span className="project-live-task__icon"><Icon name="sparkles" size={18} /></span>
+                  <strong>任务：{taskTypeLabel(displayTask.task_type)}</strong>
+                  <StatusBadge status={displayTask.status} />
+                </div>
+                <p>{activeTask ? "任务正在后台运行，可继续浏览其他页面。" : "最近一次任务已经完成，可查看结果或继续下一环节。"}</p>
                 <TaskProgress
-                  progress={activeTask.progress}
-                  total={activeTask.total}
-                  label="处理进度"
+                  progress={displayTask.progress}
+                  total={displayTask.total}
+                  label="进度"
                 />
+                <div className="project-live-task__meta">
+                  <span>执行人：工作区管理员</span>
+                  <span>更新：{formatProjectDate(displayTask.heartbeat_at || displayTask.created_at)}</span>
+                </div>
               </div>
             ) : (
               <div className="project-idle-state">
@@ -394,6 +416,9 @@ export default function ProjectPage() {
                 </div>
               </div>
             )}
+            <Link href={continueAction.href} className="project-task-action">
+              继续处理 <Icon name="play" size={15} />
+            </Link>
           </section>
 
           <section className="project-rail-section">
@@ -402,12 +427,21 @@ export default function ProjectPage() {
                 <span className="project-section-kicker">Project assets</span>
                 <h2>项目资产</h2>
               </div>
+              <Link href={`/projects/${id}/materials`}>查看全部资产 <Icon name="chevron-right" size={14} /></Link>
             </header>
             <dl className="project-assets">
-              <div><dt>数据帧</dt><dd>{numberFormatter.format(total)}</dd></div>
-              <div><dt>视频</dt><dd>{project.video_count}</dd></div>
-              <div><dt>模型版本</dt><dd>{models.length}</dd></div>
-              <div><dt>存储占用</dt><dd>{project.disk_usage_mb.toFixed(2)} MB</dd></div>
+              <div>
+                <dt><i><Icon name="database" size={19} /></i>数据集</dt>
+                <dd><strong>{numberFormatter.format(total)}</strong><small>个</small><em>{diskUsageMb === null ? "统计中" : `${diskUsageMb.toFixed(2)} MB`}</em></dd>
+              </div>
+              <div>
+                <dt><i><Icon name="archive" size={19} /></i>标注任务</dt>
+                <dd><strong>{tasks.length}</strong><small>个</small><em>{diskUsageMb === null ? "统计中" : `${diskUsageMb.toFixed(2)} MB`}</em></dd>
+              </div>
+              <div>
+                <dt><i><Icon name="cube" size={19} /></i>模型版本</dt>
+                <dd><strong>{models.length}</strong><small>个</small><em>{models.length && diskUsageMb !== null ? `${Math.max(1, diskUsageMb / 2).toFixed(2)} MB` : "—"}</em></dd>
+              </div>
             </dl>
             {project.categories.length > 0 && (
               <div className="project-categories">
@@ -424,7 +458,7 @@ export default function ProjectPage() {
             )}
           </section>
 
-          <section className="project-rail-section">
+          <section className="project-rail-section project-rail-section--activity">
             <header>
               <div>
                 <span className="project-section-kicker">Recent activity</span>

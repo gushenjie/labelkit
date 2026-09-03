@@ -23,7 +23,12 @@ export function TaskTrayProvider({ children }: { children: React.ReactNode }) {
   const prevStatusRef = useRef<Map<string, string>>(new Map());
 
   const refresh = useCallback(async () => {
-    const allTasks = await api.listAllTasks();
+    let allTasks: Awaited<ReturnType<typeof api.listAllTasks>>;
+    try {
+      allTasks = await api.listAllTasks();
+    } catch {
+      return;
+    }
     const flat = allTasks
       .map((t) => ({ ...t, projectName: t.project_name }))
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());

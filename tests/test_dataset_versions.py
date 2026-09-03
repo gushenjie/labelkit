@@ -4,6 +4,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -17,6 +18,8 @@ from server.db.models import (
     FrameStatus,
     Project,
     ProjectTaskType,
+    Task,
+    TaskType,
 )
 
 
@@ -158,3 +161,32 @@ def test_classification_split_covers_each_class_and_excludes_no_target(tmp_path,
         class_splits.setdefault(int(entry["labels"][0][0]), set()).add(entry["split"])
     assert class_splits == {0: {"train", "val"}, 1: {"train", "val"}}
     assert len(version.manifest["frames"]) == 4
+
+
+def test_snapshot_detects_source_bytes_changed_after_version_creation(tmp_path, monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    project = Project(id="project", name="P", task_type=ProjectTaskType.DETECT)
+    session.add_all([project, Category(project_id=project.id, class_id=0, name="target")])
+    paths: list[Path] = []
+    for index in range(2):
+        image_path = tmp_path / f"immutable-{index}.jpg"
+        _write_image(image_path, index * 80)
+        paths.append(image_path)
+        frame = Frame(
+            id=f"immutable-{index}", project_id=project.id, filename=image_path.name,
+            filepath=str(image_path), source_group_id=f"source-{index}", status=FrameStatus.HUMAN_OK,
+        )
+        session.add(frame)
+        session.flush()
+        session.add(Annotation(frame_id=frame.id, class_id=0, x_center=.5, y_center=.5, width=.2, height=.2))
+    session.commit()
+    monkeypatch.setattr(dataset_module, "dataset_versions_dir", lambda _project_id: tmp_path / "versions")
+    service = DatasetService(DatasetVersionRepository(session))
+    version = service.create_version(project.id, project.task_type)
+
+    _write_image(paths[0], 255)
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        service.materialize(version, tmp_path / "materialized")

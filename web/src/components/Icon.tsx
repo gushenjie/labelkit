@@ -1,12 +1,16 @@
 import type { SVGProps } from "react";
 
 export type IconName =
+  | "arrow-right"
   | "archive"
+  | "audit"
   | "bell"
   | "check"
   | "chevron-down"
   | "chevron-left"
   | "chevron-right"
+  | "clock"
+  | "cube"
   | "database"
   | "folder"
   | "grid"
@@ -14,6 +18,8 @@ export type IconName =
   | "image"
   | "layers"
   | "list"
+  | "lock"
+  | "log-out"
   | "menu"
   | "more"
   | "package"
@@ -27,6 +33,7 @@ export type IconName =
   | "star"
   | "trash"
   | "upload"
+  | "users"
   | "video"
   | "x";
 
@@ -36,10 +43,17 @@ type IconProps = SVGProps<SVGSVGElement> & {
 };
 
 const paths: Record<IconName, React.ReactNode> = {
+  "arrow-right": <path d="M5 12h14M14 7l5 5-5 5" />,
   archive: (
     <>
       <rect x="3" y="4" width="18" height="4" rx="1" />
       <path d="M5 8v11h14V8M9 12h6" />
+    </>
+  ),
+  audit: (
+    <>
+      <path d="M6 3h9l4 4v14H6z" />
+      <path d="M15 3v5h4M9 12h6M9 16h6" />
     </>
   ),
   bell: (
@@ -52,6 +66,18 @@ const paths: Record<IconName, React.ReactNode> = {
   "chevron-down": <path d="m7 10 5 5 5-5" />,
   "chevron-left": <path d="m15 18-6-6 6-6" />,
   "chevron-right": <path d="m9 18 6-6-6-6" />,
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </>
+  ),
+  cube: (
+    <>
+      <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z" />
+      <path d="m4 7.5 8 4.5 8-4.5M12 12v9" />
+    </>
+  ),
   database: (
     <>
       <ellipse cx="12" cy="5" rx="8" ry="3" />
@@ -154,6 +180,24 @@ const paths: Record<IconName, React.ReactNode> = {
     <>
       <path d="M12 16V4M7 9l5-5 5 5" />
       <path d="M5 14v5h14v-5" />
+    </>
+  ),
+  lock: (
+    <>
+      <rect x="4" y="10" width="16" height="11" rx="2" />
+      <path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" />
+    </>
+  ),
+  "log-out": (
+    <>
+      <path d="M10 17l-1 1H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l1 1" />
+      <path d="M15 12H8M19 8l3 4-3 4" />
+    </>
+  ),
+  users: (
+    <>
+      <circle cx="9" cy="8" r="3" />
+      <path d="M3 20v-2a6 6 0 0 1 12 0v2M17 5a3 3 0 0 1 0 6M19 20v-2a5 5 0 0 0-3-4.6" />
     </>
   ),
   video: (

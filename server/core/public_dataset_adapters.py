@@ -51,6 +51,8 @@ ZH_SEARCH_TERMS = {
     "鸟": "bird",
     "烟雾": "smoke",
     "烟火": "smoke fire",
+    "火焰": "fire flame",
+    "火苗": "fire flame",
     "火灾": "fire",
     "安全帽": "hard hat helmet",
     "反光衣": "reflective vest",
@@ -90,7 +92,7 @@ def localize_search_query(text: str) -> str:
 SEMANTIC_ALIASES: tuple[frozenset[str], ...] = (
     frozenset({"bird nest", "birdnest", "nest", "nid", "鸟窝", "鸟巢", "feszek", "bird"}),
     frozenset({"smoke", "烟雾", "smog", "fume"}),
-    frozenset({"fire", "火灾", "flame", "烟火"}),
+    frozenset({"fire", "火灾", "flame", "烟火", "火焰", "火苗"}),
     frozenset({"hard hat", "helmet", "safety helmet", "安全帽"}),
     frozenset({"reflective vest", "safety vest", "反光衣", "vest"}),
     frozenset({"person", "people", "human", "行人", "人员"}),
@@ -159,6 +161,7 @@ def score_public_candidate(
 
     class_overlap = len(query_tokens & class_tokens) / max(len(query_tokens), 1)
     title_overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
+    relevance = max(class_overlap, title_overlap)
     focused = 1.0 if 1 <= len(candidate.classes) <= 5 else (0.55 if len(candidate.classes) <= 15 else 0.25)
     task_match = 1.0 if task_type and candidate.task_type == task_type else (0.7 if not task_type else 0.2)
     image_score = _image_count_score(candidate.image_count)
@@ -179,6 +182,10 @@ def score_public_candidate(
         + 0.05 * min(1.0, popularity)
     )
     score = max(0.0, min(1.0, score))
+    if relevance <= 0:
+        score *= 0.2
+    elif relevance < 0.08:
+        score *= 0.45
 
     reasons: list[str] = []
     if class_overlap > 0:
@@ -224,6 +231,11 @@ def rank_public_candidates(
     return ranked
 
 
+def _is_untranslated_cjk(text: str) -> bool:
+    cleaned = text.strip()
+    return bool(cleaned) and _has_cjk(cleaned) and not re.search(r"[A-Za-z]", cleaned)
+
+
 def expand_search_query(query: str, category_names: list[str]) -> str:
     """Translate/expand a search phrase when configured; fail back deterministically.
 
@@ -232,7 +244,10 @@ def expand_search_query(query: str, category_names: list[str]) -> str:
     """
     primary = localize_search_query(query.strip())
     category_hint = localize_search_query(" ".join(dict.fromkeys(category_names)).strip())
-    fallback = primary or category_hint
+    if _is_untranslated_cjk(primary) and category_hint and not _is_untranslated_cjk(category_hint):
+        fallback = category_hint
+    else:
+        fallback = primary or category_hint
     api_key = settings.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "")
     if not api_key:
         return fallback
@@ -483,6 +498,11 @@ def parse_roboflow_url(url: str) -> tuple[str, str, str]:
     return match.group(1), match.group(2), match.group(3)
 
 
+def roboflow_dataset_url(workspace: str, project: str, version: str) -> str:
+    """Return the canonical fixed-version Roboflow Universe dataset URL."""
+    return f"https://universe.roboflow.com/{workspace}/{project}/dataset/{version}"
+
+
 def _roboflow_json(path: str) -> dict:
     key = os.environ.get("ROBOFLOW_API_KEY", "")
     if not key:
@@ -499,6 +519,127 @@ def _roboflow_json(path: str) -> dict:
         raise RuntimeError(f"Roboflow API 请求失败: {type(error).__name__}") from error
 
 
+def _roboflow_post_json(path: str, body: dict) -> dict:
+    key = os.environ.get("ROBOFLOW_API_KEY", "")
+    if not key:
+        raise RuntimeError("未配置 ROBOFLOW_API_KEY")
+    separator = "&" if "?" in path else "?"
+    url = f"https://api.roboflow.com/{path}{separator}api_key={urllib.parse.quote(key)}"
+    payload = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"User-Agent": "LabelKit/0.2", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"Roboflow API 请求失败: HTTP {error.code}") from error
+    except Exception as error:
+        raise RuntimeError(f"Roboflow API 请求失败: {type(error).__name__}") from error
+
+
+def _first_http_url(*values) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text.startswith("http://") or text.startswith("https://"):
+            return text
+    return None
+
+
+def _preview_from_payload(section: dict) -> tuple[str | None, str | None]:
+    if not isinstance(section, dict):
+        return None, None
+    thumbnail = _first_http_url(
+        section.get("thumbnail"),
+        section.get("cover"),
+    )
+    annotation_thumbnail = _first_http_url(
+        section.get("annotationThumbnail"),
+        section.get("annotation_thumbnail"),
+        section.get("preview"),
+        section.get("annotation"),
+    )
+    return thumbnail, annotation_thumbnail
+
+
+def _preview_from_image_record(image: dict) -> tuple[str | None, str | None]:
+    urls = image.get("urls") if isinstance(image.get("urls"), dict) else {}
+    thumbnail = _first_http_url(
+        urls.get("thumb"),
+        urls.get("thumbnail"),
+        urls.get("original"),
+        image.get("thumb"),
+        image.get("url"),
+    )
+    annotation_thumbnail = _first_http_url(
+        urls.get("annotation"),
+        urls.get("annotated"),
+        image.get("annotation"),
+    )
+    return thumbnail, annotation_thumbnail
+
+
+def _roboflow_sample_preview(workspace: str, project: str) -> tuple[str | None, str | None]:
+    """从公开 Universe 项目拉取一张样例图作为预览。"""
+    try:
+        payload = _roboflow_post_json(
+            f"{workspace}/{project}/search",
+            {
+                "limit": 1,
+                "offset": 0,
+                "in_dataset": True,
+                "fields": ["id", "annotations", "name"],
+            },
+        )
+    except RuntimeError:
+        return None, None
+    results = payload.get("results") or []
+    if not results or not isinstance(results[0], dict):
+        return None, None
+    first = results[0]
+    image_id = str(first.get("id") or "").strip()
+    direct_url = _first_http_url(first.get("url"))
+    if image_id:
+        try:
+            detail = _roboflow_json(f"{workspace}/{project}/images/{image_id}")
+            thumbnail, annotation_thumbnail = _preview_from_image_record(detail.get("image") or {})
+            if thumbnail or annotation_thumbnail:
+                return thumbnail, annotation_thumbnail
+        except RuntimeError:
+            pass
+    if direct_url:
+        return None, direct_url
+    return None, None
+
+
+def fetch_roboflow_preview(source_ref: str, version: str) -> tuple[str | None, str | None]:
+    """补全 Universe 检索结果缺失的缩略图。"""
+    if "/" not in source_ref:
+        raise RuntimeError("Roboflow 数据集引用必须为 workspace/project")
+    workspace, project = source_ref.split("/", 1)
+    # A real image that belongs to the dataset is more trustworthy than a
+    # project-level cover/icon, which Roboflow may reuse across projects.
+    sample_thumbnail, sample_annotation = _roboflow_sample_preview(workspace, project)
+    if sample_thumbnail or sample_annotation:
+        return sample_thumbnail, sample_annotation
+    thumbnail: str | None = None
+    annotation_thumbnail: str | None = None
+    try:
+        detail = _roboflow_json(f"{workspace}/{project}/{version}")
+        # Only accept version-scoped metadata here. Project metadata may be a
+        # workspace logo or a stale cover unrelated to this fixed version.
+        for section in (detail.get("version") or {}, detail):
+            section_thumb, section_annot = _preview_from_payload(section)
+            thumbnail = thumbnail or section_thumb
+            annotation_thumbnail = annotation_thumbnail or section_annot
+    except RuntimeError:
+        pass
+    return thumbnail, annotation_thumbnail
+
+
 def _roboflow_task_type(raw_type: str) -> str | None:
     return {
         "object-detection": "detect",
@@ -507,18 +648,55 @@ def _roboflow_task_type(raw_type: str) -> str | None:
     }.get(str(raw_type or ""))
 
 
+def _fetch_roboflow_version_splits(workspace: str, project: str, version: str) -> dict[str, int] | None:
+    try:
+        payload = _roboflow_json(f"{workspace}/{project}/{version}")
+    except RuntimeError:
+        return None
+    version_data = payload.get("version") or {}
+    raw_splits = version_data.get("splits")
+    if not isinstance(raw_splits, dict):
+        return None
+    splits: dict[str, int] = {}
+    for key, value in raw_splits.items():
+        if value in {None, ""}:
+            continue
+        try:
+            splits[str(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return splits or None
+
+
+def roboflow_splits_usable_for_task(splits: dict[str, int], task_type: str | None) -> bool:
+    """检测任务至少需要 train + val/test 之一；分类任务只要有图片即可。"""
+    if task_type != "detect":
+        return True
+    train_count = int(splits.get("train") or 0)
+    val_count = int(splits.get("valid") or splits.get("val") or 0)
+    test_count = int(splits.get("test") or 0)
+    if train_count <= 0:
+        return False
+    return val_count > 0 or test_count > 0
+
+
+def roboflow_train_only_reason(splits: dict[str, int]) -> str:
+    train_count = int(splits.get("train") or 0)
+    return f"仅有训练集（{train_count} 张），缺少验证集，不适合检测项目导入"
+
+
 def discover_roboflow(
     query: str,
     *,
     task_type: str | None = None,
     limit: int = 12,
-) -> list[PublicDatasetCandidateDTO]:
+) -> tuple[list[PublicDatasetCandidateDTO], int]:
     """Search Roboflow Universe by natural language and fix each hit to latestVersion."""
     if not os.environ.get("ROBOFLOW_API_KEY"):
         raise RuntimeError("未配置 ROBOFLOW_API_KEY")
     cleaned = query.strip()
     if not cleaned:
-        return []
+        return [], 0
     parts = [cleaned]
     task_filter = ROBOFLOW_TASK_FILTER.get(task_type or "")
     if task_filter and task_filter not in cleaned.lower():
@@ -527,6 +705,7 @@ def discover_roboflow(
     payload = _roboflow_json(f"universe/search?q={urllib.parse.quote(search_q)}&page=1")
     results = payload.get("results") or []
     candidates: list[PublicDatasetCandidateDTO] = []
+    filtered_train_only = 0
     for item in list(results)[:limit]:
         if not isinstance(item, dict):
             continue
@@ -543,16 +722,26 @@ def discover_roboflow(
         if not match:
             continue
         workspace, project, fixed_version = match.group(1), match.group(2), match.group(3)
+        splits = _fetch_roboflow_version_splits(workspace, project, str(fixed_version))
+        if splits is not None and task_type == "detect" and not roboflow_splits_usable_for_task(splits, task_type):
+            filtered_train_only += 1
+            continue
         raw_classes = item.get("classes") or []
         if isinstance(raw_classes, dict):
             classes = tuple(str(name) for name in raw_classes.keys())
         else:
             classes = tuple(str(name) for name in raw_classes)
         license_name = str(item.get("license") or "unknown")
-        fixed_url = f"https://universe.roboflow.com/{workspace}/{project}/{fixed_version}"
+        fixed_url = roboflow_dataset_url(workspace, project, str(fixed_version))
         stars = item.get("stars")
         downloads = item.get("downloads")
         views = item.get("views")
+        thumbnail = _first_http_url(item.get("thumbnail"), item.get("cover"))
+        annotation_thumbnail = _first_http_url(
+            item.get("annotationThumbnail"),
+            item.get("annotation_thumbnail"),
+            item.get("preview"),
+        )
         candidates.append(
             PublicDatasetCandidateDTO(
                 provider="roboflow",
@@ -573,19 +762,26 @@ def discover_roboflow(
                 stars=int(stars) if stars not in {None, ""} else None,
                 downloads=int(downloads) if downloads not in {None, ""} else None,
                 views=int(views) if views not in {None, ""} else None,
+                thumbnail=thumbnail,
+                annotation_thumbnail=annotation_thumbnail,
             )
         )
-    return candidates
+    return candidates, filtered_train_only
 
 
-def inspect_roboflow_url(url: str) -> PublicDatasetCandidateDTO:
+def inspect_roboflow_url(url: str, *, task_type: str | None = None) -> PublicDatasetCandidateDTO:
     workspace, project, version = parse_roboflow_url(url)
+    fixed_url = roboflow_dataset_url(workspace, project, version)
     payload = _roboflow_json(f"{workspace}/{project}/{version}")
     project_data = payload.get("project") or {}
     version_data = payload.get("version") or {}
-    task_type = _roboflow_task_type(str(project_data.get("type") or ""))
-    if task_type is None:
+    mapped_task_type = _roboflow_task_type(str(project_data.get("type") or ""))
+    if mapped_task_type is None:
         raise RuntimeError(f"暂不支持 Roboflow 任务类型: {project_data.get('type') or 'unknown'}")
+    splits = _fetch_roboflow_version_splits(workspace, project, version)
+    effective_task_type = task_type or mapped_task_type
+    if splits is not None and effective_task_type == "detect" and not roboflow_splits_usable_for_task(splits, effective_task_type):
+        raise RuntimeError(roboflow_train_only_reason(splits))
     raw_classes = version_data.get("classes") or project_data.get("classes") or []
     classes = tuple(raw_classes if isinstance(raw_classes, list) else raw_classes.keys())
     license_name = str(project_data.get("license") or "unknown")
@@ -593,14 +789,14 @@ def inspect_roboflow_url(url: str) -> PublicDatasetCandidateDTO:
         provider="roboflow",
         source_ref=f"{workspace}/{project}",
         source_version=version,
-        source_url=url,
+        source_url=fixed_url,
         title=str(project_data.get("name") or project),
         description=str(project_data.get("annotation") or ""),
         license_name=license_name,
-        license_url=url,
+        license_url=fixed_url,
         download_bytes=None,
         image_count=int(version_data.get("images") or project_data.get("images") or 0) or None,
-        task_type=task_type,
+        task_type=mapped_task_type,
         classes=classes,
         requires_manual_license_confirmation=requires_manual_license_confirmation(license_name),
     )

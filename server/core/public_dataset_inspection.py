@@ -109,6 +109,52 @@ def _resolve_yaml_path(yaml_path: Path, data: dict, value: str, extraction_root:
     return _require_within(resolved, extraction_root, "YOLO 路径")
 
 
+def _yolo_split_specs(data: dict) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for split, key in (("train", "train"), ("val", "val"), ("test", "test")):
+        value = data.get(key)
+        if isinstance(value, str) and split not in seen:
+            specs.append((split, value))
+            seen.add(split)
+    if "val" not in seen and isinstance(data.get("valid"), str):
+        specs.append(("val", str(data["valid"])))
+    return specs
+
+
+def _resolve_yolo_image_root(
+    yaml_path: Path,
+    data: dict,
+    value: str,
+    extraction_root: Path,
+    split: str,
+) -> Path | None:
+    folder = "valid" if split == "val" else split
+    candidates = [
+        _resolve_yaml_path(yaml_path, data, value, extraction_root),
+        extraction_root / folder / "images",
+        extraction_root / split / "images",
+        yaml_path.parent / folder / "images",
+        yaml_path.parent / split / "images",
+        extraction_root / folder,
+        extraction_root / split,
+        yaml_path.parent / folder,
+        yaml_path.parent / split,
+    ]
+    checked: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = _require_within(candidate.resolve(), extraction_root, "YOLO 路径")
+        except RuntimeError:
+            continue
+        if resolved in checked:
+            continue
+        checked.add(resolved)
+        if resolved.is_dir() and _images_under(resolved):
+            return resolved
+    return None
+
+
 def _inspect_yolo(yaml_path: Path, extraction_root: Path) -> DatasetInspectionDTO:
     data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
     raw_names = data.get("names")
@@ -120,13 +166,12 @@ def _inspect_yolo(yaml_path: Path, extraction_root: Path) -> DatasetInspectionDT
         raise RuntimeError(f"YOLO data.yaml 缺少 names: {yaml_path}")
     entries: list[ManifestEntryDTO] = []
     available_splits = 0
-    for split in ("train", "val", "test"):
-        value = data.get(split)
-        if not isinstance(value, str):
+    missing_splits: list[str] = []
+    for split, value in _yolo_split_specs(data):
+        image_root = _resolve_yolo_image_root(yaml_path, data, value, extraction_root, split)
+        if image_root is None:
+            missing_splits.append(split)
             continue
-        image_root = _resolve_yaml_path(yaml_path, data, value, extraction_root)
-        if not image_root.is_dir():
-            raise RuntimeError(f"YOLO {split} 图片目录不存在: {image_root}")
         available_splits += 1
         for image in _images_under(image_root):
             relative = image.relative_to(image_root)
@@ -149,6 +194,11 @@ def _inspect_yolo(yaml_path: Path, extraction_root: Path) -> DatasetInspectionDT
             entries.append(_entry(extraction_root, image, split, tuple(labels)))
     if not entries or available_splits == 0:
         raise RuntimeError(f"YOLO 数据集没有可用图片: {yaml_path}")
+    extra_warnings: list[str] = []
+    if missing_splits:
+        extra_warnings.append(
+            f"data.yaml 声明了 {'、'.join(missing_splits)} 划分，但数据包内找不到对应图片目录，已跳过"
+        )
     classes = tuple({"class_id": class_id, "name": name} for class_id, name in sorted(names.items()))
     return _finish(
         "yolo_detect",
@@ -157,6 +207,7 @@ def _inspect_yolo(yaml_path: Path, extraction_root: Path) -> DatasetInspectionDT
         classes,
         entries,
         split_locked={entry.split for entry in entries} >= {"train", "val"},
+        extra_warnings=extra_warnings,
     )
 
 
@@ -305,6 +356,7 @@ def _finish(
     entries: list[ManifestEntryDTO],
     *,
     split_locked: bool,
+    extra_warnings: list[str] | None = None,
 ) -> DatasetInspectionDTO:
     checksums: dict[str, set[str]] = defaultdict(set)
     checksum_counts: Counter[str] = Counter()
@@ -326,10 +378,12 @@ def _finish(
                 small_boxes += 1
     cross_split = sorted(checksum for checksum, splits in checksums.items() if len(splits) > 1)
     near_cross_split = sorted(value for value, splits in phashes.items() if len(splits) > 1)
-    blockers = []
+    blockers: list[str] = []
+    warnings: list[str] = list(extra_warnings or [])
     if cross_split:
-        blockers.append(f"发现 {len(cross_split)} 组完全相同图片跨 split")
-    warnings = []
+        warnings.append(
+            f"发现 {len(cross_split)} 组完全相同图片跨 split（导入时将自动去重，优先保留训练集）"
+        )
     if near_cross_split:
         warnings.append(f"发现 {len(near_cross_split)} 组感知哈希相同图片跨 split")
     if empty_labels:

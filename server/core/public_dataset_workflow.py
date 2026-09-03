@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -13,7 +14,7 @@ from pathlib import Path
 from server.core.public_dataset_adapters import download_public_import, suggest_mapping_with_llm
 from server.core.public_dataset_archive import safe_extract
 from server.core.public_dataset_inspection import inspect_dataset
-from server.core.paths import public_imports_dir
+from server.core.paths import public_dataset_cache_dir, public_imports_dir
 from server.core.public_dataset_types import (
     DatasetInspectionDTO,
     PublicImportDTO,
@@ -22,9 +23,162 @@ from server.core.public_dataset_types import (
 )
 from server.repositories.public_dataset_repository import PublicDatasetRepository
 
+_SPLIT_PRIORITY = {"train": 0, "val": 1, "test": 2}
+
 
 def _manifest_path(import_record: PublicImportDTO) -> Path:
     return import_record.staging_path.parent / "import-manifest.json"
+
+
+def _public_dataset_cache_key(record: PublicImportDTO) -> str:
+    payload = f"{record.provider}|{record.source_ref}|{record.source_version}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
+def _public_dataset_cache_root(record: PublicImportDTO) -> Path:
+    return public_dataset_cache_dir() / _public_dataset_cache_key(record)
+
+
+def _save_public_dataset_cache(
+    record: PublicImportDTO,
+    extracted_dir: Path,
+    inspection: DatasetInspectionDTO,
+    *,
+    actual_bytes: int,
+    extracted_bytes: int,
+    checksum: str,
+) -> None:
+    cache_root = _public_dataset_cache_root(record)
+    if cache_root.exists():
+        shutil.rmtree(cache_root)
+    cache_root.mkdir(parents=True)
+    shutil.copytree(extracted_dir, cache_root / "staging")
+    shutil.copy2(_manifest_path(record), cache_root / "import-manifest.json")
+    meta = {
+        "artifact_checksum": checksum,
+        "actual_download_bytes": actual_bytes,
+        "extracted_bytes": extracted_bytes,
+        "detected_format": inspection.format,
+        "detected_root": str(inspection.root.relative_to(extracted_dir)),
+        "source_classes": list(inspection.classes),
+        "quality_report": inspection.quality_report,
+    }
+    (cache_root / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _restore_public_dataset_cache(
+    record: PublicImportDTO,
+    extracted_dir: Path,
+    *,
+    log: Callable[[str], None] | None = None,
+) -> dict | None:
+    cache_root = _public_dataset_cache_root(record)
+    meta_path = cache_root / "meta.json"
+    staging_cache = cache_root / "staging"
+    manifest_cache = cache_root / "import-manifest.json"
+    if not meta_path.is_file() or not staging_cache.is_dir() or not manifest_cache.is_file():
+        return None
+    if extracted_dir.exists():
+        shutil.rmtree(extracted_dir)
+    shutil.copytree(staging_cache, extracted_dir)
+    shutil.copy2(manifest_cache, _manifest_path(record))
+    if log:
+        log("检测到本地已有该数据集缓存，跳过下载")
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def _dedupe_cross_split_entries(entries: list[dict]) -> tuple[list[dict], int]:
+    """跨 split 完全重复图只保留一份，优先 train > val > test。"""
+    kept_by_checksum: dict[str, dict] = {}
+    order: list[str] = []
+    no_checksum: list[dict] = []
+    removed = 0
+    for raw in entries:
+        checksum = str(raw.get("image_checksum") or "")
+        if not checksum:
+            no_checksum.append(raw)
+            continue
+        split = raw.get("split") or "train"
+        if split not in _SPLIT_PRIORITY:
+            split = "train"
+        existing = kept_by_checksum.get(checksum)
+        if existing is None:
+            kept_by_checksum[checksum] = raw
+            order.append(checksum)
+            continue
+        existing_split = existing.get("split") or "train"
+        if _SPLIT_PRIORITY.get(split, 9) < _SPLIT_PRIORITY.get(existing_split, 9):
+            kept_by_checksum[checksum] = raw
+        removed += 1
+    return [kept_by_checksum[key] for key in order] + no_checksum, removed
+
+
+def _format_quality_log(report: dict) -> str:
+    blocking = [str(item) for item in (report.get("blocking") or []) if str(item).strip()]
+    warnings = [str(item) for item in (report.get("warnings") or []) if str(item).strip()]
+    parts = [f"质量检查完成 | 阻断 {len(blocking)} 项 | 提示 {len(warnings)} 项"]
+    if blocking:
+        parts.append("阻断: " + "；".join(blocking))
+    if warnings:
+        parts.append("提示: " + "；".join(warnings[:3]))
+    return " | ".join(parts)
+
+
+def _finish_fetch_inspection(
+    repository: PublicDatasetRepository,
+    import_id: str,
+    record: PublicImportDTO,
+    extracted_dir: Path,
+    *,
+    actual_bytes: int,
+    extracted_bytes: int,
+    checksum: str,
+    cache_hit: bool = False,
+    log: Callable[[str], None] | None = None,
+) -> PublicImportDTO:
+    task_type = str(record.workflow_metadata.get("task_type") or "")
+    inspection = inspect_dataset(extracted_dir, task_type)
+    _write_manifest(record, inspection)
+    if log:
+        log(_format_quality_log(inspection.quality_report))
+    context = repository.project_context(record.project_id)
+    llm_mapping = suggest_mapping_with_llm(inspection.classes, context.categories) if context else None
+    suggested_mapping = (
+        resolve_suggested_mapping(inspection.classes, context.categories, llm_mapping)
+        if context
+        else {}
+    )
+    if log:
+        log(
+            f"识别为 {inspection.format}：{len(inspection.entries)} 张图片，"
+            f"{len(inspection.classes)} 个来源类别"
+        )
+    updated = repository.update(
+        import_id,
+        state="fetched",
+        actual_download_bytes=actual_bytes,
+        extracted_bytes=extracted_bytes,
+        artifact_checksum=checksum,
+        detected_format=inspection.format,
+        detected_root=str(inspection.root.relative_to(extracted_dir)),
+        source_classes=list(inspection.classes),
+        quality_report=inspection.quality_report,
+        workflow_metadata={
+            **record.workflow_metadata,
+            **({"cache_hit": True} if cache_hit else {}),
+            **({"suggested_mapping": suggested_mapping} if suggested_mapping else {}),
+        },
+    )
+    if not cache_hit:
+        _save_public_dataset_cache(
+            record,
+            extracted_dir,
+            inspection,
+            actual_bytes=actual_bytes,
+            extracted_bytes=extracted_bytes,
+            checksum=checksum,
+        )
+    return updated
 
 
 def _write_manifest(import_record: PublicImportDTO, inspection: DatasetInspectionDTO) -> None:
@@ -85,6 +239,19 @@ def fetch_and_inspect(
         download_dir.mkdir(parents=True)
     extracted_dir.mkdir(parents=True, exist_ok=True)
     repository.update(import_id, state="fetching")
+    cached_meta = _restore_public_dataset_cache(record, extracted_dir, log=log)
+    if cached_meta:
+        return _finish_fetch_inspection(
+            repository,
+            import_id,
+            record,
+            extracted_dir,
+            actual_bytes=int(cached_meta.get("actual_download_bytes") or 0),
+            extracted_bytes=int(cached_meta.get("extracted_bytes") or 0),
+            checksum=str(cached_meta.get("artifact_checksum") or ""),
+            cache_hit=True,
+            log=log,
+        )
     if log:
         if resume_download:
             log("检测到未完成下载，将从断点续传…")
@@ -112,35 +279,15 @@ def fetch_and_inspect(
             destination = extracted_dir / archive.name
             shutil.copy2(archive, destination)
             extracted_bytes += destination.stat().st_size
-    task_type = str(record.workflow_metadata.get("task_type") or "")
-    inspection = inspect_dataset(extracted_dir, task_type)
-    _write_manifest(record, inspection)
-    context = repository.project_context(record.project_id)
-    llm_mapping = suggest_mapping_with_llm(inspection.classes, context.categories) if context else None
-    suggested_mapping = (
-        resolve_suggested_mapping(inspection.classes, context.categories, llm_mapping)
-        if context
-        else {}
-    )
-    if log:
-        log(
-            f"识别为 {inspection.format}：{len(inspection.entries)} 张图片，"
-            f"{len(inspection.classes)} 个来源类别"
-        )
-    return repository.update(
+    return _finish_fetch_inspection(
+        repository,
         import_id,
-        state="fetched",
-        actual_download_bytes=actual_bytes,
+        record,
+        extracted_dir,
+        actual_bytes=actual_bytes,
         extracted_bytes=extracted_bytes,
-        artifact_checksum=checksum,
-        detected_format=inspection.format,
-        detected_root=str(inspection.root.relative_to(extracted_dir)),
-        source_classes=list(inspection.classes),
-        quality_report=inspection.quality_report,
-        workflow_metadata={
-            **record.workflow_metadata,
-            **({"suggested_mapping": suggested_mapping} if suggested_mapping else {}),
-        },
+        checksum=checksum,
+        log=log,
     )
 
 
@@ -236,10 +383,15 @@ def _sample_indices(
     splits: dict[int, str] | None = None,
     forced: set[int] | None = None,
 ) -> list[int]:
+    """按约 2% 抽样（至少 50、最多 maximum）。
+
+    forced 仅提高入选优先级，不得突破 target；否则重复图/告警会把抽查撑成近全量。
+    """
     if not entries:
         return []
     target = min(maximum, max(50, math.ceil(len(entries) * 0.02)))
     target = min(target, len(entries))
+    entry_ids = {index for index, _ in entries}
     buckets: dict[str, list[int]] = defaultdict(list)
     for index, labels in entries:
         for class_id in sorted({label.class_id for label in labels}):
@@ -249,8 +401,17 @@ def _sample_indices(
     rng = random.Random(import_id)
     for values in buckets.values():
         rng.shuffle(values)
-    selected: list[int] = sorted(forced or set())
-    seen: set[int] = set(selected)
+
+    selected: list[int] = []
+    seen: set[int] = set()
+    forced_pool = [index for index in (forced or set()) if index in entry_ids]
+    rng.shuffle(forced_pool)
+    for value in forced_pool:
+        if len(selected) >= target:
+            break
+        selected.append(value)
+        seen.add(value)
+
     while len(selected) < target and buckets:
         progressed = False
         for bucket in sorted(buckets):
@@ -267,6 +428,75 @@ def _sample_indices(
     rng.shuffle(remaining)
     selected.extend(remaining[: max(0, target - len(selected))])
     return sorted(selected)
+
+
+def review_sample_target(labeled_count: int, maximum: int = 200) -> int:
+    """公开数据抽查目标张数：约 2%，夹在 [50, maximum] 与 labeled_count 之间。"""
+    if labeled_count <= 0:
+        return 0
+    return min(maximum, max(50, math.ceil(labeled_count * 0.02)), labeled_count)
+
+
+def trim_oversized_review_sample(
+    repository: PublicDatasetRepository,
+    import_id: str,
+    *,
+    maximum: int = 200,
+) -> PublicImportDTO:
+    """把历史错误撑大的抽查集裁回目标规模；已人工处理的帧优先保留。"""
+    from server.db.models import FrameStatus
+
+    record = repository.get_by_id(import_id)
+    if not record:
+        raise RuntimeError(f"Public dataset import not found: {import_id}")
+    if record.state not in {"review", "review_expanded"}:
+        return record
+
+    all_frames = repository.review_frames(import_id)
+    labeled_count = sum(1 for frame in all_frames if frame.labels)
+    target = review_sample_target(labeled_count, maximum=maximum)
+    current_ids = list(record.review_frame_ids)
+    if target <= 0 or len(current_ids) <= target:
+        return record
+
+    frame_by_id = {frame.id: frame for frame in all_frames}
+    done_statuses = {"human_ok", "no_target", "human_wrong"}
+    reviewed = [
+        frame_id
+        for frame_id in current_ids
+        if frame_by_id.get(frame_id) and frame_by_id[frame_id].status in done_statuses
+    ]
+    pending = [frame_id for frame_id in current_ids if frame_id not in set(reviewed)]
+    rng = random.Random(f"{record.id}:trim-oversized")
+    rng.shuffle(pending)
+    if len(reviewed) >= target:
+        keep_ids = reviewed
+    else:
+        keep_ids = [*reviewed, *pending[: target - len(reviewed)]]
+    keep_set = set(keep_ids)
+    drop_ids = [
+        frame_id
+        for frame_id in current_ids
+        if frame_id not in keep_set
+        and frame_by_id.get(frame_id)
+        and frame_by_id[frame_id].status == "needs_human"
+    ]
+    if drop_ids:
+        repository.set_frame_status(drop_ids, FrameStatus.AUTO_OK)
+
+    originals = dict(record.workflow_metadata.get("review_originals") or {})
+    originals = {frame_id: labels for frame_id, labels in originals.items() if frame_id in keep_set}
+    metadata = {
+        **record.workflow_metadata,
+        "review_originals": originals,
+        "review_trimmed_from": len(current_ids),
+        "review_trimmed_to": len(keep_ids),
+    }
+    return repository.update(
+        import_id,
+        review_frame_ids=keep_ids,
+        workflow_metadata=metadata,
+    )
 
 
 def prepare_republish(
@@ -336,6 +566,7 @@ def publish_import(
     _ensure_mapping_preserves_labels(record, class_mapping)
 
     manifest = _load_manifest(record)
+    deduped_entries, removed_cross_split = _dedupe_cross_split_entries(list(manifest["entries"]))
     staging_root = _validated_staging_path(record)
     root = (staging_root / (record.detected_root or ".")).resolve()
     if root != staging_root and staging_root not in root.parents:
@@ -344,7 +575,7 @@ def publish_import(
     labeled_for_sample: list[tuple[int, tuple[SourceLabelDTO, ...]]] = []
     ignored_images = negative_after_mapping = 0
     split_locked = bool(record.quality_report.get("split_locked"))
-    for source_index, raw in enumerate(manifest["entries"]):
+    for source_index, raw in enumerate(deduped_entries):
         if cancelled and cancelled():
             raise RuntimeError("任务已取消")
         labels: list[SourceLabelDTO] = []
@@ -406,11 +637,11 @@ def publish_import(
     if insufficient:
         raise RuntimeError(f"映射后类别无法同时覆盖 train/val 来源: {insufficient}")
 
-    checksum_counts = Counter(str(raw["image_checksum"]) for raw in manifest["entries"])
-    phash_counts = Counter(str(raw.get("phash") or "") for raw in manifest["entries"])
+    checksum_counts = Counter(str(raw["image_checksum"]) for raw in deduped_entries)
+    phash_counts = Counter(str(raw.get("phash") or "") for raw in deduped_entries)
     forced_indices = {
         index
-        for index, raw in enumerate(manifest["entries"])
+        for index, raw in enumerate(deduped_entries)
         if raw.get("warnings")
         or checksum_counts[str(raw["image_checksum"])] > 1
         or (raw.get("phash") and phash_counts[str(raw["phash"])] > 1)
@@ -419,7 +650,7 @@ def publish_import(
         _sample_indices(
             labeled_for_sample,
             record.id,
-            splits={index: str(raw.get("split") or "train") for index, raw in enumerate(manifest["entries"])},
+            splits={index: str(raw.get("split") or "train") for index, raw in enumerate(deduped_entries)},
             forced=forced_indices,
         )
     )
@@ -446,6 +677,7 @@ def publish_import(
         "ignored_images": ignored_images,
         "negative_after_mapping": negative_after_mapping,
         "published_frame_ids": list(created_ids),
+        "removed_cross_split_duplicates": removed_cross_split,
     }
     state = "review" if review_ids else "needs_label"
     updated = repository.update(
@@ -529,6 +761,69 @@ def evaluate_review(repository: PublicDatasetRepository, import_id: str) -> tupl
         workflow_metadata=metadata,
     )
     return "expanded", extra_ids
+
+
+REVIEW_GATE_STATES = frozenset({"review", "review_expanded", "full_review_required"})
+IMPORT_IN_PROGRESS_STATES = frozenset({"fetching", "fetched", "publishing", "publish_interrupted"})
+
+
+class PublicReviewGateError(RuntimeError):
+    """公开数据项目级复核门禁未通过。"""
+
+    def __init__(self, code: str, message: str, *, affected: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.code = code
+        self.affected = affected
+
+
+def approve_project_public_review_gate(
+    repository: PublicDatasetRepository,
+    project_id: str,
+) -> tuple[PublicImportDTO, ...]:
+    """校验项目内全部公开导入已通过抽样复核门禁，允许多批次并存。"""
+    from server.db.models import FrameStatus
+
+    context = repository.project_context(project_id)
+    if not context:
+        raise RuntimeError("Project not found")
+
+    records = [record for record in repository.list_for_project(project_id) if record.state != "discarded"]
+
+    needs_label = [record for record in records if record.state == "needs_label"]
+    if needs_label:
+        titles = "、".join(f"「{record.title}」" for record in needs_label[:3])
+        raise RuntimeError(f"仍有公开数据未完成自动标注：{titles}")
+
+    in_progress = [record for record in records if record.state in IMPORT_IN_PROGRESS_STATES]
+    if in_progress:
+        titles = "、".join(f"「{record.title}」" for record in in_progress[:3])
+        raise RuntimeError(f"仍有公开数据正在导入：{titles}")
+
+    pending_human = repository.count_frames_by_status(project_id, FrameStatus.NEEDS_HUMAN)
+    if pending_human > 0:
+        raise RuntimeError(f"仍有 {pending_human} 张抽样帧未完成复核")
+
+    review_records = [record for record in records if record.state in REVIEW_GATE_STATES]
+    for record in review_records:
+        if record.state == "full_review_required":
+            raise PublicReviewGateError(
+                "full_review_required",
+                f"「{record.title}」需全量复查或放弃后才能训练",
+            )
+        outcome, affected = evaluate_review(repository, record.id)
+        if outcome == "expanded":
+            raise PublicReviewGateError(
+                "expanded",
+                f"「{record.title}」抽检发现修改，已扩大复查范围 {len(affected)} 张",
+                affected=tuple(affected),
+            )
+        if outcome == "full_review_required":
+            raise PublicReviewGateError(
+                "full_review_required",
+                f"「{record.title}」需全量复查或放弃后才能训练",
+            )
+
+    return tuple(review_records)
 
 
 def prepare_review_after_labeling(

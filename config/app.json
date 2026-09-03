@@ -1,0 +1,16 @@
+{
+  "brand": {
+    "department": "安工",
+    "productName": "视炼",
+    "fullName": "安工视炼",
+    "tagline": "视觉智能工作台",
+    "slogan": "让每一帧数据，进入可验证的智能生产线",
+    "edition": "VISION INTELLIGENCE",
+    "version": "0.2.0"
+  },
+  "runtime": {
+    "host": "0.0.0.0",
+    "apiPort": 8010,
+    "webPort": 3003
+  }
+}

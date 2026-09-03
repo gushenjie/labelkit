@@ -81,7 +81,7 @@ export function FrameLightbox({ open, frames, index, projectId, onClose, onIndex
                 className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800"
                 onClick={() => onReview(frame)}
               >
-                进入人工复查
+                进入标注复核
               </button>
             )}
             <button

@@ -88,6 +88,63 @@ def test_localize_search_query_maps_chinese_cv_terms():
     assert adapters.localize_search_query("鸟类") == "bird"
 
 
+def test_localize_search_query_maps_chinese_cv_terms():
+    assert "bird nest" in adapters.localize_search_query("鸟窝检测")
+    assert "smoke" in adapters.localize_search_query("烟雾识别")
+    assert adapters.localize_search_query("鸟类") == "bird"
+    assert adapters.localize_search_query("火焰") == "fire flame"
+
+
+def test_search_query_maps_flame_without_llm_key(monkeypatch):
+    monkeypatch.setattr(adapters.settings, "dashscope_api_key", "")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    assert adapters.expand_search_query("火焰", ["fire"]) == "fire flame"
+
+
+def test_rank_public_candidates_prefers_fire_over_unrelated_for_flame_query():
+    fall = PublicDatasetCandidateDTO(
+        provider="roboflow",
+        source_ref="a/fall",
+        source_version="1",
+        source_url="https://universe.roboflow.com/a/fall/1",
+        title="Fall Detection",
+        description="person fall",
+        license_name="CC BY 4.0",
+        license_url="https://universe.roboflow.com/a/fall/1",
+        download_bytes=None,
+        image_count=5000,
+        task_type="detect",
+        classes=("Fall-Detected",),
+        stars=50,
+        downloads=900,
+    )
+    fire = PublicDatasetCandidateDTO(
+        provider="roboflow",
+        source_ref="b/fire",
+        source_version="2",
+        source_url="https://universe.roboflow.com/b/fire/2",
+        title="Fire Detection",
+        description="flame and smoke",
+        license_name="CC BY 4.0",
+        license_url="https://universe.roboflow.com/b/fire/2",
+        download_bytes=None,
+        image_count=800,
+        task_type="detect",
+        classes=("fire",),
+        stars=4,
+        downloads=20,
+    )
+    ranked = adapters.rank_public_candidates(
+        [fall, fire],
+        query="火焰",
+        category_names=["fire"],
+        task_type="detect",
+    )
+    assert ranked[0].source_ref == "b/fire"
+    assert ranked[0].score > ranked[1].score
+
+
 def test_kaggle_download_requests_the_confirmed_version(tmp_path, monkeypatch):
     captured: list[str] = []
 
@@ -172,39 +229,191 @@ def test_discover_roboflow_fixes_latest_version(monkeypatch):
     monkeypatch.setenv("ROBOFLOW_API_KEY", "rf_test_key")
 
     def fake_json(path: str):
-        assert "universe/search" in path
-        assert "bird" in path
-        return {
-            "results": [
-                {
-                    "name": "Bird Nest",
-                    "url": "https://universe.roboflow.com/ws/bird-nest",
-                    "type": "object-detection",
-                    "license": "CC BY 4.0",
-                    "images": 120,
-                    "classes": ["nest"],
-                    "latestVersion": 3,
-                    "description": "nests on poles",
-                },
-                {
-                    "name": "Seg only",
-                    "url": "https://universe.roboflow.com/ws/seg",
-                    "type": "instance-segmentation",
-                    "license": "CC BY 4.0",
-                    "images": 10,
-                    "classes": ["nest"],
-                    "latestVersion": 1,
-                },
-            ]
-        }
+        if "universe/search" in path:
+            assert "bird" in path
+            return {
+                "results": [
+                    {
+                        "name": "Bird Nest",
+                        "url": "https://universe.roboflow.com/ws/bird-nest",
+                        "type": "object-detection",
+                        "license": "CC BY 4.0",
+                        "images": 120,
+                        "classes": ["nest"],
+                        "latestVersion": 3,
+                        "description": "nests on poles",
+                        "stars": 8,
+                        "downloads": 120,
+                        "thumbnail": "https://cdn.roboflow.com/thumb.png",
+                        "annotationThumbnail": "https://cdn.roboflow.com/annot.png",
+                    },
+                    {
+                        "name": "Train only fire",
+                        "url": "https://universe.roboflow.com/ws/fire-only",
+                        "type": "object-detection",
+                        "license": "CC BY 4.0",
+                        "images": 833,
+                        "classes": ["Fire"],
+                        "latestVersion": 5,
+                    },
+                    {
+                        "name": "Seg only",
+                        "url": "https://universe.roboflow.com/ws/seg",
+                        "type": "instance-segmentation",
+                        "license": "CC BY 4.0",
+                        "images": 10,
+                        "classes": ["nest"],
+                        "latestVersion": 1,
+                    },
+                ]
+            }
+        if path.endswith("/bird-nest/3"):
+            return {"version": {"splits": {"train": 100, "valid": 20}, "images": 120}}
+        if path.endswith("/fire-only/5"):
+            return {"version": {"splits": {"train": 833}, "images": 833}}
+        raise AssertionError(f"unexpected roboflow path: {path}")
 
     monkeypatch.setattr(adapters, "_roboflow_json", fake_json)
-    candidates = adapters.discover_roboflow("bird nest", task_type="detect")
+    candidates, filtered = adapters.discover_roboflow("bird nest", task_type="detect")
 
+    assert filtered == 1
     assert len(candidates) == 1
     assert candidates[0].provider == "roboflow"
     assert candidates[0].source_ref == "ws/bird-nest"
     assert candidates[0].source_version == "3"
-    assert candidates[0].source_url.endswith("/3")
+    assert candidates[0].source_url == "https://universe.roboflow.com/ws/bird-nest/dataset/3"
+    assert candidates[0].license_url == candidates[0].source_url
     assert candidates[0].task_type == "detect"
     assert candidates[0].classes == ("nest",)
+    assert candidates[0].stars == 8
+    assert candidates[0].downloads == 120
+    assert candidates[0].thumbnail == "https://cdn.roboflow.com/thumb.png"
+    assert candidates[0].annotation_thumbnail == "https://cdn.roboflow.com/annot.png"
+
+
+def test_fetch_roboflow_preview_prefers_dataset_sample_over_project_thumbnail(monkeypatch):
+    monkeypatch.setenv("ROBOFLOW_API_KEY", "rf_test_key")
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_json(path: str) -> dict:
+        calls.append(("GET", path))
+        if path.endswith("/fire-fhsxx/2"):
+            return {
+                "project": {
+                    "annotationThumbnail": "https://cdn.roboflow.com/detail-annot.png",
+                }
+            }
+        if path.endswith("/images/img-1"):
+            return {"image": {"urls": {"thumb": "https://cdn.roboflow.com/thumb.jpg"}}}
+        raise RuntimeError("unexpected path")
+
+    def fake_post(path: str, body: dict) -> dict:
+        calls.append(("POST", path))
+        assert body["limit"] == 1
+        assert body["in_dataset"] is True
+        assert "url" not in body["fields"]
+        return {"results": [{"id": "img-1"}]}
+
+    monkeypatch.setattr(adapters, "_roboflow_json", fake_json)
+    monkeypatch.setattr(adapters, "_roboflow_post_json", fake_post)
+
+    thumbnail, annotation_thumbnail = adapters.fetch_roboflow_preview("gadjiiavov-n4n8k/fire-fhsxx", "2")
+
+    assert thumbnail == "https://cdn.roboflow.com/thumb.jpg"
+    assert annotation_thumbnail is None
+    assert ("POST", "gadjiiavov-n4n8k/fire-fhsxx/search") in calls
+    assert ("GET", "gadjiiavov-n4n8k/fire-fhsxx/images/img-1") in calls
+    assert ("GET", "gadjiiavov-n4n8k/fire-fhsxx/2") not in calls
+
+
+def test_fetch_roboflow_preview_falls_back_to_sample_image(monkeypatch):
+    monkeypatch.setenv("ROBOFLOW_API_KEY", "rf_test_key")
+
+    def fake_json(path: str) -> dict:
+        if path.endswith("/fire-fhsxx/2"):
+            return {"project": {}, "version": {}}
+        if path.endswith("/images/img-1"):
+            return {"image": {"urls": {"thumb": "https://cdn.roboflow.com/thumb.jpg", "original": "https://cdn.roboflow.com/original.jpg"}}}
+        raise RuntimeError(path)
+
+    def fake_post(path: str, body: dict) -> dict:
+        return {"results": [{"id": "img-1"}]}
+
+    monkeypatch.setattr(adapters, "_roboflow_json", fake_json)
+    monkeypatch.setattr(adapters, "_roboflow_post_json", fake_post)
+
+    thumbnail, annotation_thumbnail = adapters.fetch_roboflow_preview("gadjiiavov-n4n8k/fire-fhsxx", "2")
+
+    assert thumbnail == "https://cdn.roboflow.com/thumb.jpg"
+    assert annotation_thumbnail is None
+
+
+def test_image_record_uses_original_as_real_thumbnail_fallback():
+    thumbnail, annotation_thumbnail = adapters._preview_from_image_record(
+        {
+            "urls": {
+                "original": "https://cdn.roboflow.com/original.jpg",
+                "annotation": "https://cdn.roboflow.com/annotation-overlay.png",
+            }
+        }
+    )
+
+    assert thumbnail == "https://cdn.roboflow.com/original.jpg"
+    assert annotation_thumbnail == "https://cdn.roboflow.com/annotation-overlay.png"
+
+
+def test_fetch_roboflow_preview_falls_back_to_version_metadata(monkeypatch):
+    monkeypatch.setenv("ROBOFLOW_API_KEY", "rf_test_key")
+
+    monkeypatch.setattr(adapters, "_roboflow_post_json", lambda path, body: {"results": []})
+    monkeypatch.setattr(
+        adapters,
+        "_roboflow_json",
+        lambda path: {
+            "project": {
+                "annotationThumbnail": "https://cdn.roboflow.com/wrong-project-cover.jpg",
+                "icon": "https://cdn.roboflow.com/workspace-logo.png",
+            },
+            "version": {
+                "annotationThumbnail": "https://cdn.roboflow.com/version-annotated.jpg",
+            },
+        },
+    )
+
+    thumbnail, annotation_thumbnail = adapters.fetch_roboflow_preview("ws/project", "4")
+
+    assert thumbnail is None
+    assert annotation_thumbnail == "https://cdn.roboflow.com/version-annotated.jpg"
+
+
+def test_inspect_roboflow_url_normalizes_to_dataset_route(monkeypatch):
+    monkeypatch.setattr(
+        adapters,
+        "_roboflow_json",
+        lambda path: {
+            "project": {"type": "object-detection", "name": "Fire", "license": "CC BY 4.0"},
+            "version": {"classes": ["fire"], "images": 10, "splits": {"train": 8, "valid": 2}},
+        },
+    )
+
+    candidate = adapters.inspect_roboflow_url("https://universe.roboflow.com/ws/fire/2")
+
+    assert candidate.source_url == "https://universe.roboflow.com/ws/fire/dataset/2"
+    assert candidate.license_url == candidate.source_url
+
+
+def test_inspect_roboflow_url_rejects_train_only_detect_dataset(monkeypatch):
+    monkeypatch.setattr(
+        adapters,
+        "_roboflow_json",
+        lambda path: {
+            "project": {"type": "object-detection", "name": "Fire", "license": "CC BY 4.0"},
+            "version": {"classes": ["Fire"], "images": 833, "splits": {"train": 833}},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="仅有训练集"):
+        adapters.inspect_roboflow_url(
+            "https://universe.roboflow.com/ws/fire/5",
+            task_type="detect",
+        )

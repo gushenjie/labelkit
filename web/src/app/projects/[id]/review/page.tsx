@@ -7,18 +7,22 @@ import { api, Annotation, Frame, Project, PublicDatasetImport, Task } from "@/li
 import { AnnotationEditor } from "@/components/AnnotationEditor";
 import { LlmLabelPanel } from "@/components/LlmLabelPanel";
 import { YoloLabelPanel } from "@/components/YoloLabelPanel";
+import { Icon } from "@/components/Icon";
 import { ProjectPageHeader } from "@/components/ProjectPageHeader";
-import { Panel } from "@/components/ui/Panel";
+import { WorkflowNextButton } from "@/components/WorkflowNextButton";
+import { WORKFLOW_STEPS } from "@/lib/workflow";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { TaskProgress } from "@/components/ui/TaskProgress";
-import { Thumb } from "@/components/ui/Thumb";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useToast } from "@/components/ui/ToastProvider";
 import {
+  countBlockingReview,
   countConfirmed,
   countPendingReview,
   countRejected,
   countSampleReview,
+  countTrainable,
   FRAME_STATUS_SIMPLE,
   normalizeReviewFilter,
   reviewStatuses,
@@ -54,10 +58,19 @@ export default function ReviewPage() {
   const [idx, setIdx] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
   const [showAutoReview, setShowAutoReview] = useState(false);
+  const [showRelabel, setShowRelabel] = useState(false);
   const [relabelMode, setRelabelMode] = useState<"yolo" | "llm">("yolo");
+  const filmstripRef = useRef<HTMLDivElement>(null);
+  const activeThumbRef = useRef<HTMLDivElement>(null);
   const [annotationSidePanel, setAnnotationSidePanel] = useState<HTMLDivElement | null>(null);
-  const [publicImport, setPublicImport] = useState<PublicDatasetImport | null>(null);
+  const [annotationActionPanel, setAnnotationActionPanel] = useState<HTMLDivElement | null>(null);
+  const [publicImports, setPublicImports] = useState<PublicDatasetImport[]>([]);
   const [approvingTrain, setApprovingTrain] = useState(false);
+
+  const pendingReviewImports = publicImports.filter((item) =>
+    ["review", "review_expanded", "full_review_required"].includes(item.state),
+  );
+  const hasPublicReviewGate = pendingReviewImports.length > 0;
 
   const reviewable =
     (frameStats.llm_labeled ?? 0) + (frameStats.needs_human ?? 0) + (frameStats.auto_fixed ?? 0);
@@ -65,6 +78,11 @@ export default function ReviewPage() {
   const pendingCount = countPendingReview(frameStats);
   const rejectedCount = countRejected(frameStats);
   const confirmedCount = countConfirmed(frameStats);
+
+  useEffect(() => {
+    if (!id) return;
+    api.getProject(id).then(setProject);
+  }, [id]);
 
   useEffect(() => {
     if (!id) return;
@@ -85,28 +103,19 @@ export default function ReviewPage() {
     if (!id) return;
     api.listPublicDatasetImports(id)
       .then((imports) => {
-        const active = imports.find((item) =>
-          ["review", "review_expanded", "training", "completed"].includes(item.state),
-        );
-        setPublicImport(active ?? imports[0] ?? null);
+        setPublicImports(imports.filter((item) => item.state !== "discarded"));
       })
-      .catch(() => setPublicImport(null));
+      .catch(() => setPublicImports([]));
   }, [id]);
 
   const startTrainingFromReview = async () => {
     if (!id || approvingTrain) return;
-    if (!publicImport) {
-      router.push(`/projects/${id}/materials`);
-      return;
-    }
-    if (publicImport.state === "training" || publicImport.state === "completed") {
-      router.push(`/projects/${id}/train`);
-      return;
-    }
     setApprovingTrain(true);
     try {
-      await api.approvePublicDatasetAndTrain(id, publicImport.id);
-      toast({ type: "success", message: "复查门禁通过，已创建数据版本并开始训练" });
+      if (hasPublicReviewGate) {
+        await api.approveProjectPublicDatasetsAndTrain(id);
+        toast({ type: "success", message: "项目抽样复核通过，已合并全部公开数据并启动训练" });
+      }
       router.push(`/projects/${id}/train`);
     } catch (error) {
       toast({ type: "error", message: `${error}` });
@@ -117,7 +126,6 @@ export default function ReviewPage() {
 
   const loadFrames = useCallback(() => {
     if (!id || filter === null) return;
-    api.getProject(id).then(setProject);
     api.listFramesPage(id, reviewStatuses(filter)).then((page) => {
       const f = page.items;
       setFrames(f);
@@ -172,10 +180,9 @@ export default function ReviewPage() {
 
   useEffect(() => {
     refreshMeta();
-    loadFrames();
     const t = setInterval(refreshMeta, running ? 2000 : 8000);
     return () => clearInterval(t);
-  }, [refreshMeta, loadFrames, running]);
+  }, [refreshMeta, running]);
 
   useEffect(() => {
     if (!isEditing) loadFrames();
@@ -244,6 +251,7 @@ export default function ReviewPage() {
     draftsRef.current.clear();
     setFilter(next);
     setIdx(0);
+    setShowRelabel(false);
   };
 
   useEffect(() => {
@@ -256,6 +264,24 @@ export default function ReviewPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [goFrame, idx]);
+
+  // 切换当前帧时，把底部缩略图滚到可视区中间，避免选中项跑出屏幕外
+  useEffect(() => {
+    const strip = filmstripRef.current;
+    const thumb = activeThumbRef.current;
+    if (!strip || !thumb) return;
+
+    const frame = requestAnimationFrame(() => {
+      const stripRect = strip.getBoundingClientRect();
+      const thumbRect = thumb.getBoundingClientRect();
+      const delta =
+        thumbRect.left + thumbRect.width / 2 - (stripRect.left + stripRect.width / 2);
+      if (Math.abs(delta) < 1) return;
+      strip.scrollBy({ left: delta, behavior: "smooth" });
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [idx, frames.length]);
 
   const handleSave = async (annotations: Annotation[], frameStatus: string) => {
     if (!id || !current) return;
@@ -306,229 +332,365 @@ export default function ReviewPage() {
     }
   };
 
-  if (!project || filter === null) return <p>加载中…</p>;
+  if (!project || filter === null) {
+    return (
+      <div className="review-loading-state">
+        <LoadingScreen fullScreen={false} message="正在加载复查任务…" />
+      </div>
+    );
+  }
 
   const activeFilterMeta = REVIEW_FILTERS.find((f) => f.value === filter);
   const sessionMinutes = Math.max(1, Math.round((Date.now() - sessionStart.current) / 60000));
+  const reviewCopy = WORKFLOW_STEPS.find((step) => step.slug === "review")!;
+  const sampleCount = countSampleReview(frameStats);
+  // auto_ok 可直接训练，不阻塞「下一步」；仅 needs_human / llm_labeled / auto_fixed 需人工处理
+  const blockingCount = countBlockingReview(frameStats);
+  const trainableCount = countTrainable(frameStats);
+  const canGoTrain = blockingCount === 0 && trainableCount > 0;
+  const reviewHeaderAction = canGoTrain ? (
+    hasPublicReviewGate ? (
+      <button
+        type="button"
+        className="materials-workspace__next-action materials-workspace__next-action--ready"
+        disabled={approvingTrain}
+        onClick={() => void startTrainingFromReview()}
+      >
+        <Icon name="check" size={16} />
+        <div className="flex flex-col items-start leading-tight">
+          <span className="text-[10px] opacity-80 font-normal">下一步</span>
+          <strong>{approvingTrain ? "正在进入…" : "训练或导出"}</strong>
+        </div>
+      </button>
+    ) : (
+      <WorkflowNextButton href={`/projects/${id}/train`} label="训练或导出" />
+    )
+  ) : (
+    <WorkflowNextButton
+      label="训练或导出"
+      disabled
+      disabledHint={
+        sampleCount > 0
+          ? `抽样复核剩余 ${sampleCount} 张`
+          : blockingCount > 0
+            ? `待复核 ${blockingCount} 张`
+            : "等待确认"
+      }
+    />
+  );
 
   if (filter === "sample" && frames.length === 0 && countSampleReview(frameStats) === 0) {
     return (
-      <div className="operations-page">
-        <ProjectPageHeader title="人工确认" description="公开数据风险抽样复查" eyebrow="Quality assurance" />
-        <Panel>
-          <div className="review-complete">
-            <h2>抽样复查完成</h2>
-            <p>
-              风险样本已全部确认（本次处理 {confirmedInSession} 张）。
+      <div className="review-page min-h-[calc(100vh-64px)] bg-[#f4faf8] text-[#17343A] font-sans flex flex-col relative overflow-hidden p-8">
+        <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-[#10A88F]/10 blur-[120px] rounded-full pointer-events-none" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-[#078D82]/10 blur-[100px] rounded-full pointer-events-none" />
+        <div className="relative z-10 flex flex-col h-full w-full">
+        <ProjectPageHeader
+          title="标注复核"
+          eyebrow="Quality assurance"
+          description={reviewCopy.pageDescription}
+          action={reviewHeaderAction}
+        />
+        <div className="flex-1 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-10 flex flex-col items-center justify-center text-center">
+            <div className="w-16 h-16 bg-[#F4FAF8] rounded-2xl flex items-center justify-center mb-6 shadow-inner border border-[#CFF4EC]">
+              <Icon name="check" size={32} className="text-[#10A88F]" />
+            </div>
+            <h2 className="text-xl font-bold text-[#075F5A] mb-3">抽样复查完成</h2>
+            <p className="text-[#17343A]/60 max-w-md mx-auto mb-8 leading-relaxed">
+              风险样本已全部确认（本次处理 {confirmedInSession} 张）。<br />
               点击下方按钮创建不可变数据版本并开始训练。
             </p>
-            <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 16, flexWrap: "wrap" }}>
+            <div className="flex gap-4 flex-wrap justify-center">
               <button
                 type="button"
-                className="btn-primary"
+                className="px-6 py-2.5 bg-[#10A88F] text-white rounded-xl text-sm font-bold shadow-sm shadow-[#10A88F]/20 hover:bg-[#078D82] transition-colors disabled:opacity-50"
                 disabled={approvingTrain}
                 onClick={() => void startTrainingFromReview()}
               >
                 {approvingTrain
                   ? "正在创建版本并启动训练…"
-                  : publicImport?.state === "training"
+                  : publicImports.some((item) => item.state === "training")
                     ? "查看训练进度"
                     : "创建版本并开始训练"}
               </button>
-              <button type="button" className="btn-secondary" onClick={() => switchFilter("confirmed")}>
+              <button type="button" className="px-6 py-2.5 bg-white border border-[#e4e7ec] text-[#344054] rounded-xl text-sm font-bold hover:bg-gray-50 transition-colors shadow-sm" onClick={() => switchFilter("confirmed")}>
                 查看已确认
               </button>
             </div>
-          </div>
-        </Panel>
+        </div>
+        </div>
       </div>
     );
   }
 
   if (filter === "pending" && frames.length === 0 && pendingCount === 0 && confirmedCount > 0) {
     return (
-      <div className="operations-page">
-        <ProjectPageHeader title="人工确认" description="本批次待确认已全部完成" eyebrow="Quality assurance" />
-        <Panel>
-          <div className="review-complete">
-            <h2>人工确认完成</h2>
-            <p>已确认 {confirmedCount} 张 · 本次处理 {confirmedInSession} 张 · 约 {sessionMinutes} 分钟</p>
-            <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 16 }}>
-              <Link href={`/projects/${id}/train`} className="btn-primary">开始训练</Link>
-              <button type="button" className="btn-secondary" onClick={() => switchFilter("confirmed")}>
+      <div className="review-page min-h-[calc(100vh-64px)] bg-[#f4faf8] text-[#17343A] font-sans flex flex-col relative overflow-hidden p-8">
+        <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-[#10A88F]/10 blur-[120px] rounded-full pointer-events-none" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-[#078D82]/10 blur-[100px] rounded-full pointer-events-none" />
+        <div className="relative z-10 flex flex-col h-full w-full">
+        <ProjectPageHeader
+          title="标注复核"
+          eyebrow="Quality assurance"
+          description={reviewCopy.pageDescription}
+          action={reviewHeaderAction}
+        />
+        <div className="flex-1 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-10 flex flex-col items-center justify-center text-center">
+            <div className="w-16 h-16 bg-[#F4FAF8] rounded-2xl flex items-center justify-center mb-6 shadow-inner border border-[#CFF4EC]">
+              <Icon name="check" size={32} className="text-[#10A88F]" />
+            </div>
+            <h2 className="text-xl font-bold text-[#075F5A] mb-3">人工确认完成</h2>
+            <p className="text-[#17343A]/60 max-w-md mx-auto mb-8">
+              已确认 {confirmedCount} 张 · 本次处理 {confirmedInSession} 张 · 约 {sessionMinutes} 分钟
+            </p>
+            <div className="flex gap-4 flex-wrap justify-center">
+              <Link href={`/projects/${id}/train`} className="px-6 py-2.5 bg-[#10A88F] text-white rounded-xl text-sm font-bold shadow-sm shadow-[#10A88F]/20 hover:bg-[#078D82] transition-colors">
+                开始训练
+              </Link>
+              <button type="button" className="px-6 py-2.5 bg-white border border-[#e4e7ec] text-[#344054] rounded-xl text-sm font-bold hover:bg-gray-50 transition-colors shadow-sm" onClick={() => switchFilter("confirmed")}>
                 查看已确认
               </button>
             </div>
-          </div>
-        </Panel>
+        </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="review-workspace review-workspace--fit">
-      <ProjectPageHeader
-        title="人工确认"
-        description="逐张确认 · Y 确认 · O 无目标 · N 驳回 · V/A 查看标注 · ← → 翻页"
-        eyebrow="Quality assurance"
-      />
+    <div className="review-page min-h-[calc(100vh-64px)] h-[calc(100vh-64px)] bg-[#f4faf8] text-[#17343A] font-sans flex flex-col relative overflow-hidden p-4 lg:p-5">
+      <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-[#10A88F]/10 blur-[120px] rounded-full pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-[#078D82]/10 blur-[100px] rounded-full pointer-events-none" />
 
-      {actionError && <p className="operations-alert operations-alert--danger">{actionError}</p>}
-      {reviewDoneBanner !== null && (
-        <p className="operations-alert operations-alert--success">
-          机器预审完成 {reviewDoneBanner} 张，请继续逐张确认
-        </p>
-      )}
+      <div className="relative z-10 flex flex-col h-full min-h-0 w-full">
+        <ProjectPageHeader
+          title="标注复核"
+          eyebrow="Quality assurance"
+          description={reviewCopy.pageDescription}
+          action={reviewHeaderAction}
+        />
 
-      <div className="review-workspace__main">
-      <div className="review-toolbar">
-        {REVIEW_FILTERS.map((f) => {
-          const count =
-            f.value === "sample" ? countSampleReview(frameStats) :
-            f.value === "pending" ? pendingCount :
-            f.value === "rejected" ? rejectedCount :
-            f.value === "confirmed" ? confirmedCount : null;
-          return (
-            <button
-              key={f.value}
-              type="button"
-              className={filter === f.value ? "review-filter review-filter--active" : "review-filter"}
-              onClick={() => switchFilter(f.value)}
-            >
-              {f.label}{count != null && count > 0 ? ` (${count})` : ""}
-            </button>
-          );
-        })}
-        {frames.length > 0 && (
-          <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--lk-muted)" }}>
-            {idx + 1} / {pageTotal}
-          </span>
+        {actionError && (
+          <div className="mb-4 bg-red-50 border border-red-100 text-red-600 px-4 py-3 rounded-xl text-sm shadow-sm shrink-0">{actionError}</div>
         )}
-        <button type="button" className="review-auto-button" onClick={() => setShowAutoReview((v) => !v)}>
-          机器预审
-        </button>
-      </div>
+        {reviewDoneBanner !== null && (
+          <div className="mb-4 bg-[#F4FAF8] border border-[#CFF4EC] text-[#075F5A] px-4 py-3 rounded-xl text-sm shadow-sm shrink-0">
+            机器预审完成 {reviewDoneBanner} 张，请继续逐张确认
+          </div>
+        )}
 
-      {showAutoReview && (
-        <Panel>
-          <TaskProgress
-            label="审查进度"
-            progress={activeTask?.progress ?? 0}
-            total={activeTask?.total ?? 0}
-            onStop={running ? stopReview : undefined}
-            stopping={stopping}
-          />
-          {!running && (
-            <button type="button" className="btn-secondary" style={{ marginTop: 8 }} disabled={reviewable === 0} onClick={startAutoReview}>
-              开始自动审查
-            </button>
-          )}
-        </Panel>
-      )}
+        {showAutoReview && (
+          <div className="mb-4 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-5 shrink-0">
+            <TaskProgress
+              label="审查进度"
+              progress={activeTask?.progress ?? 0}
+              total={activeTask?.total ?? 0}
+              onStop={running ? stopReview : undefined}
+              stopping={stopping}
+            />
+            {!running && (
+              <button
+                type="button"
+                className="mt-4 px-6 py-2.5 bg-white border border-[#e4e7ec] text-[#344054] rounded-xl text-sm font-bold hover:bg-gray-50 transition-colors shadow-sm disabled:opacity-50"
+                disabled={reviewable === 0}
+                onClick={startAutoReview}
+              >
+                开始自动审查
+              </button>
+            )}
+          </div>
+        )}
 
-      {frames.length === 0 ? (
-        <Panel>
-          <EmptyState
-            title={`「${activeFilterMeta?.label}」暂无图片`}
-            description={filter === "pending" && confirmedCount > 0 ? "可以尝试查看已确认或开始训练" : undefined}
-            action={
-              filter === "pending" && confirmedCount > 0 ? (
-                <Link href={`/projects/${id}/train`} className="btn-primary">开始训练</Link>
-              ) : undefined
-            }
-          />
-        </Panel>
-      ) : (
-        <>
-          <div className={`review-canvas-wrap review-canvas-wrap--${project.task_type}`}>
-            <div className="review-canvas">
-              {current && (
-                <AnnotationEditor
-                  key={current.id}
-                  frameId={current.id}
-                  imageUrl={api.frameImageUrl(id!, current.id, false)}
-                  categories={project.categories}
-                  annotations={current.annotations}
-                  taskType={project.task_type}
-                  onSave={handleSave}
-                  onDirtyChange={setIsEditing}
-                  darkCanvas
+        <div className="flex-1 flex flex-col min-h-0 bg-white/40 backdrop-blur-3xl rounded-3xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] p-2">
+          <div className="flex justify-between items-center mb-2 shrink-0 bg-white/80 rounded-2xl p-2 shadow-sm border border-white">
+            <div className="flex items-center gap-1 overflow-x-auto custom-scrollbar">
+              {REVIEW_FILTERS.map((f) => {
+                const count =
+                  f.value === "sample" ? sampleCount :
+                  f.value === "pending" ? pendingCount :
+                  f.value === "rejected" ? rejectedCount :
+                  f.value === "confirmed" ? confirmedCount : null;
+                const isActive = filter === f.value;
+                return (
+                  <button
+                    key={f.value}
+                    type="button"
+                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all shrink-0 ${
+                      isActive
+                        ? "bg-[#F4FAF8] text-[#10A88F] shadow-sm border border-[#CFF4EC]/50"
+                        : "text-[#17343A]/60 hover:text-[#075F5A] hover:bg-gray-50 border border-transparent"
+                    }`}
+                    onClick={() => switchFilter(f.value)}
+                  >
+                    {f.label}{count != null && count > 0 ? ` (${count})` : ""}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-2 px-2 shrink-0">
+              {frames.length > 0 && (
+                <span className="text-sm font-bold text-[#17343A]/50 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-100">
+                  {idx + 1} <span className="text-[#17343A]/30 font-normal">/ {pageTotal}</span>
+                  {confirmedInSession > 0 && (
+                    <span className="text-[#17343A]/30 font-normal"> · 本次 {confirmedInSession}</span>
+                  )}
+                </span>
+              )}
+              <button
+                type="button"
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors shadow-sm ${
+                  showAutoReview
+                    ? "bg-[#F4FAF8] text-[#10A88F] border border-[#CFF4EC]"
+                    : "bg-white border border-[#e4e7ec] text-[#344054] hover:bg-gray-50"
+                }`}
+                onClick={() => setShowAutoReview((v) => !v)}
+              >
+                <Icon name="sparkles" size={14} className="text-[#10A88F]" />
+                机器预审
+              </button>
+              {filter === "rejected" && rejectedCount > 0 && (
+                <button
+                  type="button"
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors shadow-sm ${
+                    showRelabel
+                      ? "bg-[#F4FAF8] text-[#10A88F] border border-[#CFF4EC]"
+                      : "bg-white border border-[#e4e7ec] text-[#344054] hover:bg-gray-50"
+                  }`}
+                  onClick={() => setShowRelabel((v) => !v)}
+                >
+                  批量重标
+                </button>
+              )}
+            </div>
+          </div>
+
+          {showRelabel && filter === "rejected" && rejectedCount > 0 && (
+            <div className="mb-2 shrink-0 bg-white/80 backdrop-blur-xl border border-white shadow-sm rounded-2xl p-4 mx-0">
+              <div className="flex items-center justify-between gap-4 mb-3">
+                <h3 className="text-sm font-bold text-[#075F5A]">驳回修正</h3>
+                <SegmentedControl
+                  options={[
+                    { value: "yolo" as const, label: "YOLO" },
+                    { value: "llm" as const, label: "LLM" },
+                  ]}
+                  value={relabelMode}
+                  onChange={setRelabelMode}
+                />
+              </div>
+              {relabelMode === "yolo" ? (
+                <YoloLabelPanel
+                  projectId={id!}
+                  frameStats={frameStats}
+                  fixedOnlyStatus="human_wrong"
                   compact
-                  sidePanel={annotationSidePanel}
+                  onDone={loadFrames}
+                />
+              ) : (
+                <LlmLabelPanel
+                  projectId={id!}
+                  frameStats={frameStats}
+                  fixedOnlyStatus="human_wrong"
+                  compact
+                  onDone={() => {
+                    refreshMeta();
+                    switchFilter("pending");
+                  }}
                 />
               )}
             </div>
-            <aside className="review-side">
-              {current && (
-                <>
-                  <span className="project-section-kicker">Current frame</span>
-                  <h2>{current.filename}</h2>
-                  <span className="review-side__status">
-                    <i aria-hidden="true" />
-                    {FRAME_STATUS_SIMPLE[current.status] ?? current.status}
-                  </span>
-                  {current.review_note && (
-                    <p className="review-side__note">{current.review_note}</p>
-                  )}
-                  <dl className="review-side__stats">
-                    <div><dt>复查进度</dt><dd>{idx + 1} / {pageTotal}</dd></div>
-                    <div><dt>已确认</dt><dd>{confirmedCount}</dd></div>
-                    <div><dt>已驳回</dt><dd>{rejectedCount}</dd></div>
-                  </dl>
-                  <div ref={setAnnotationSidePanel} className="review-side__annotations" />
-                </>
-              )}
-            </aside>
-          </div>
-          <div className="review-filmstrip">
-            {frames.slice(Math.max(0, idx - 50), Math.min(frames.length, idx + 51)).map((f, offset) => {
-              const i = Math.max(0, idx - 50) + offset;
-              return (
-              <Thumb
-                key={f.id}
-                src={api.frameImageUrl(id!, f.id, true)}
-                alt={f.filename}
-                label={FRAME_STATUS_SIMPLE[f.status]}
-                selected={i === idx}
-                onClick={() => goFrame(i)}
-              />
-              );
-            })}
-            {loadingNext && <span className="review-filmstrip__loading">加载下一页…</span>}
-          </div>
-        </>
-      )}
-      </div>
+          )}
 
-      {filter === "rejected" && rejectedCount > 0 && (
-        <Panel>
-          <h2 style={{ margin: "0 0 8px", fontSize: 14 }}>驳回修正</h2>
-          <SegmentedControl
-            options={[
-              { value: "yolo" as const, label: "YOLO" },
-              { value: "llm" as const, label: "LLM" },
-            ]}
-            value={relabelMode}
-            onChange={setRelabelMode}
-          />
-          <div style={{ marginTop: 12 }}>
-            {relabelMode === "yolo" ? (
-              <YoloLabelPanel projectId={id!} frameStats={frameStats} fixedOnlyStatus="human_wrong" compact onDone={loadFrames} />
-            ) : (
-              <LlmLabelPanel
-                projectId={id!}
-                frameStats={frameStats}
-                fixedOnlyStatus="human_wrong"
-                compact
-                onDone={() => {
-                  refreshMeta();
-                  switchFilter("pending");
-                }}
+          {frames.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center m-2 bg-white/80 rounded-2xl border border-white shadow-sm min-h-0">
+              <EmptyState
+                title={`「${activeFilterMeta?.label}」暂无图片`}
+                description={filter === "pending" && confirmedCount > 0 ? "可以尝试查看已确认或开始训练" : undefined}
+                action={
+                  filter === "pending" && confirmedCount > 0 ? (
+                    <Link href={`/projects/${id}/train`} className="bg-[#10A88F] text-white px-6 py-2.5 rounded-xl text-sm font-bold shadow-sm shadow-[#10A88F]/20 hover:bg-[#078D82] transition-colors inline-block mt-4">
+                      开始训练
+                    </Link>
+                  ) : undefined
+                }
               />
-            )}
-          </div>
-        </Panel>
-      )}
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col min-h-0 gap-2">
+              <div className={`review-canvas-wrap review-canvas-wrap--${project.task_type} flex-1 min-h-0`}>
+                <div className="review-canvas h-full min-h-0">
+                  {current && (
+                    <AnnotationEditor
+                      key={current.id}
+                      frameId={current.id}
+                      imageUrl={api.frameImageUrl(id!, current.id, false)}
+                      categories={project.categories}
+                      annotations={current.annotations}
+                      taskType={project.task_type}
+                      onSave={handleSave}
+                      onDirtyChange={setIsEditing}
+                      darkCanvas
+                      compact
+                      sidePanel={annotationSidePanel}
+                      actionPanel={annotationActionPanel}
+                    />
+                  )}
+                </div>
+                <aside className="review-side h-full min-h-0">
+                  {current && (
+                    <>
+                      <span className="text-[10px] font-bold tracking-wider text-[#10A88F] uppercase">当前帧</span>
+                      <h2 className="text-sm font-bold text-[#075F5A] truncate mt-1" title={current.filename}>{current.filename}</h2>
+                      <span className="review-side__status mt-2">
+                        <i aria-hidden="true" />
+                        {FRAME_STATUS_SIMPLE[current.status] ?? current.status}
+                      </span>
+                      {current.review_note && (
+                        <p className="review-side__note">
+                          <strong>审查提示：</strong>
+                          {current.review_note}
+                        </p>
+                      )}
+                      <div ref={setAnnotationActionPanel} className="review-side__actions mt-4 shrink-0" />
+                      <div ref={setAnnotationSidePanel} className="review-side__annotations mt-3 min-h-0 flex-1" />
+                    </>
+                  )}
+                </aside>
+              </div>
+              <div
+                ref={filmstripRef}
+                className="h-[104px] shrink-0 bg-white/80 rounded-2xl border border-white shadow-sm flex items-center px-2 overflow-x-auto overflow-y-hidden custom-scrollbar"
+              >
+                <div className="flex gap-2 items-center h-full py-2">
+                  {frames.slice(Math.max(0, idx - 50), Math.min(frames.length, idx + 51)).map((f, offset) => {
+                    const i = Math.max(0, idx - 50) + offset;
+                    const selected = i === idx;
+                    return (
+                      <div
+                        key={f.id}
+                        ref={selected ? activeThumbRef : undefined}
+                        className={`h-full aspect-video shrink-0 rounded-lg overflow-hidden cursor-pointer transition-all border-2 relative ${
+                          selected
+                            ? "border-[#10A88F] shadow-md ring-2 ring-[#10A88F]/20 scale-105 z-10"
+                            : "border-transparent hover:border-[#CFF4EC] shadow-sm opacity-60 hover:opacity-100"
+                        }`}
+                        onClick={() => goFrame(i)}
+                      >
+                        <img src={api.frameImageUrl(id!, f.id, true)} alt={f.filename} className="w-full h-full object-cover" />
+                        <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 via-black/35 to-transparent px-1.5 py-1 flex justify-center">
+                          <span className="text-[9px] font-bold text-white whitespace-nowrap leading-none">
+                            {FRAME_STATUS_SIMPLE[f.status] ?? f.status}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {loadingNext && <span className="text-xs text-[#17343A]/40 px-4 whitespace-nowrap">加载下一页…</span>}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

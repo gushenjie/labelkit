@@ -62,7 +62,7 @@ export default function ProjectSettingsPage() {
         split: "train",
       });
     }
-    toast({ type: "success", message: "导入任务已启动，完成后请到人工确认页" });
+    toast({ type: "success", message: "导入任务已启动，完成后请到标注复核页" });
   };
 
   if (!project) return <p>加载中...</p>;
@@ -230,7 +230,7 @@ export default function ProjectSettingsPage() {
                 <span><Icon name="database" size={18} /></span>
                 <div>
                   <strong>迁移现有 YOLO 数据</strong>
-                  <p>导入后进入项目素材与人工确认流程。</p>
+                  <p>导入后进入项目素材与标注复核流程。</p>
                 </div>
               </div>
               {project.task_type === "classify" ? (

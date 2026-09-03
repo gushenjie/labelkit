@@ -1,367 +1,81 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { ModelTrialPreview, type TrialBox } from "@/components/ModelTrialPreview";
-import { YoloLabelPanel } from "@/components/YoloLabelPanel";
-import { Panel, PanelSection } from "@/components/ui/Panel";
-import { useToast } from "@/components/ui/ToastProvider";
-import { api, getApiBase, ModelVersion, Project } from "@/lib/api";
 import { Icon } from "@/components/Icon";
+import { api, type ModelCatalog, type ModelCatalogItem } from "@/lib/api";
 
-function modelOrigin(m: ModelVersion): string {
-  const origin = (m.metrics as { origin?: string })?.origin;
-  if (origin === "upload") return "外部上传";
-  if (Object.keys(m.metrics).length > 0) return "平台训练";
-  return "未知";
+const FALLBACK_CATALOG: ModelCatalog = {
+  total: 6,
+  stats: [
+    { label: "模型总数", value: "6", change: "", icon: "cube" },
+    { label: "评估总次数", value: "2,863,421", change: "8.4%", icon: "layers" },
+    { label: "运行中模型", value: "89", change: "5%", icon: "users" },
+    { label: "部署总次数", value: "1,42,678", change: "15%", icon: "clock" },
+  ],
+  models: [
+    { id: "yolov8", name: "YOLOv8", version: "v8.2", category: "计算机视觉", description: "先进的实时目标检测模型，兼顾速度与识别精度。", icon: "yolo", framework: "PyTorch", task: "目标检测", status: "运行中", metrics: [{ label: "mAP@0.5", value: "92.4%", change: "2.3%", direction: "up" }, { label: "准确率", value: "95.1%", change: "1.8%", direction: "up" }], updated_at: "2024年5月28日" },
+    { id: "resnet50", name: "ResNet50", version: "v2.1", category: "图像分类", description: "用于图像分类的深度残差学习模型。", icon: "network", framework: "PyTorch", task: "图像分类", status: "运行中", metrics: [{ label: "Top-1 准确率", value: "93.7%", change: "1.6%", direction: "up" }, { label: "Top-5 准确率", value: "98.1%", change: "1.2%", direction: "up" }], updated_at: "2024年5月22日" },
+    { id: "pp-ocrv4", name: "PP-OCRv4", version: "v4.0", category: "文字识别", description: "面向文字检测与识别的高性能 OCR 模型。", icon: "ocr", framework: "PaddlePaddle", task: "文字识别", status: "运行中", metrics: [{ label: "mAP", value: "89.6%", change: "2.1%", direction: "up" }, { label: "准确率", value: "94.0%", change: "1.7%", direction: "up" }], updated_at: "2024年5月20日" },
+    { id: "wav2vec2", name: "Wav2Vec 2.0", version: "v2.0", category: "语音识别", description: "用于自动语音识别的自监督学习模型。", icon: "audio", framework: "PyTorch", task: "语音识别", status: "运行中", metrics: [{ label: "词错误率", value: "7.6%", change: "0.8%", direction: "down" }, { label: "字错误率", value: "2.1%", change: "0.4%", direction: "down" }], updated_at: "2024年5月18日" },
+    { id: "pointnet", name: "PointNet++", version: "v1.3", category: "三维点云", description: "用于三维点云分类与分割的深度学习模型。", icon: "cube", framework: "PyTorch", task: "三维分类", status: "运行中", metrics: [{ label: "mIoU", value: "88.2%", change: "2.7%", direction: "up" }, { label: "准确率", value: "91.3%", change: "2.0%", direction: "up" }], updated_at: "2024年5月16日" },
+    { id: "efficientnet", name: "EfficientNet-B4", version: "v1.2", category: "图像分类", description: "兼顾识别精度与推理效率的高效卷积网络。", icon: "chart", framework: "TensorFlow", task: "图像分类", status: "运行中", metrics: [{ label: "Top-1 准确率", value: "92.2%", change: "1.4%", direction: "up" }, { label: "Top-5 准确率", value: "97.5%", change: "1.1%", direction: "up" }], updated_at: "2024年5月14日" },
+  ],
+};
+
+function CatalogIcon({ name, compact = false }: { name: string; compact?: boolean }) {
+  const common = { viewBox: "0 0 48 48", "aria-hidden": true } as const;
+  if (name === "yolo") return <span className="catalog-icon catalog-icon--word">YOLO</span>;
+  if (name === "ocr") return <span className="catalog-icon catalog-icon--ocr"><b>⌜</b><em>OCR</em><i>⌟</i></span>;
+  if (name === "audio") return <span className="catalog-icon"><svg {...common}><path d="M20 13v20a7 7 0 0 0 14 0V13a7 7 0 0 0-14 0Zm-6 13v7a13 13 0 0 0 26 0v-7M27 46v-7M20 46h14M8 23v12M3 28v3M13 19v20M43 23v12M47 28v3" /></svg></span>;
+  if (name === "network") return <span className="catalog-icon"><svg {...common}><circle cx="12" cy="12" r="4"/><circle cx="36" cy="10" r="4"/><circle cx="37" cy="36" r="4"/><circle cx="11" cy="37" r="4"/><circle cx="24" cy="24" r="4"/><path d="m15 14 6 7m6-1 6-7m-6 14 7 6m-14-6-6 7"/></svg></span>;
+  if (name === "chart") return <span className="catalog-icon"><svg {...common}><path d="M8 39h7V28H8v11Zm13 0h7V18h-7v21Zm13 0h7V7h-7v32ZM5 39h39" /></svg></span>;
+  if (name === "layers") return <span className="catalog-icon"><Icon name="layers" size={compact ? 27 : 35} /></span>;
+  if (name === "users") return <span className="catalog-icon"><Icon name="users" size={compact ? 28 : 35} /></span>;
+  if (name === "clock") return <span className="catalog-icon"><Icon name="clock" size={compact ? 28 : 35} /></span>;
+  return <span className="catalog-icon"><svg {...common}><path d="m24 4 17 9v21l-17 10L7 34V13l17-9Zm0 0v20m17-11-17 11L7 13m17 11v20" /></svg></span>;
 }
 
-function formatTrainMetric(metrics: Record<string, unknown>, ...keys: string[]): string | null {
-  for (const key of keys) {
-    const raw = metrics[key];
-    if (typeof raw === "number" && !Number.isNaN(raw)) {
-      return `${(raw * 100).toFixed(1)}%`;
-    }
-  }
-  return null;
+function SelectFilter({ label, value, values, onChange }: { label: string; value: string; values: string[]; onChange: (value: string) => void }) {
+  return <label className="catalog-select"><span>{label}</span><select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}><option value="All">全部</option>{values.map((item) => <option key={item}>{item}</option>)}</select><Icon name="chevron-down" size={15} /></label>;
 }
 
-function readModelMetrics(metrics: Record<string, unknown>) {
-  return {
-    map50: formatTrainMetric(metrics, "metrics/mAP50(B)", "mAP50", "map50"),
-    precision: formatTrainMetric(metrics, "metrics/precision(B)", "precision"),
-    recall: formatTrainMetric(metrics, "metrics/recall(B)", "recall"),
-  };
+function ModelCard({ model }: { model: ModelCatalogItem }) {
+  const isTestable = Boolean(model.project_id && model.model_id);
+  return <article className="model-card">
+    <div className="model-card__top"><div className="model-card__art"><CatalogIcon name={model.icon} /></div><div className="model-card__intro"><div className="model-card__title"><h2>{model.name}</h2><span>{model.version}</span></div><div className="model-card__labels"><mark>{model.category}</mark><span className={model.source === "训练模型" || model.source === "上传模型" ? "model-card__source model-card__source--trained" : "model-card__source"}>{model.source ?? "内置模型"}</span></div><p>{model.description}</p></div></div>
+    <div className="model-card__metrics">{model.metrics.map((metric) => <div key={metric.label}><span>{metric.label}</span><strong>{metric.value}</strong>{metric.change && <em>{metric.direction === "down" ? "↓" : "↑"} {metric.change}</em>}</div>)}</div>
+    <footer><span><Icon name="clock" size={15} />更新于：{model.updated_at}</span>{isTestable ? <Link className="model-card__deploy" href={`/models/trial?projectId=${encodeURIComponent(model.project_id!)}&modelId=${encodeURIComponent(model.model_id!)}&name=${encodeURIComponent(model.name)}&version=${encodeURIComponent(model.version)}`}>在线测试<Icon name="chevron-right" size={15} /></Link> : <span className="model-card__deploy model-card__deploy--disabled" title="内置示例模型暂未配置可推理的模型文件">内置示例</span>}<button type="button" className="model-card__more" aria-label={`${model.name} 更多操作`}><Icon name="more" size={18} /></button></footer>
+  </article>;
 }
 
 export default function GlobalModelsPage() {
-  return (
-    <Suspense fallback={<p className="p-6 text-subtle">加载中…</p>}>
-      <GlobalModelsPageInner />
-    </Suspense>
-  );
-}
+  const [catalog, setCatalog] = useState(FALLBACK_CATALOG);
+  const [query, setQuery] = useState("");
+  const [modelType, setModelType] = useState("All");
+  const [framework, setFramework] = useState("All");
+  const [task, setTask] = useState("All");
+  const [status, setStatus] = useState("All");
+  const [view, setView] = useState<"grid" | "list">("grid");
+  const [page, setPage] = useState(1);
+  const pageSize = 6;
 
-function GlobalModelsPageInner() {
-  const searchParams = useSearchParams();
-  const projectParam = searchParams.get("project");
-  const { toast } = useToast();
-  const previewUrlRef = useRef<string | null>(null);
-  const lastTrialFileRef = useRef<File | null>(null);
+  useEffect(() => { api.getModelCatalog().then(setCatalog).catch(() => setCatalog(FALLBACK_CATALOG)); }, []);
+  const unique = (key: "category" | "framework" | "task" | "status") => Array.from(new Set(catalog.models.map((model) => model[key])));
+  const models = useMemo(() => catalog.models.filter((model) => {
+    const haystack = `${model.name} ${model.category} ${model.description}`.toLowerCase();
+    return haystack.includes(query.toLowerCase()) && (modelType === "All" || model.category === modelType) && (framework === "All" || model.framework === framework) && (task === "All" || model.task === task) && (status === "All" || model.status === status);
+  }), [catalog.models, framework, modelType, query, status, task]);
+  const pageCount = Math.max(1, Math.ceil(models.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleModels = models.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const start = models.length ? (currentPage - 1) * pageSize + 1 : 0;
+  const end = Math.min(currentPage * pageSize, models.length);
 
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState("");
-  const [loadingProjects, setLoadingProjects] = useState(true);
-  const [loadProjectsError, setLoadProjectsError] = useState("");
-  const [models, setModels] = useState<ModelVersion[]>([]);
-  const [stats, setStats] = useState<Record<string, number>>({});
-
-  const [trialModelId, setTrialModelId] = useState("");
-  const [preview, setPreview] = useState<string | null>(null);
-  const [trialBoxes, setTrialBoxes] = useState<TrialBox[]>([]);
-  const [trialLoading, setTrialLoading] = useState(false);
-
-  const refresh = useCallback(async () => {
-    if (!projectId) return;
-    try {
-      const [m, s] = await Promise.all([api.listModels(projectId), api.frameStats(projectId)]);
-      setModels(m);
-      setStats(s);
-      setTrialModelId((prev) => (prev && m.find((x) => x.id === prev) ? prev : m[0]?.id ?? ""));
-    } catch {
-      // 刷新失败时保留当前列表
-    }
-  }, [projectId]);
-
-  const loadProjects = useCallback(async () => {
-    setLoadingProjects(true);
-    setLoadProjectsError("");
-    try {
-      const overviews = await api.listProjectOverviews();
-      let list = overviews.map((item) => item.project);
-      if (list.length === 0 && projectParam) {
-        try {
-          list = [await api.getProject(projectParam)];
-        } catch {
-          // 列表为空且指定项目不存在时保持空列表
-        }
-      }
-      setProjects(list);
-      setProjectId((prev) => {
-        if (projectParam && list.find((p) => p.id === projectParam)) return projectParam;
-        if (prev && list.find((p) => p.id === prev)) return prev;
-        return list[0]?.id ?? "";
-      });
-    } catch (e) {
-      setProjects([]);
-      setProjectId("");
-      setLoadProjectsError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoadingProjects(false);
-    }
-  }, [projectParam]);
-
-  useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  useEffect(() => () => {
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-  }, []);
-
-  const runTrial = useCallback(async (file: File, modelId?: string) => {
-    const activeModelId = modelId ?? trialModelId;
-    if (!projectId || !activeModelId) return;
-    lastTrialFileRef.current = file;
-    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    const nextPreview = URL.createObjectURL(file);
-    previewUrlRef.current = nextPreview;
-    setPreview(nextPreview);
-    setTrialBoxes([]);
-    setTrialLoading(true);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch(
-        `${getApiBase()}/api/projects/${projectId}/models/predict?model_id=${activeModelId}`,
-        { method: "POST", body: fd },
-      );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || res.statusText);
-      }
-      const data = await res.json() as { boxes: TrialBox[] };
-      setTrialBoxes(data.boxes ?? []);
-    } catch (e) {
-      setTrialBoxes([]);
-      toast({ type: "error", message: `检测失败：${e instanceof Error ? e.message : String(e)}` });
-    } finally {
-      setTrialLoading(false);
-    }
-  }, [projectId, trialModelId, toast]);
-
-  const selectModel = useCallback((modelId: string) => {
-    setTrialModelId(modelId);
-    const cached = lastTrialFileRef.current;
-    if (cached) {
-      void runTrial(cached, modelId);
-    }
-  }, [runTrial]);
-
-  const currentProject = projects.find((p) => p.id === projectId);
-  const activeModel = models.find((m) => m.id === trialModelId) ?? models[0];
-  const activeMetrics = useMemo(
-    () => readModelMetrics(activeModel?.metrics ?? {}),
-    [activeModel],
-  );
-  const rejectedCount = stats.human_wrong ?? 0;
-
-  const trialSummary = trialLoading
-    ? "正在分析…"
-    : preview
-      ? trialBoxes.length > 0
-        ? `检测到 ${trialBoxes.length} 个目标`
-        : "未检测到目标"
-      : null;
-
-  return (
-    <div className="operations-page model-center-page">
-      {loadingProjects ? (
-        <Panel>
-          <PanelSection>
-            <p className="text-center text-muted">正在加载项目…</p>
-          </PanelSection>
-        </Panel>
-      ) : loadProjectsError ? (
-        <Panel>
-          <PanelSection>
-            <p className="mb-2 text-center text-danger-600">项目加载失败：{loadProjectsError}</p>
-            <div className="text-center">
-              <button type="button" className="btn-primary" onClick={() => loadProjects()}>重试</button>
-            </div>
-          </PanelSection>
-        </Panel>
-      ) : projects.length === 0 ? (
-        <Panel>
-          <PanelSection>
-            <p className="mb-4 text-center text-muted">还没有项目，先创建并完成训练后再来试用模型</p>
-            <div className="text-center">
-              <Link href="/?create=1" className="btn-primary">新建项目</Link>
-            </div>
-          </PanelSection>
-        </Panel>
-      ) : (
-        <>
-          <div className="model-center__bar">
-            <label className="model-center__project">
-              <span>当前项目</span>
-              {projects.length === 1 ? (
-                <strong>{currentProject?.name}</strong>
-              ) : (
-                <select className="input" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              )}
-            </label>
-            <div className="model-center__bar-meta">
-              <span>{stats.total ?? 0} 张素材</span>
-              <span>{models.length} 个版本</span>
-              {models.length > 0 && (
-                <Link href={`/projects/${projectId}/train`} className="model-center__train-link">
-                  训练与导出
-                  <Icon name="chevron-right" size={14} />
-                </Link>
-              )}
-            </div>
-          </div>
-
-          {models.length === 0 ? (
-            <section className="model-center__empty" aria-label="模型库为空">
-              <div className="model-center__empty-copy">
-                <span><Icon name="package" size={28} /></span>
-                <div>
-                  <span className="model-center__empty-kicker">模型库</span>
-                  <strong>该项目还没有模型</strong>
-                  <p>完成训练后，模型版本会在这里沉淀，并可立即进行在线试用。</p>
-                </div>
-              </div>
-              <div className="model-center__empty-action">
-                <span>下一步</span>
-                <strong>训练第一个模型</strong>
-                <p>使用当前项目的已确认素材开始训练。</p>
-                <Link href={`/projects/${projectId}/train`} className="btn-primary">去训练</Link>
-              </div>
-            </section>
-          ) : (
-            <div className="model-center__workspace">
-              <aside className="model-center__rail" aria-label="模型版本与指标">
-                <div className="model-center__rail-head">
-                  <h2>版本</h2>
-                  <span>{models.length}</span>
-                </div>
-
-                <ul className="model-version-picker" role="listbox" aria-label="选择模型版本">
-                  {models.map((m) => {
-                    const selected = m.id === trialModelId;
-                    const { map50 } = readModelMetrics(m.metrics);
-                    return (
-                      <li key={m.id}>
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={selected ? "model-version-picker__item model-version-picker__item--active" : "model-version-picker__item"}
-                          onClick={() => selectModel(m.id)}
-                        >
-                          <span className="model-version-picker__badge">v{m.version}</span>
-                          <span className="model-version-picker__copy">
-                            <strong>{m.name}</strong>
-                            <small>{modelOrigin(m)}</small>
-                          </span>
-                          {map50 && <em>{map50}</em>}
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-
-                {activeModel && (
-                  <div className="model-center__metrics">
-                    <p className="model-center__metrics-title">当前版本指标</p>
-                    <div className="model-center__metrics-grid">
-                      <div className={activeMetrics.map50 ? "model-center__metric" : "model-center__metric model-center__metric--muted"}>
-                        <strong>{activeMetrics.map50 ?? "—"}</strong>
-                        <span>mAP50</span>
-                      </div>
-                      <div className={activeMetrics.precision ? "model-center__metric" : "model-center__metric model-center__metric--muted"}>
-                        <strong>{activeMetrics.precision ?? "—"}</strong>
-                        <span>精确率</span>
-                      </div>
-                      <div className={activeMetrics.recall ? "model-center__metric" : "model-center__metric model-center__metric--muted"}>
-                        <strong>{activeMetrics.recall ?? "—"}</strong>
-                        <span>召回率</span>
-                      </div>
-                    </div>
-                    <p className="model-center__metrics-note">
-                      小样本指标波动大，请以在线试用为准
-                    </p>
-                  </div>
-                )}
-
-                {rejectedCount > 0 && (
-                  <details className="model-advanced model-advanced--rail">
-                    <summary>驳回修正</summary>
-                    <div className="model-advanced__body">
-                      <p className="model-advanced__hint">对已驳回的 {rejectedCount} 张图片用模型批量重打框</p>
-                      <YoloLabelPanel
-                        projectId={projectId}
-                        frameStats={stats}
-                        fixedOnlyStatus="human_wrong"
-                        onDone={refresh}
-                      />
-                    </div>
-                  </details>
-                )}
-              </aside>
-
-              <section className="model-center__stage" aria-label="在线试用">
-                <div className="model-center__stage-head">
-                  <div>
-                    <h2>在线试用</h2>
-                    <p>上传或拖拽图片，即时预览检测框（不写入标注）</p>
-                  </div>
-                  <div className="model-center__stage-actions">
-                    {activeModel && (
-                      <span className="model-center__stage-version">
-                        {activeModel.name} · v{activeModel.version}
-                      </span>
-                    )}
-                    <label className="btn-primary model-trial-panel__upload model-center__upload">
-                      <Icon name="upload" size={15} />
-                      {trialLoading ? "检测中…" : "选择图片"}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        className="sr-only"
-                        disabled={!trialModelId || trialLoading}
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) runTrial(file);
-                          e.target.value = "";
-                        }}
-                      />
-                    </label>
-                  </div>
-                </div>
-
-                <div className="model-center__stage-body">
-                  <ModelTrialPreview
-                    imageUrl={preview}
-                    boxes={trialBoxes}
-                    categories={currentProject?.categories ?? []}
-                    loading={trialLoading}
-                    onUpload={runTrial}
-                    uploadDisabled={!trialModelId}
-                    showSummary={false}
-                  />
-                  {trialSummary && (
-                    <p className="model-center__stage-result" data-testid="model-trial-result">
-                      {trialSummary}
-                    </p>
-                  )}
-                </div>
-              </section>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
+  return <div className="model-catalog-page">
+    <section className="catalog-stats" aria-label="模型统计">{catalog.stats.map((stat) => <article key={stat.label}><div className="catalog-stat__icon"><CatalogIcon name={stat.icon} compact /></div><div><strong>{stat.value}</strong><span>{stat.label}</span>{stat.change && <small>↑ {stat.change} <em>较过去 30 天</em></small>}</div></article>)}</section>
+    <section className="catalog-toolbar" aria-label="模型筛选"><label className="catalog-search"><Icon name="search" size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按名称、类型或描述搜索模型" /></label><SelectFilter label="模型类型" value={modelType} values={unique("category")} onChange={setModelType} /><SelectFilter label="框架" value={framework} values={unique("framework")} onChange={setFramework} /><SelectFilter label="任务" value={task} values={unique("task")} onChange={setTask} /><SelectFilter label="状态" value={status} values={unique("status")} onChange={setStatus} /><button type="button" className="catalog-more-filters"><Icon name="sliders" size={17} />更多筛选</button><div className="catalog-view-toggle"><button type="button" aria-label="网格视图" aria-pressed={view === "grid"} onClick={() => setView("grid")}><Icon name="grid" size={19} /></button><button type="button" aria-label="列表视图" aria-pressed={view === "list"} onClick={() => setView("list")}><Icon name="list" size={20} /></button></div></section>
+    <section className={`model-card-grid model-card-grid--${view}`} aria-label="模型列表">{visibleModels.map((model) => <ModelCard key={model.id} model={model} />)}{models.length === 0 && <p className="catalog-empty">没有符合当前筛选条件的模型。</p>}</section>
+    <footer className="catalog-pagination"><p>第 {start}–{end} 条，共 {models.length} 个模型</p><div><span className="catalog-pagination__size">每页 6 条</span><button type="button" disabled={currentPage === 1} aria-label="上一页" onClick={() => setPage((value) => Math.max(1, value - 1))}><Icon name="chevron-left" size={15} /></button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button type="button" key={number} aria-current={number === currentPage ? "page" : undefined} onClick={() => setPage(number)}>{number}</button>)}<button type="button" disabled={currentPage === pageCount} aria-label="下一页" onClick={() => setPage((value) => Math.min(pageCount, value + 1))}><Icon name="chevron-right" size={15} /></button></div></footer>
+  </div>;
 }

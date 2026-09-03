@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.api import datasets, frames, media, models, projects, public_datasets, settings, suggest, system, tasks
+from server.api import audit, auth, datasets, frames, media, models, projects, public_datasets, settings, suggest, system, tasks, users
+from server.api.deps import get_current_user
 from server.config import settings as app_settings
 from server.db.database import SessionLocal, init_db
 from server.worker.task_worker import TaskWorker
+from server.core.dataset_service import reconcile_dataset_version_files
 
 init_db()
 
 with SessionLocal() as _db:
     TaskWorker.reconcile_stale_tasks(_db)
+    reconcile_dataset_version_files(_db)
 
 app = FastAPI(title=app_settings.app_name, version="0.2.0")
 
@@ -26,17 +29,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(projects.router)
-app.include_router(media.router)
-app.include_router(frames.router)
-app.include_router(datasets.router)
-app.include_router(public_datasets.router)
-app.include_router(tasks.router)
-app.include_router(tasks.global_router)
-app.include_router(models.router)
-app.include_router(settings.router)
-app.include_router(suggest.router)
-app.include_router(system.router)
+_auth = [Depends(get_current_user)]
+
+app.include_router(projects.router, dependencies=_auth)
+app.include_router(auth.router)
+app.include_router(users.router, dependencies=_auth)
+app.include_router(audit.router, dependencies=_auth)
+app.include_router(media.router, dependencies=_auth)
+app.include_router(frames.router, dependencies=_auth)
+app.include_router(datasets.router, dependencies=_auth)
+app.include_router(datasets.global_router, dependencies=_auth)
+app.include_router(public_datasets.router, dependencies=_auth)
+app.include_router(tasks.router, dependencies=_auth)
+app.include_router(tasks.global_router, dependencies=_auth)
+app.include_router(models.router, dependencies=_auth)
+app.include_router(models.global_router, dependencies=_auth)
+app.include_router(settings.router, dependencies=_auth)
+app.include_router(suggest.router, dependencies=_auth)
+app.include_router(system.router, dependencies=_auth)
 
 
 @app.get("/api/health")

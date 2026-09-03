@@ -46,3 +46,35 @@ export function classMappingSelectValue(mapping: Record<string, number | null>, 
   const mapped = mapping[String(sourceClassId)];
   return mapped == null ? "ignore" : String(mapped);
 }
+
+const compactNumberFormatter = new Intl.NumberFormat("zh-CN");
+
+/** 公开数据集任务类型展示 */
+export function publicDatasetTaskLabel(taskType: string | null | undefined): string | null {
+  if (taskType === "detect") return "目标检测";
+  if (taskType === "classify") return "图像分类";
+  return null;
+}
+
+/** 紧凑展示热度数字，无数据时返回 null */
+export function formatCompactCount(value: number | null | undefined): string | null {
+  if (value == null || value <= 0) return null;
+  if (value >= 100_000) return `${(value / 10_000).toFixed(0)}万`;
+  if (value >= 10_000) return `${(value / 10_000).toFixed(1)}万`;
+  return compactNumberFormatter.format(value);
+}
+
+/** 候选卡片只展示真实图片缩略图；标注渲染层不能作为封面。 */
+export function candidatePreviewUrl(candidate: {
+  annotation_thumbnail?: string | null;
+  thumbnail?: string | null;
+}): string | null {
+  return candidate.thumbnail || null;
+}
+
+/** 展示类别标签，超出上限时附加 +N */
+export function formatCandidateClasses(classes: string[], limit = 4): { visible: string[]; overflow: number } {
+  const cleaned = classes.map((item) => item.trim()).filter(Boolean);
+  if (cleaned.length <= limit) return { visible: cleaned, overflow: 0 };
+  return { visible: cleaned.slice(0, limit), overflow: cleaned.length - limit };
+}

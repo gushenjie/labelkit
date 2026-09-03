@@ -10,4 +10,6 @@ source .venv/bin/activate
 pip install -q -r server/requirements.txt
 
 export PYTHONPATH="$ROOT"
-exec uvicorn server.main:app --host 127.0.0.1 --port 8010 --reload
+HOST="$(python -c "from server.app_config import runtime_config; print(runtime_config()['host'])")"
+PORT="$(python -c "from server.app_config import runtime_config; print(runtime_config()['apiPort'])")"
+exec uvicorn server.main:app --host "$HOST" --port "$PORT" --reload

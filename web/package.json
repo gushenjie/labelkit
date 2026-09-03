@@ -3,11 +3,12 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3003",
+    "dev": "node scripts/dev.mjs",
+    "dev:clean": "node scripts/dev.mjs --clean",
     "build": "next build",
     "test": "vitest run src",
     "test:e2e": "playwright test",
-    "start": "next start -p 3003",
+    "start": "node scripts/start-prod.mjs",
     "lint": "next lint"
   },
   "dependencies": {

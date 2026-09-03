@@ -1,0 +1,391 @@
+/*
+ * Product-wide visual cohesion layer.
+ *
+ * The feature pages were built at different moments and several of them
+ * introduced their own glass, glow and radius systems. This file establishes
+ * the final shared surface language without coupling feature components to one
+ * another: neutral canvas, solid work surfaces, restrained depth and teal only
+ * for action / progress / status.
+ */
+
+body {
+  background: var(--lk-canvas);
+}
+
+.app-shell {
+  --lk-shell-sidebar: 232px;
+  --lk-shell-header: 64px;
+  gap: 0;
+  background: var(--lk-canvas) !important;
+}
+
+.app-sidebar--workspace {
+  position: sticky;
+  top: 0;
+  width: 232px;
+  height: 100vh;
+  margin: 0;
+  border: 0;
+  border-right: 1px solid var(--lk-border);
+  border-radius: 0;
+  background: #fbfcfd;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.app-sidebar--workspace .app-sidebar__brand-row {
+  height: var(--lk-sidebar-brand-height);
+  flex: 0 0 var(--lk-sidebar-brand-height);
+  border-bottom: 1px solid var(--lk-border);
+  padding-inline: 18px;
+}
+
+.app-sidebar--workspace .brand-lockup {
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 19px;
+}
+
+.app-sidebar--workspace .brand-mark {
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
+  border-radius: var(--lk-radius-md);
+}
+
+.app-sidebar--workspace .brand-lockup__copy { gap: 3px; }
+.app-sidebar--workspace .app-sidebar__edition { color: var(--lk-muted); }
+.app-sidebar--workspace .app-sidebar__scroll { padding: 18px 10px 14px; }
+.app-sidebar--workspace .app-sidebar__section-label { margin: 2px 10px 8px; color: var(--lk-muted); }
+.app-sidebar--workspace .app-sidebar__section-label--admin { margin-top: 24px; }
+.app-sidebar--workspace .app-sidebar__nav { gap: 3px; }
+
+.app-sidebar--workspace .app-sidebar__nav-link {
+  min-height: 40px;
+  gap: 11px;
+  border-radius: var(--lk-radius-sm);
+  padding: 0 12px;
+  color: var(--lk-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.app-sidebar--workspace .app-sidebar__nav-link:hover { background: var(--lk-surface-soft); }
+.app-sidebar--workspace .app-sidebar__nav-link--active { background: #eaf6f3; color: var(--lk-brand-700); }
+.app-sidebar--workspace .app-sidebar__nav-link::before { left: -10px; width: 3px; }
+
+.app-sidebar--workspace .app-sidebar__footer {
+  min-height: 64px;
+  margin: auto 10px 12px;
+  border: 1px solid var(--lk-border);
+  border-radius: var(--lk-radius-md);
+  background: var(--lk-surface);
+  padding: 9px 10px;
+  box-shadow: none;
+}
+
+.app-sidebar--workspace .app-sidebar__status-dot {
+  width: 34px;
+  height: 34px;
+  flex-basis: 34px;
+  background: var(--lk-brand-700);
+}
+
+.app-sidebar--workspace .app-sidebar__logout {
+  border-color: var(--lk-border);
+  border-radius: var(--lk-radius-sm);
+  background: var(--lk-surface);
+}
+
+.app-commandbar,
+.app-shell:has(.audit-page) .app-commandbar,
+.app-shell:has(.project-overview) .app-commandbar {
+  position: sticky;
+  top: 0;
+  width: auto;
+  height: var(--lk-shell-header);
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--lk-border);
+  border-radius: 0;
+  background: rgb(255 255 255 / 96%);
+  padding: 0 24px;
+  box-shadow: none;
+  backdrop-filter: blur(10px);
+}
+
+.app-main,
+.app-shell:has(.team-page) .app-main,
+.app-shell:has(.audit-page) .app-main,
+.app-main:has(.settings-page--spatial),
+.app-shell:has(.project-overview) .app-main {
+  width: 100%;
+  max-width: 1720px;
+  min-height: calc(100vh - var(--lk-shell-header));
+  margin: 0 auto;
+  border-radius: 0;
+  background: transparent !important;
+  padding: 20px 24px 28px;
+  overflow: visible;
+  backdrop-filter: none;
+}
+
+/* Remove page-specific ambient decoration that competes with data. */
+.app-shell:has(.team-page) .app-main::before,
+.app-shell:has(.team-page) .app-main::after,
+.settings-page__glow,
+.audit-overview::after {
+  display: none;
+}
+
+/* Shared solid work surfaces across global pages. */
+.team-page .page-header,
+.team-overview,
+.team-directory,
+.team-panel,
+.audit-overview,
+.audit-overview__metrics,
+.audit-workspace,
+.audit-toolbar,
+.settings-page__rail,
+.settings-page__panel,
+.catalog-stats article,
+.catalog-toolbar,
+.model-card,
+.dataset-stats article,
+.dataset-toolbar,
+.dataset-card {
+  border-color: var(--lk-border) !important;
+  border-radius: var(--lk-radius-lg) !important;
+  background: var(--lk-surface) !important;
+  box-shadow: var(--lk-shadow-panel) !important;
+  backdrop-filter: none !important;
+}
+
+.team-page .page-header { min-height: 84px; padding: 14px 18px; }
+.team-page .page-header h1 { color: var(--lk-ink); font-size: 26px; }
+.team-page .page-header .btn-primary { min-height: 38px; border-radius: var(--lk-radius-sm); box-shadow: 0 2px 4px rgb(7 148 125 / 16%); }
+.team-overview { min-height: 124px; }
+.team-overview__lead { background: var(--lk-surface-soft); padding: 20px; }
+.team-overview__lead::after { display: none; }
+.team-overview__icon { border-color: var(--lk-border); border-radius: var(--lk-radius-md); background: var(--lk-brand-50); box-shadow: none; }
+.team-metric { padding: 14px 20px; }
+.team-metric strong { color: var(--lk-ink); font-size: 26px; }
+.team-directory { padding: 16px; }
+.team-result-count,
+.team-role { border-radius: var(--lk-radius-xs); }
+
+.audit-overview { min-height: 112px; margin-bottom: 12px; }
+.audit-overview__identity { padding: 18px 22px; }
+.audit-overview__mark { width: 46px; height: 52px; }
+.audit-overview__identity strong { color: var(--lk-ink); font-size: 28px; }
+.audit-overview__metrics { margin: 12px 12px 12px 0; box-shadow: none !important; }
+.audit-workspace__head { min-height: 56px; }
+.audit-toolbar { margin: 0 12px 12px; padding: 15px 14px 15px 13px; }
+
+.settings-page--spatial { max-width: 1320px; min-height: auto; }
+.settings-page__layout { grid-template-columns: 190px minmax(0, 1fr); gap: 14px; }
+.settings-page__rail { min-height: 460px; padding: 12px; }
+.settings-page__panel { overflow: hidden; }
+
+/* Project pages use one responsive canvas, not a fixed 1536×1024 artwork. */
+body:has(.project-overview) {
+  min-width: 320px;
+  background: var(--lk-canvas);
+}
+
+.app-shell:has(.project-overview) {
+  --lk-shell-sidebar: 232px;
+  --lk-shell-header: 64px;
+  min-height: 100vh;
+  grid-template-columns: var(--lk-shell-sidebar) minmax(0, 1fr);
+  grid-template-rows: var(--lk-shell-header) minmax(calc(100vh - var(--lk-shell-header)), auto);
+  gap: 0;
+  background: var(--lk-canvas);
+}
+
+.project-overview__hero,
+.project-control-panel,
+.project-overview__rail > .project-rail-section {
+  border-color: var(--lk-border);
+  border-radius: var(--lk-radius-lg);
+  background-color: var(--lk-surface);
+  box-shadow: var(--lk-shadow-panel);
+}
+
+.project-overview__hero { min-height: 286px; height: auto; }
+.project-overview__identity h1,
+.project-control-panel__head h2,
+.project-rail-section h2 { color: var(--lk-ink); }
+
+.project-overview-loading { position: relative; padding-top: 54px; }
+.project-overview-loading__intro {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.project-overview-loading__intro > span {
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--lk-brand-100);
+  border-top-color: var(--lk-brand-600);
+  border-radius: 50%;
+  animation: loading-spin .8s linear infinite;
+}
+.project-overview-loading__intro div { display: grid; gap: 2px; }
+.project-overview-loading__intro strong { color: var(--lk-text); font-size: 13px; }
+.project-overview-loading__intro small { color: var(--lk-muted); font-size: 11px; }
+
+/* Project workflow header: compact, solid and easy to scan. */
+.project-page-heading h1 { letter-spacing: -0.02em; }
+.project-context-bar {
+  border-color: var(--lk-border);
+  background: var(--lk-surface);
+}
+
+/* Authentication/loading should feel like the same product as the workspace. */
+.loading-screen {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--lk-canvas);
+}
+
+.loading-screen__content {
+  display: grid;
+  width: min(280px, calc(100vw - 48px));
+  justify-items: center;
+  gap: 14px;
+}
+
+.loading-screen__mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid var(--lk-border);
+  border-radius: var(--lk-radius-md);
+  background: var(--lk-surface);
+  color: var(--lk-brand-600);
+  box-shadow: var(--lk-shadow-panel);
+}
+
+.loading-screen__mark svg { width: 26px; height: 26px; }
+.loading-screen__message { color: var(--lk-text); font-size: 13px; font-weight: 650; }
+.loading-screen__track { width: 112px; height: 3px; overflow: hidden; border-radius: 2px; background: var(--lk-border); }
+.loading-screen__track i { display: block; width: 45%; height: 100%; border-radius: inherit; background: var(--lk-brand-500); animation: loading-track 1.1s var(--lk-ease) infinite alternate; }
+.review-loading-state { position: relative; min-height: calc(100vh - var(--lk-shell-header) - 40px); }
+
+@keyframes loading-track {
+  from { transform: translateX(-10%); }
+  to { transform: translateX(132%); }
+}
+
+@keyframes loading-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1260px) and (min-width: 761px) {
+  .app-shell,
+  .app-shell:has(.project-overview) {
+    --lk-shell-sidebar: 76px;
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .app-sidebar--workspace { top: 0; width: 76px; height: 100vh; margin: 0; }
+}
+
+@media (max-width: 760px) {
+  .app-shell,
+  .app-shell:has(.pm-page),
+  .app-shell:has(.dataset-center-page),
+  .app-shell:has(.model-catalog-page),
+  .app-shell:has(.project-overview),
+  .app-shell:has(.materials-page),
+  .app-shell:has(.label-page),
+  .app-shell:has(.review-page),
+  .app-shell:has(.train-page) {
+    --lk-shell-sidebar: 0px !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 0 !important;
+  }
+
+  .app-sidebar--workspace {
+    position: fixed;
+    width: min(286px, calc(100vw - 42px));
+    height: 100dvh;
+    border-radius: 0;
+  }
+
+  .app-commandbar,
+  .app-shell:has(.audit-page) .app-commandbar,
+  .app-shell:has(.project-overview) .app-commandbar,
+  .app-shell:has(.pm-page) .app-commandbar {
+    width: 100% !important;
+    grid-column: 1 !important;
+    padding: 0 14px;
+  }
+
+  .app-commandbar__create {
+    width: 40px;
+    min-width: 40px !important;
+    min-height: 40px;
+    padding: 0;
+    gap: 0 !important;
+    overflow: hidden;
+    font-size: 0 !important;
+  }
+
+  .app-commandbar__create svg { flex: 0 0 auto; }
+
+  .app-main,
+  .app-shell:has(.team-page) .app-main,
+  .app-shell:has(.audit-page) .app-main,
+  .app-main:has(.settings-page--spatial),
+  .app-shell:has(.project-overview) .app-main { padding: 16px 14px 24px; }
+
+  .app-shell:has(.pm-page) .app-main,
+  .app-shell:has(.dataset-center-page) .app-main,
+  .app-shell:has(.model-catalog-page) .app-main,
+  .app-shell:has(.project-overview) .app-main,
+  .app-shell:has(.materials-page) .app-main,
+  .app-shell:has(.label-page) .app-main,
+  .app-shell:has(.review-page) .app-main,
+  .app-shell:has(.train-page) .app-main {
+    width: 100% !important;
+    grid-column: 1 !important;
+  }
+
+  .settings-page__layout { grid-template-columns: 1fr; }
+  .settings-page__rail { position: static; min-height: 0; }
+
+  .project-page-heading {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .project-page-heading > div:first-child { padding-right: 0; }
+  .project-page-heading > div:last-child {
+    width: 100% !important;
+    flex: 0 0 auto;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .project-page-heading > div:last-child > div:first-child { align-self: flex-end; }
+  .project-context-bar { width: 100%; height: 60px; }
+  .project-context-bar > nav { min-width: 0; overflow-x: auto; }
+  .project-context-bar > nav > a { min-width: 82px; gap: 6px; padding-inline: 6px; }
+  .project-context-bar > nav > a > span:nth-of-type(1) { width: 26px; height: 26px; flex: 0 0 26px; font-size: 11px; }
+  .project-context-bar > nav > a small { display: none; }
+  .project-context-bar > nav > a strong { font-size: 11px; }
+  .project-context-bar > div:last-child { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-screen__track i,
+  .project-overview-loading__intro > span { animation: none; transform: none; }
+}

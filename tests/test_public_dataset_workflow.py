@@ -10,15 +10,66 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from server.core.public_dataset_adapters import license_fingerprint
-from server.core.public_dataset_types import PublicDatasetCandidateDTO
+from server.core.public_dataset_types import PublicDatasetCandidateDTO, SourceLabelDTO
 from server.core.public_dataset_workflow import (
+    approve_project_public_review_gate,
     evaluate_review,
     publish_import,
     resolve_suggested_mapping,
     suggest_class_mapping,
+    trim_oversized_review_sample,
+    _dedupe_cross_split_entries,
+    _sample_indices,
+    review_sample_target,
 )
 from server.db.models import Base, Category, Frame, FrameStatus, Project
 from server.repositories.public_dataset_repository import PublicDatasetRepository
+
+
+def test_sample_indices_caps_forced_duplicates():
+    entries = [
+        (index, (SourceLabelDTO(0, 0.5, 0.5, 0.2, 0.2),))
+        for index in range(3000)
+    ]
+    forced = set(range(2800))
+    selected = _sample_indices(entries, "import-forced-cap", forced=forced)
+    assert len(selected) == review_sample_target(3000)
+    assert len(selected) == 60
+    assert set(selected) <= forced
+
+
+def test_trim_oversized_review_sample_demotes_excess(tmp_path, monkeypatch):
+    session, repository, record = _prepared_import(tmp_path)
+    from server.core import public_dataset_workflow as workflow_module
+    from server.repositories import public_dataset_repository as repository_module
+
+    monkeypatch.setattr(workflow_module, "public_imports_dir", lambda _project: tmp_path / "imports")
+    monkeypatch.setattr(repository_module, "frames_dir", lambda _project, split: tmp_path / "frames" / split)
+    monkeypatch.setattr(
+        repository_module,
+        "label_path_for_frame",
+        lambda _project, frame: tmp_path / "labels" / frame.split / f"{frame.storage_key}.txt",
+    )
+    updated, created = publish_import(
+        repository,
+        record.id,
+        class_mapping={"5": 0},
+        warnings_confirmed=False,
+    )
+    session.commit()
+    # 模拟历史 bug：几乎全部帧被标成抽查
+    repository.mark_for_review(list(created))
+    repository.update(record.id, review_frame_ids=list(created))
+    session.commit()
+
+    trimmed = trim_oversized_review_sample(repository, record.id, maximum=2)
+    session.commit()
+    assert len(trimmed.review_frame_ids) == 2
+    needs_human = session.query(Frame).filter(Frame.status == FrameStatus.NEEDS_HUMAN).count()
+    assert needs_human == 2
+    auto_ok = session.query(Frame).filter(Frame.status == FrameStatus.AUTO_OK).count()
+    assert auto_ok == len(created) - 2
+
 
 
 def _session():
@@ -96,6 +147,19 @@ def _prepared_import(tmp_path: Path, count: int = 4):
     )
     session.commit()
     return session, repository, repository.get_by_id(record.id)
+
+
+def test_dedupe_cross_split_entries_prefers_train():
+    entries = [
+        {"image_checksum": "same", "split": "val", "image": "val.jpg"},
+        {"image_checksum": "same", "split": "train", "image": "train.jpg"},
+        {"image_checksum": "other", "split": "train", "image": "other.jpg"},
+    ]
+    deduped, removed = _dedupe_cross_split_entries(entries)
+    assert removed == 1
+    assert len(deduped) == 2
+    kept = next(item for item in deduped if item["image_checksum"] == "same")
+    assert kept["split"] == "train"
 
 
 def test_publish_maps_classes_and_creates_reproducible_review_sample(tmp_path, monkeypatch):
@@ -254,4 +318,86 @@ def test_publish_rejects_all_ignored_when_dataset_has_labels(tmp_path):
             warnings_confirmed=True,
         )
     assert session.query(Frame).count() == 0
+    session.close()
+
+
+def test_approve_project_public_review_gate_accepts_multiple_imports(tmp_path, monkeypatch):
+    session, repository, first = _prepared_import(tmp_path, count=3)
+    assert first is not None
+    from server.core import public_dataset_workflow as workflow_module
+    from server.repositories import public_dataset_repository as repository_module
+
+    monkeypatch.setattr(workflow_module, "public_imports_dir", lambda _project: tmp_path / "imports")
+    monkeypatch.setattr(repository_module, "frames_dir", lambda _project, split: tmp_path / "frames" / split)
+    monkeypatch.setattr(
+        repository_module,
+        "label_path_for_frame",
+        lambda _project, frame: tmp_path / "labels" / frame.split / f"{frame.storage_key}.txt",
+    )
+
+    publish_import(repository, first.id, class_mapping={"5": 0}, warnings_confirmed=False)
+    second = repository.create_import(
+        "project",
+        PublicDatasetCandidateDTO(
+            provider="kaggle",
+            source_ref="owner/other",
+            source_version="1",
+            source_url="https://www.kaggle.com/datasets/owner/other",
+            title="Other",
+            description="",
+            license_name="CC0-1.0",
+            license_url="https://www.kaggle.com/datasets/owner/other",
+            download_bytes=100,
+            image_count=2,
+            task_type="detect",
+        ),
+        imports_root=tmp_path / "imports",
+        license_confirmed=True,
+        task_type="detect",
+    )
+    second.staging_path.mkdir(parents=True)
+    entries = []
+    for index in range(2):
+        image = second.staging_path / f"other-{index}.jpg"
+        assert cv2.imwrite(str(image), np.full((30, 40, 3), index * 30, dtype=np.uint8))
+        entries.append(
+            {
+                "image": image.name,
+                "filename": image.name,
+                "split": "train",
+                "source_group_id": f"other-{index}",
+                "image_checksum": f"other-checksum-{index}",
+                "phash": f"other-phash-{index}",
+                "labels": [[5, 0.4, 0.4, 0.3, 0.3]],
+                "warnings": [],
+            }
+        )
+    (second.staging_path.parent / "import-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "yolo_detect",
+                "task_type": "detect",
+                "classes": [{"class_id": 5, "name": "source-target"}],
+                "entries": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+    repository.update(
+        second.id,
+        state="fetched",
+        detected_format="yolo_detect",
+        source_classes=[{"class_id": 5, "name": "source-target"}],
+        quality_report={"blocking": [], "warnings": [], "image_count": 2, "annotation_count": 2},
+    )
+    publish_import(repository, second.id, class_mapping={"5": 0}, warnings_confirmed=False)
+    session.commit()
+
+    for frame in session.query(Frame).all():
+        frame.status = FrameStatus.HUMAN_OK
+    session.commit()
+
+    passed = approve_project_public_review_gate(repository, "project")
+    assert len(passed) == 2
     session.close()

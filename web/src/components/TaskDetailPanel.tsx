@@ -20,6 +20,7 @@ const TASK_LABEL: Record<string, string> = {
   derive_classify: "生成分类集",
   public_fetch: "公开数据下载分析",
   public_import: "公开数据发布",
+  dataset_snapshot: "数据版本快照",
 };
 
 const STATUS_ZH: Record<string, string> = {

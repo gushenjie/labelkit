@@ -7,9 +7,19 @@ build/
 data/
 web/node_modules/
 web/.next/
+web/.next-e2e/
+web/.next-*/
 web/test-results/
 *.pyc
 .DS_Store
+
+# 本地运行产物与视觉验收资料
+artifacts/
+.codex-runtime/
+web/.codex-runtime/
+*.log
+tmp-*.json
+weights/
 
 # 本地密钥，切勿提交
 .env

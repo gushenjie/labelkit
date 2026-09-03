@@ -274,6 +274,8 @@ def run_train_task(
                 task.progress = min(int(epoch_match.group(1)), epochs)
                 task.heartbeat_at = datetime.now(timezone.utc)
                 db.commit()
+                if log:
+                    log(clean_line.strip())
     reader.join(timeout=1.0)
     returncode = proc.wait()
 

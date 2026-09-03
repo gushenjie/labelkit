@@ -7,7 +7,80 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from server.db.models import FrameStatus, ProjectTaskType, TaskStatus, TaskType
+from server.db.models import FrameStatus, ProjectTaskType, TaskStatus, TaskType, UserRole, UserStatus
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class AuthSessionOut(BaseModel):
+    authenticated: bool = True
+    id: str | None = None
+    username: str
+    display_name: str | None = None
+    role: str | None = None
+    expires_at: int
+    token: str | None = None
+
+
+class UserOut(BaseModel):
+    id: str
+    username: str
+    display_name: str
+    role: UserRole
+    status: UserStatus
+    created_at: datetime
+    last_login_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=6, max_length=256)
+    role: UserRole = UserRole.VIEWER
+
+
+class UserUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    password: str | None = Field(default=None, min_length=6, max_length=256)
+    role: UserRole | None = None
+    status: UserStatus | None = None
+
+
+class UserListSummaryOut(BaseModel):
+    total: int = 0
+    active: int = 0
+    admins: int = 0
+
+
+class UserListOut(BaseModel):
+    summary: UserListSummaryOut
+    items: list[UserOut] = Field(default_factory=list)
+
+
+class AuditLogOut(BaseModel):
+    id: str
+    created_at: datetime
+    actor: str
+    action: str
+    resource_type: str
+    resource_id: str | None = None
+    project_id: str | None = None
+    project_name: str | None = None
+    summary: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    ip: str | None = None
+
+
+class AuditLogListOut(BaseModel):
+    items: list[AuditLogOut]
+    total: int
+    page: int
+    page_size: int
 
 
 class CategoryCreate(BaseModel):
@@ -54,15 +127,47 @@ class ProjectOut(BaseModel):
     frame_count: int = 0
     video_count: int = 0
     disk_usage_mb: float = 0.0
+    has_custom_cover: bool = False
 
     model_config = {"from_attributes": True}
 
 
+class ProjectDiskUsageOut(BaseModel):
+    disk_usage_mb: float = 0.0
+
+
+class ProjectCoverOut(BaseModel):
+    cover_url: str
+    has_custom_cover: bool = True
+
+
 class ProjectOverviewOut(BaseModel):
     project: ProjectOut
+    created_by: str = "工作区管理员"
     stats: dict[str, int] = Field(default_factory=dict)
     preview_frame_id: str | None = None
     model_count: int = 0
+    latest_model_version: int | None = None
+    task_count: int = 0
+    completed_task_count: int = 0
+    total_video_hours: float = 0.0
+    active_annotators: int = 0
+
+
+class ProjectDashboardSummaryOut(BaseModel):
+    total_projects: int = 0
+    total_data_items: int = 0
+    active_annotators: int = 0
+    total_video_hours: float = 0.0
+    projects_last_30_days: int = 0
+    data_items_last_30_days: int = 0
+    completed_tasks_last_30_days: int = 0
+    video_hours_last_30_days: float = 0.0
+
+
+class ProjectDashboardOut(BaseModel):
+    summary: ProjectDashboardSummaryOut
+    projects: list[ProjectOverviewOut] = Field(default_factory=list)
 
 
 class VideoOut(BaseModel):
@@ -73,6 +178,7 @@ class VideoOut(BaseModel):
     frame_count: int | None
     split: str
     extracted_count: int = 0
+    file_bytes: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -137,6 +243,8 @@ class TaskOut(BaseModel):
 
 class GlobalTaskOut(TaskOut):
     project_name: str
+    assignee: str
+    priority: str
 
 
 class FrameFeedback(BaseModel):
@@ -209,6 +317,74 @@ class DatasetVersionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DatasetVersionSummaryOut(BaseModel):
+    id: str
+    project_id: str
+    project_name: str
+    version: int
+    status: str
+    task_type: str
+    checksum: str
+    sample_count: int
+    train_count: int
+    val_count: int
+    test_count: int
+    class_count: int
+    source_group_count: int
+    linked_model_count: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DatasetCatalogOut(BaseModel):
+    total_versions: int
+    project_count: int
+    snapshot_sample_count: int
+    linked_model_count: int
+    total: int
+    items: list[DatasetVersionSummaryOut]
+
+    model_config = {"from_attributes": True}
+
+
+class DatasetModelRefOut(BaseModel):
+    id: str
+    name: str
+    version: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DatasetTaskRefOut(BaseModel):
+    id: str
+    task_type: str
+    status: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DatasetSourceRefOut(BaseModel):
+    provider: str
+    title: str
+    source_url: str
+
+    model_config = {"from_attributes": True}
+
+
+class DatasetVersionDetailOut(BaseModel):
+    summary: DatasetVersionSummaryOut
+    categories: list[dict[str, Any]]
+    status_counts: dict[str, int]
+    linked_models: list[DatasetModelRefOut]
+    linked_tasks: list[DatasetTaskRefOut]
+    trigger_sources: list[DatasetSourceRefOut]
+
+    model_config = {"from_attributes": True}
+
+
 class FramePage(BaseModel):
     items: list[FrameOut]
     next_cursor: str | None
@@ -241,11 +417,18 @@ class PublicDatasetCandidateOut(BaseModel):
     stars: int | None = None
     downloads: int | None = None
     views: int | None = None
+    thumbnail: str | None = None
+    annotation_thumbnail: str | None = None
 
 
 class PublicDatasetDiscoverOut(BaseModel):
     candidates: list[PublicDatasetCandidateOut]
     errors: dict[str, str] = Field(default_factory=dict)
+
+
+class RoboflowPreviewOut(BaseModel):
+    thumbnail: str | None = None
+    annotation_thumbnail: str | None = None
 
 
 class PublicDatasetFetchRequest(BaseModel):

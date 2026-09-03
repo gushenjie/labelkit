@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from server.config import settings
 from server.db.database import project_dir
 
 
@@ -64,5 +65,12 @@ def exports_dir(project_id: str) -> Path:
 
 def cache_dir(project_id: str) -> Path:
     d = project_dir(project_id) / "cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def public_dataset_cache_dir() -> Path:
+    """跨项目共享的公开数据集下载缓存（按数据源版本键控）。"""
+    d = settings.data_dir / "public_dataset_cache"
     d.mkdir(parents=True, exist_ok=True)
     return d

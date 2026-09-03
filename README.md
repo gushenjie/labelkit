@@ -1,6 +1,6 @@
-# LabelKit
+# 安工视炼
 
-LLM 驱动的 YOLO 标注训练平台：**建项目 → 传视频 → 抽帧去重 → LLM 标注 → 人工复查 → 训练 → 模型反哺**。
+视觉智能工作台：**建项目 → 传视频/图片 → 抽帧去重 → AI 标注 → 人工复查 → 训练 → 模型反哺**。
 
 > 以项目为单位隔离资源。支持目标检测与图像分类两种任务类型。
 
@@ -13,16 +13,58 @@ Next.js 前端 (:3003)  →  FastAPI 后端 (:8010)  →  SQLite + data/projects
 - **后端**：`server/` — FastAPI + SQLAlchemy + 后台任务
 - **前端**：`web/` — Next.js App Router + Tailwind
 - **数据**：`data/labelkit.db` + `data/projects/<id>/`（gitignored）
-- **旧 CLI**：`labelkit/` 保留，与新平台并存
+- **旧 CLI**：`labelkit/` 保留，与视炼 Web 平台并存
 - **UI 规范**：[`docs/UI设计规范.md`](docs/UI设计规范.md) — 全页面视觉 Token、组件、交互与响应式基线
 
+## 统一配置
+
+品牌名、端口等默认值集中在 [`config/app.json`](config/app.json)，前后端与启动脚本均从此读取。
+
+```json
+{
+  "brand": { "fullName": "安工视炼", "version": "0.2.0", ... },
+  "runtime": { "host": "0.0.0.0", "apiPort": 8010, "webPort": 3003 }
+}
+```
+
+- `host: "0.0.0.0"`：前后端监听全网卡，同一局域网可用 `http://<本机IP>:3003` 访问。
+- 仅本机使用时改回 `"127.0.0.1"` 更安全。
+- 修改产品名或端口时，**只需改这一处**（环境变量 `API_PORT` / `NEXT_PUBLIC_API_URL` 仍可覆盖运行时行为）。
+
+### 局域网演示
+
+1. 确认 `config/app.json` 中 `runtime.host` 为 `0.0.0.0`，重启前后端。
+2. 本机访问：`http://127.0.0.1:3003`
+3. 同事访问：`http://<你的局域网IP>:3003`（启动脚本会尽量打印该地址；也可用 `ipconfig` 查看 IPv4）
+4. 若打不开：在 Windows 防火墙中放行入站端口 `3003`、`8010`，并确认对方与你在同一网段（外网需内网穿透，本配置不覆盖公网）。
+5. 演示结束后建议改回 `127.0.0.1`，默认账号为 `admin` / `admin`。
+
 ## 快速启动
+
+### Windows（推荐）
+
+```powershell
+# 一键启动前后端（两个终端窗口）
+.\scripts\start-dev.ps1
+
+# 若出现 Cannot find module './xxx.js' 等前端缓存错误
+.\scripts\start-dev.ps1 -Clean
+```
+
+或分别启动：
+
+```powershell
+.\scripts\start-server.ps1          # 后端 http://127.0.0.1:8010（默认监听 0.0.0.0）
+.\scripts\start-web.ps1             # 前端 http://127.0.0.1:3003（默认监听 0.0.0.0）
+.\scripts\start-web.ps1 -Clean      # 清理 .next 后启动前端
+```
+
+### macOS / Linux
 
 ```bash
 # 1. 后端
 cd labelkit
 source .venv/bin/activate
-# Windows PowerShell 使用：.\.venv\Scripts\Activate.ps1
 pip install -r server/requirements.txt
 python -m server.run --reload
 
@@ -34,9 +76,21 @@ cd web && npm install && npm run dev
 
 ```bash
 chmod +x scripts/start-server.sh scripts/start-web.sh
-./scripts/start-server.sh   # http://127.0.0.1:8010
-./scripts/start-web.sh      # http://127.0.0.1:3003
+./scripts/start-server.sh   # http://127.0.0.1:8010（默认监听 0.0.0.0）
+./scripts/start-web.sh      # http://127.0.0.1:3003（默认监听 0.0.0.0）
+CLEAN=1 ./scripts/start-web.sh   # 清理 .next 后启动
 ```
+
+### 开发常见问题
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `Cannot find module './611.js'` | Next 开发缓存与热更新不同步 | `npm run dev:clean` 或 `.\scripts\start-web.ps1 -Clean` |
+| 改代码不生效 / 页面异常 | 多个 dev 进程占用 3003 | 用脚本启动（会自动释放端口） |
+| 登录后一直 loading | 旧 token + 前端缓存 | 清 localStorage 的 `labelkit.auth.token`，再 `-Clean` 重启 |
+| 同事用 IP 打不开 | 防火墙未放行 / 不在同一网段 | 放行 3003、8010；确认局域网；外网需穿透 |
+
+**注意**：不要同时运行 `npm run dev` 和 `npm run start`（生产模式），切换前应先停掉旧进程。
 
 首次使用请在 **设置** 页配置 DashScope API Key。
 

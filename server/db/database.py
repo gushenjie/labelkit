@@ -18,7 +18,7 @@ def _sqlite_url() -> str:
 
 engine = create_engine(
     _sqlite_url(),
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False, "timeout": 30},
     echo=False,
 )
 
@@ -27,6 +27,9 @@ engine = create_engine(
 def _set_sqlite_pragma(dbapi_conn, _):
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.close()
 
 
@@ -38,6 +41,10 @@ def init_db() -> None:
     from server.db.migrate import run_database_migrations
 
     run_database_migrations(engine)
+    from server.core.user_bootstrap import bootstrap_workspace_users
+
+    with SessionLocal() as db:
+        bootstrap_workspace_users(db)
 
 
 def get_db() -> Generator[Session, None, None]:

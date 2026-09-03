@@ -27,6 +27,8 @@ class PublicDatasetCandidateDTO:
     stars: int | None = None
     downloads: int | None = None
     views: int | None = None
+    thumbnail: str | None = None
+    annotation_thumbnail: str | None = None
 
 
 @dataclass(frozen=True)

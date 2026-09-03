@@ -1,3 +1,5 @@
+import { Icon } from "@/components/Icon";
+
 type Props = {
   progress: number;
   total: number;
@@ -21,7 +23,8 @@ export function TaskProgress({ progress, total, onStop, stopping, label = "进�
       </div>
       {onStop && (
         <button type="button" className="task-progress__stop" disabled={stopping} onClick={onStop}>
-          {stopping ? "停止中…" : "停止"}
+          <Icon name="x" size={14} />
+          {stopping ? "停止中…" : "停止训练"}
         </button>
       )}
     </div>

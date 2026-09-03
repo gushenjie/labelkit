@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     JSON,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -44,6 +45,7 @@ class TaskType(str, enum.Enum):
     DERIVE_CLASSIFY = "derive_classify"
     PUBLIC_FETCH = "public_fetch"
     PUBLIC_IMPORT = "public_import"
+    DATASET_SNAPSHOT = "dataset_snapshot"
 
 
 class TaskStatus(str, enum.Enum):
@@ -72,6 +74,31 @@ class ProjectTaskType(str, enum.Enum):
     CLASSIFY = "classify"
 
 
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    ANNOTATOR = "annotator"
+    REVIEWER = "reviewer"
+    VIEWER = "viewer"
+
+
+class UserStatus(str, enum.Enum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.VIEWER)
+    status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.ACTIVE)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -83,6 +110,7 @@ class Project(Base):
     )
     label_prompt: Mapped[str] = mapped_column(Text, default="")
     review_prompt: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(100), default="工作区管理员")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
@@ -125,6 +153,7 @@ class Video(Base):
     duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     fps: Mapped[float | None] = mapped_column(Float, nullable=True)
     frame_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     split: Mapped[str] = mapped_column(String(20), default="train")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -223,6 +252,9 @@ class ModelVersion(Base):
 
 class DatasetVersion(Base):
     __tablename__ = "dataset_versions"
+    __table_args__ = (
+        UniqueConstraint("project_id", "version", name="uq_dataset_versions_project_version"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
@@ -285,3 +317,18 @@ class ProjectExecutionLease(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
     task_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False, default="system")
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)

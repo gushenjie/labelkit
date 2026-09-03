@@ -68,3 +68,20 @@ def open_video_capture(video_path: Path | str) -> cv2.VideoCapture:
         Path(tmp_path).unlink(missing_ok=True)
         raise RuntimeError(f"无法打开视频: {path}")
     return cap
+
+
+def extract_video_thumbnail(video_path: Path | str, thumbnail_path: Path | str) -> bool:
+    """从视频约 1 秒处提取首张可读取帧，作为视频列表封面。"""
+    cap = open_video_capture(video_path)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        preferred_index = max(0, int(fps)) if fps > 0 else 0
+        for frame_index in (preferred_index, 0):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            readable, frame = cap.read()
+            if readable and frame is not None and frame.size > 0:
+                write_image_bgr(thumbnail_path, frame, quality=86)
+                return True
+        return False
+    finally:
+        cap.release()

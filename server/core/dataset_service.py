@@ -9,8 +9,10 @@ import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from server.core.paths import dataset_versions_dir
@@ -19,7 +21,11 @@ from server.db.models import (
     DatasetVersion,
     Frame,
     FrameStatus,
+    ModelVersion,
+    Project,
     ProjectTaskType,
+    PublicDatasetImport,
+    Task,
 )
 
 TRAINABLE = {
@@ -51,6 +57,68 @@ class DatasetVersionDTO:
     categories: tuple[dict, ...]
     manifest: dict
     snapshot_path: Path
+
+
+@dataclass(frozen=True)
+class DatasetModelRefDTO:
+    id: str
+    name: str
+    version: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class DatasetTaskRefDTO:
+    id: str
+    task_type: str
+    status: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class DatasetSourceRefDTO:
+    provider: str
+    title: str
+    source_url: str
+
+
+@dataclass(frozen=True)
+class DatasetVersionSummaryDTO:
+    id: str
+    project_id: str
+    project_name: str
+    version: int
+    status: str
+    task_type: str
+    checksum: str
+    sample_count: int
+    train_count: int
+    val_count: int
+    test_count: int
+    class_count: int
+    source_group_count: int
+    linked_model_count: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class DatasetCatalogDTO:
+    total_versions: int
+    project_count: int
+    snapshot_sample_count: int
+    linked_model_count: int
+    total: int
+    items: tuple[DatasetVersionSummaryDTO, ...]
+
+
+@dataclass(frozen=True)
+class DatasetVersionDetailDTO:
+    summary: DatasetVersionSummaryDTO
+    categories: tuple[dict, ...]
+    status_counts: dict[str, int]
+    linked_models: tuple[DatasetModelRefDTO, ...]
+    linked_tasks: tuple[DatasetTaskRefDTO, ...]
+    trigger_sources: tuple[DatasetSourceRefDTO, ...]
 
 
 class DatasetVersionRepository:
@@ -117,7 +185,10 @@ class DatasetVersionRepository:
         )
 
     def next_version(self, project_id: str) -> int:
-        return self._db.query(DatasetVersion).filter(DatasetVersion.project_id == project_id).count() + 1
+        latest = self._db.query(func.max(DatasetVersion.version)).filter(
+            DatasetVersion.project_id == project_id
+        ).scalar()
+        return int(latest or 0) + 1
 
     def save(self, version: DatasetVersionDTO) -> None:
         self._db.add(
@@ -146,6 +217,70 @@ class DatasetVersionRepository:
             categories=tuple(model.categories),
             manifest=model.manifest,
             snapshot_path=Path(model.snapshot_path),
+        )
+
+    def list_records(self) -> list[tuple[DatasetVersion, str]]:
+        return (
+            self._db.query(DatasetVersion, Project.name)
+            .join(Project, Project.id == DatasetVersion.project_id)
+            .order_by(DatasetVersion.created_at.desc())
+            .all()
+        )
+
+    def get_record(self, project_id: str, version_id: str) -> tuple[DatasetVersion, str] | None:
+        return (
+            self._db.query(DatasetVersion, Project.name)
+            .join(Project, Project.id == DatasetVersion.project_id)
+            .filter(DatasetVersion.project_id == project_id, DatasetVersion.id == version_id)
+            .first()
+        )
+
+    def model_counts(self) -> dict[str, int]:
+        return {
+            version_id: int(count)
+            for version_id, count in self._db.query(
+                ModelVersion.dataset_version_id,
+                func.count(ModelVersion.id),
+            )
+            .filter(ModelVersion.dataset_version_id.is_not(None))
+            .group_by(ModelVersion.dataset_version_id)
+            .all()
+        }
+
+    def linked_models(self, version_id: str) -> tuple[DatasetModelRefDTO, ...]:
+        models = (
+            self._db.query(ModelVersion)
+            .filter(ModelVersion.dataset_version_id == version_id)
+            .order_by(ModelVersion.created_at.desc())
+            .all()
+        )
+        return tuple(
+            DatasetModelRefDTO(model.id, model.name, model.version, model.created_at)
+            for model in models
+        )
+
+    def linked_tasks(self, project_id: str, version_id: str) -> tuple[DatasetTaskRefDTO, ...]:
+        tasks = self._db.query(Task).filter(Task.project_id == project_id).order_by(Task.created_at.desc()).all()
+        return tuple(
+            DatasetTaskRefDTO(task.id, task.task_type.value, task.status.value, task.created_at)
+            for task in tasks
+            if str((task.result or {}).get("dataset_version_id") or "") == version_id
+            or str((task.params or {}).get("dataset_version_id") or "") == version_id
+        )
+
+    def trigger_sources(self, project_id: str, version_id: str) -> tuple[DatasetSourceRefDTO, ...]:
+        imports = (
+            self._db.query(PublicDatasetImport)
+            .filter(
+                PublicDatasetImport.project_id == project_id,
+                PublicDatasetImport.dataset_version_id == version_id,
+            )
+            .order_by(PublicDatasetImport.created_at.desc())
+            .all()
+        )
+        return tuple(
+            DatasetSourceRefDTO(item.provider, item.title or item.source_ref, item.source_url)
+            for item in imports
         )
 
 
@@ -345,7 +480,12 @@ class DatasetService:
             manifest=manifest,
             snapshot_path=root,
         )
-        self._repository.save(version)
+        try:
+            self._repository.save(version)
+        except Exception:
+            if root.exists():
+                shutil.rmtree(root)
+            raise
         return version
 
     def get_version(self, project_id: str, version_id: str) -> DatasetVersionDTO:
@@ -353,6 +493,98 @@ class DatasetService:
         if not version:
             raise RuntimeError(f"Dataset version not found: {version_id}")
         return version
+
+    @staticmethod
+    def _summary(
+        model: DatasetVersion,
+        project_name: str,
+        linked_model_count: int,
+    ) -> DatasetVersionSummaryDTO:
+        manifest = model.manifest or {}
+        frames = manifest.get("frames") or []
+        split_counts = {"train": 0, "val": 0, "test": 0}
+        source_groups: set[str] = set()
+        for entry in frames:
+            split = str(entry.get("split") or "")
+            if split in split_counts:
+                split_counts[split] += 1
+            source_group = str(entry.get("source_group_id") or "")
+            if source_group:
+                source_groups.add(source_group)
+        return DatasetVersionSummaryDTO(
+            id=model.id,
+            project_id=model.project_id,
+            project_name=project_name,
+            version=model.version,
+            status=model.status,
+            task_type=str(manifest.get("task_type") or "detect"),
+            checksum=model.checksum,
+            sample_count=len(frames),
+            train_count=split_counts["train"],
+            val_count=split_counts["val"],
+            test_count=split_counts["test"],
+            class_count=len(model.categories or []),
+            source_group_count=len(source_groups),
+            linked_model_count=linked_model_count,
+            created_at=model.created_at,
+        )
+
+    def catalog(
+        self,
+        *,
+        project_id: str = "",
+        query: str = "",
+        task_type: str = "",
+        offset: int = 0,
+        limit: int = 100,
+    ) -> DatasetCatalogDTO:
+        model_counts = self._repository.model_counts()
+        summaries = [
+            self._summary(model, project_name, model_counts.get(model.id, 0))
+            for model, project_name in self._repository.list_records()
+        ]
+        normalized_query = query.strip().lower()
+        filtered = [
+            item
+            for item in summaries
+            if (not project_id or item.project_id == project_id)
+            and (not task_type or item.task_type == task_type)
+            and (
+                not normalized_query
+                or normalized_query in item.project_name.lower()
+                or normalized_query in f"v{item.version}"
+                or normalized_query in item.id.lower()
+            )
+        ]
+        page = tuple(filtered[max(0, offset):max(0, offset) + max(1, min(limit, 200))])
+        return DatasetCatalogDTO(
+            total_versions=len(summaries),
+            project_count=len({item.project_id for item in summaries}),
+            snapshot_sample_count=sum(item.sample_count for item in summaries),
+            linked_model_count=sum(item.linked_model_count for item in summaries),
+            total=len(filtered),
+            items=page,
+        )
+
+    def detail(self, project_id: str, version_id: str) -> DatasetVersionDetailDTO:
+        record = self._repository.get_record(project_id, version_id)
+        if not record:
+            raise RuntimeError(f"Dataset version not found: {version_id}")
+        model, project_name = record
+        linked_models = self._repository.linked_models(version_id)
+        summary = self._summary(model, project_name, len(linked_models))
+        status_counts: dict[str, int] = {}
+        for entry in (model.manifest or {}).get("frames") or []:
+            status = str(entry.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        return DatasetVersionDetailDTO(
+            summary=summary,
+            categories=tuple(model.categories or []),
+            status_counts=status_counts,
+            linked_models=linked_models,
+            linked_tasks=self._repository.linked_tasks(project_id, version_id),
+            trigger_sources=self._repository.trigger_sources(project_id, version_id),
+        )
 
     def materialize(
         self,
@@ -413,3 +645,47 @@ class DatasetService:
                 encoding="utf-8",
             )
         return stats
+
+
+def run_dataset_snapshot_task(db: Session, task: Task) -> None:
+    project = db.get(Project, task.project_id)
+    if not project:
+        raise RuntimeError("Project not found")
+    service = DatasetService(DatasetVersionRepository(db))
+    version: DatasetVersionDTO | None = None
+    try:
+        version = service.create_version(
+            project.id,
+            project.task_type,
+            val_ratio=float((task.params or {}).get("val_ratio", 0.2)),
+        )
+        frame_count = len(version.manifest.get("frames") or [])
+        task.progress = frame_count
+        task.total = frame_count
+        task.result = {"dataset_version_id": version.id, "version": version.version}
+        db.commit()
+    except Exception:
+        db.rollback()
+        if version and version.snapshot_path.exists():
+            shutil.rmtree(version.snapshot_path)
+        raise
+
+
+def reconcile_dataset_version_files(db: Session) -> int:
+    """Remove internal snapshot directories that have no database record."""
+    referenced = {
+        Path(path).resolve(strict=False)
+        for (path,) in db.query(DatasetVersion.snapshot_path).all()
+    }
+    removed = 0
+    for (project_id,) in db.query(Project.id).all():
+        root = dataset_versions_dir(project_id).resolve(strict=False)
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            resolved = child.resolve(strict=False)
+            if not child.is_dir() or resolved.parent != root or resolved in referenced:
+                continue
+            shutil.rmtree(resolved)
+            removed += 1
+    return removed

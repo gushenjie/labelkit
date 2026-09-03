@@ -16,6 +16,7 @@ from server.api.schemas import (
     PublicDatasetFetchRequest,
     PublicDatasetImportOut,
     PublicDatasetPublishRequest,
+    RoboflowPreviewOut,
     TaskOut,
 )
 from server.config import settings
@@ -25,6 +26,7 @@ from server.core.public_dataset_adapters import (
     discover_kaggle,
     discover_roboflow,
     expand_search_query,
+    fetch_roboflow_preview,
     inspect_kaggle_ref,
     inspect_roboflow_url,
     license_fingerprint,
@@ -33,9 +35,11 @@ from server.core.public_dataset_adapters import (
 )
 from server.core.public_dataset_types import PublicDatasetCandidateDTO, PublicImportDTO
 from server.core.public_dataset_workflow import (
-    evaluate_review,
+    PublicReviewGateError,
+    approve_project_public_review_gate,
     prepare_review_after_labeling,
     resolve_suggested_mapping,
+    trim_oversized_review_sample,
 )
 from server.db.database import get_db
 from server.db.models import ProjectExecutionLease, ProjectTaskType, Task, TaskType
@@ -114,9 +118,56 @@ def _enqueue(db: Session, project_id: str, task_type: TaskType, params: dict) ->
     return task
 
 
+def _start_training_after_review_gate(
+    db: Session,
+    repository: PublicDatasetRepository,
+    project_id: str,
+    review_records: tuple[PublicImportDTO, ...],
+) -> Task:
+    context = repository.project_context(project_id)
+    if not context:
+        raise RuntimeError("Project not found")
+    version = None
+    task = _enqueue(db, project_id, TaskType.TRAIN, {})
+    try:
+        version = DatasetService(DatasetVersionRepository(db)).create_version(
+            project_id,
+            ProjectTaskType(context.task_type),
+        )
+        training_params: dict = {}
+        for record in review_records:
+            params = dict(record.workflow_metadata.get("training_params") or {})
+            if params:
+                training_params = params
+                break
+        task.params = {**training_params, "dataset_version_id": version.id}
+        for record in review_records:
+            repository.update(
+                record.id,
+                state="training",
+                dataset_version_id=version.id,
+                train_task_id=task.id,
+            )
+    except Exception as error:
+        db.rollback()
+        if version and version.snapshot_path.exists():
+            shutil.rmtree(version.snapshot_path)
+        raise error
+    return task
+
+
 @router.get("/api/public-datasets/providers")
 def get_provider_status():
     return provider_status()
+
+
+@router.get("/api/public-datasets/roboflow-preview", response_model=RoboflowPreviewOut)
+def get_roboflow_preview(source_ref: str, version: str):
+    try:
+        thumbnail, annotation_thumbnail = fetch_roboflow_preview(source_ref.strip(), version.strip())
+    except RuntimeError as error:
+        raise HTTPException(400, str(error)) from error
+    return RoboflowPreviewOut(thumbnail=thumbnail, annotation_thumbnail=annotation_thumbnail)
 
 
 @router.post(
@@ -143,14 +194,21 @@ def discover_public_datasets(
         except RuntimeError as error:
             errors["kaggle"] = str(error)
         try:
-            candidates.extend(
-                discover_roboflow(expanded, task_type=context.task_type)
+            roboflow_candidates, filtered_train_only = discover_roboflow(
+                expanded, task_type=context.task_type
             )
+            candidates.extend(roboflow_candidates)
+            if filtered_train_only > 0:
+                errors["roboflow_filtered"] = (
+                    f"已过滤 {filtered_train_only} 个仅有训练集的数据集（不适合检测训练）"
+                )
         except RuntimeError as error:
             errors["roboflow"] = str(error)
     if body.roboflow_url.strip():
         try:
-            candidates.append(inspect_roboflow_url(body.roboflow_url.strip()))
+            candidates.append(
+                inspect_roboflow_url(body.roboflow_url.strip(), task_type=context.task_type)
+            )
         except RuntimeError as error:
             errors["roboflow"] = str(error)
     if not query and not body.roboflow_url.strip():
@@ -186,7 +244,7 @@ def fetch_public_dataset(
         if body.provider == "kaggle":
             candidate = inspect_kaggle_ref(body.source_ref)
         elif body.provider == "roboflow":
-            candidate = inspect_roboflow_url(body.source_url)
+            candidate = inspect_roboflow_url(body.source_url, task_type=context.task_type)
         else:
             raise RuntimeError(f"不支持的公开数据源: {body.provider}")
     except RuntimeError as error:
@@ -202,6 +260,9 @@ def fetch_public_dataset(
         raise HTTPException(409, "数据集版本或许可证已变化，请重新检索并确认")
     if candidate.task_type and candidate.task_type != context.task_type:
         raise HTTPException(400, "公开数据集任务类型与项目不匹配")
+    existing = repository.find_by_fingerprint(project_id, fresh_fingerprint)
+    if existing:
+        raise HTTPException(409, f"数据集「{existing.title}」已在项目中，请直接在检索结果中查看状态")
     record = repository.create_import(
         project_id,
         candidate,
@@ -224,7 +285,18 @@ def list_public_dataset_imports(project_id: str, db: Session = Depends(get_db)):
     repository = PublicDatasetRepository(db)
     if not repository.project_context(project_id):
         raise HTTPException(404, "Project not found")
-    return [_import_out(repository, record) for record in repository.list_for_project(project_id)]
+    records = []
+    trimmed = False
+    for record in repository.list_for_project(project_id):
+        before = len(record.review_frame_ids)
+        if record.state in {"review", "review_expanded"}:
+            record = trim_oversized_review_sample(repository, record.id)
+            if len(record.review_frame_ids) != before:
+                trimmed = True
+        records.append(record)
+    if trimmed:
+        db.commit()
+    return [_import_out(repository, record) for record in records]
 
 
 @router.get(
@@ -289,6 +361,33 @@ def publish_public_dataset(
 
 
 @router.post(
+    "/api/projects/{project_id}/public-datasets/approve-and-train",
+    response_model=TaskOut,
+)
+def approve_project_public_datasets_and_train(project_id: str, db: Session = Depends(get_db)):
+    repository = PublicDatasetRepository(db)
+    if not repository.project_context(project_id):
+        raise HTTPException(404, "Project not found")
+    try:
+        review_records = approve_project_public_review_gate(repository, project_id)
+    except PublicReviewGateError as error:
+        if error.code == "expanded":
+            db.commit()
+        raise HTTPException(409, str(error)) from error
+    except RuntimeError as error:
+        db.rollback()
+        raise HTTPException(400, str(error)) from error
+    try:
+        task = _start_training_after_review_gate(db, repository, project_id, review_records)
+    except Exception as error:
+        raise HTTPException(400, str(error)) from error
+    db.commit()
+    TaskWorker.start(task.id)
+    db.refresh(task)
+    return TaskOut.model_validate(task)
+
+
+@router.post(
     "/api/projects/{project_id}/public-dataset-imports/{import_id}/approve-and-train",
     response_model=TaskOut,
 )
@@ -309,45 +408,7 @@ def approve_public_dataset_and_train(
             db.rollback()
             raise HTTPException(400, str(error)) from error
         raise HTTPException(409, f"已生成 {len(prepared.review_frame_ids)} 张风险复查样本，请完成复查后再次启动训练")
-    try:
-        outcome, affected = evaluate_review(repository, import_id)
-    except RuntimeError as error:
-        db.rollback()
-        raise HTTPException(400, str(error)) from error
-    if outcome == "expanded":
-        db.commit()
-        raise HTTPException(409, f"抽检发现修改，已扩大复查范围 {len(affected)} 张")
-    if outcome == "full_review_required":
-        db.commit()
-        raise HTTPException(409, "抽检继续发现错误，必须全量复查或放弃数据集")
-
-    context = repository.project_context(project_id)
-    assert context is not None
-    version = None
-    try:
-        task = _enqueue(db, project_id, TaskType.TRAIN, {})
-        version = DatasetService(DatasetVersionRepository(db)).create_version(
-            project_id,
-            ProjectTaskType(context.task_type),
-        )
-        params = dict(record.workflow_metadata.get("training_params") or {})
-        params["dataset_version_id"] = version.id
-        task.params = params
-        repository.update(
-            import_id,
-            state="training",
-            dataset_version_id=version.id,
-            train_task_id=task.id,
-        )
-    except Exception as error:
-        db.rollback()
-        if version and version.snapshot_path.exists():
-            shutil.rmtree(version.snapshot_path)
-        raise HTTPException(400, str(error)) from error
-    db.commit()
-    TaskWorker.start(task.id)
-    db.refresh(task)
-    return TaskOut.model_validate(task)
+    return approve_project_public_datasets_and_train(project_id, db)
 
 
 @router.post("/api/projects/{project_id}/public-dataset-imports/{import_id}/discard")

@@ -34,19 +34,31 @@ _load_secret_env(REPO_ROOT / "secrets" / "roboflow.env")
 _load_secret_env(REPO_ROOT / ".env")
 
 
+from server.app_config import brand_config, runtime_config
+
+_brand = brand_config()
+_runtime = runtime_config()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=("secrets/dashscope.env", ".env"),
         extra="ignore",
     )
 
-    app_name: str = "LabelKit"
+    app_name: str = _brand["fullName"]
     data_dir: Path = Path(__file__).resolve().parent.parent / "data"
     database_url: str = "sqlite:///./data/labelkit.db"
-    api_host: str = "127.0.0.1"
-    api_port: int = 8010
+    api_host: str = _runtime["host"]
+    api_port: int = int(_runtime["apiPort"])
     cors_origins: list[str] = []
-    cors_origin_regex: str = r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$"
+    # 本机 + 任意 IPv4 Origin（含公司网/局域网），便于同事用电脑 IP 访问演示
+    cors_origin_regex: str = (
+        r"^https?://(?:"
+        r"localhost|127\.0\.0\.1|\[::1\]|"
+        r"(?:\d{1,3}\.){3}\d{1,3}"
+        r")(?::\d+)?$"
+    )
     dashscope_api_key: str = ""
     vlm_model: str = "qwen-vl-max"
     vlm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -54,6 +66,10 @@ class Settings(BaseSettings):
     vlm_cost_per_image: float = 0.02
     upload_chunk_bytes: int = 1024 * 1024
     max_upload_bytes: int = 20 * 1024 * 1024 * 1024
+    login_username: str = "admin"
+    login_password: str = "admin"
+    auth_secret: str = "labelkit-local-auth-secret"
+    auth_session_hours: int = 12
 
 
 settings = Settings()

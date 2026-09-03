@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>视炼 app icon concept</title>
+  <rect width="512" height="512" rx="128" fill="#07947D"/>
+  <path d="M184 148H156C142.745 148 132 158.745 132 172V200M328 148H356C369.255 148 380 158.745 380 172V200M184 364H156C142.745 364 132 353.255 132 340V312M328 364H356C369.255 364 380 353.255 380 340V312" stroke="white" stroke-width="28" stroke-linecap="round"/>
+  <path d="M256 190L314 223.5V288.5L256 322L198 288.5V223.5L256 190Z" fill="white"/>
+  <circle cx="256" cy="256" r="35" fill="#07947D"/>
+</svg>

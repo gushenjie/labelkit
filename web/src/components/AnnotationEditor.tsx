@@ -16,8 +16,10 @@ type Props = {
   onDirtyChange?: (dirty: boolean) => void;
   darkCanvas?: boolean;
   compact?: boolean;
-  /** 复查页右侧面板挂载点，传入后标注列表与缩放控件显示在侧栏 */
+  /** 复查页右侧面板挂载点，传入后标注列表显示在侧栏 */
   sidePanel?: HTMLElement | null;
+  /** 复核操作按钮挂载点，传入后 Y/N/O 显示在侧栏而非画布上 */
+  actionPanel?: HTMLElement | null;
 };
 
 function annotationsToBoxes(annotations: Annotation[]): Box[] {
@@ -127,6 +129,7 @@ export function AnnotationEditor({
   darkCanvas,
   compact = false,
   sidePanel = null,
+  actionPanel = null,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -624,11 +627,6 @@ export function AnnotationEditor({
         void save("human_wrong");
         return;
       }
-      if (e.key === "o" || e.key === "O" || e.key === "0") {
-        e.preventDefault();
-        void save("no_target");
-        return;
-      }
       if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         deleteSelected();
@@ -669,55 +667,101 @@ export function AnnotationEditor({
   }, [boxes, categories, deleteSelected, focusBox, save, selectedIdx]);
 
   const useSidePanel = compact && !!sidePanel;
+  const useActionPanel = compact && !!actionPanel;
+  const useFloatingChrome = compact && useSidePanel;
+
+  const categoryButtons = (
+    <div className="flex gap-2">
+      {categories.map((c) => {
+        const isActive = selectedClass === c.class_id;
+        return (
+          <button
+            key={c.class_id}
+            type="button"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all backdrop-blur-md border ${isActive ? "bg-black/60 border-white/20 text-white shadow-sm" : "bg-black/30 border-transparent text-white/50 hover:bg-black/40 hover:text-white/80"}`}
+            onClick={() => setSelectedClass(c.class_id)}
+          >
+            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: c.color }}></span>
+            {c.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  const modeButtons = (
+    <div className="flex bg-black/40 backdrop-blur-md p-1 rounded-lg border border-white/10 shadow-sm" role="group" aria-label="编辑模式">
+      <button type="button" className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${editorMode === "view" ? "bg-[#10A88F] text-white shadow-sm" : "text-white/70 hover:text-white"}`} onClick={() => setEditorMode("view")}>V 查看</button>
+      <button type="button" className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${editorMode === "annotate" ? "bg-[#10A88F] text-white shadow-sm" : "text-white/70 hover:text-white"}`} onClick={() => setEditorMode("annotate")}>A 标注</button>
+    </div>
+  );
 
   const boxList = boxes.length > 0 ? (
-    <ul className="annotation-side-panel__list" aria-label="当前标注列表">
+    <ul className="flex flex-col gap-2 p-1" aria-label="当前标注列表">
       {boxes.map((b, i) => {
         const cat = categories.find((c) => c.class_id === b.class_id);
+        const isActive = selectedIdx === i;
+        const color = cat?.color || "#10A88F";
         return (
           <li
             key={`${frameId}-${i}-${b.x_center}-${b.y_center}`}
-            className={selectedIdx === i ? "annotation-side-panel__item annotation-side-panel__item--active" : "annotation-side-panel__item"}
+            className={`flex items-center justify-between p-2 rounded-xl transition-all border ${isActive ? 'bg-white border-[#10A88F] shadow-[0_4px_12px_rgba(16,168,143,0.12)] scale-[1.02]' : 'bg-[#F4FAF8]/50 border-transparent hover:border-[#CFF4EC] hover:bg-white'}`}
           >
             <button
               type="button"
-              className="annotation-side-panel__item-label"
+              className="flex items-center gap-3 flex-1 min-w-0 text-left"
               onClick={() => setSelectedIdx(i)}
             >
-              <span className="annotation-side-panel__item-index">{i + 1}</span>
-              <span>{cat?.name ?? `类别${b.class_id}`}</span>
+              <span 
+                className={`flex items-center justify-center w-6 h-6 rounded-lg text-xs font-bold font-mono shadow-inner ${isActive ? 'text-white' : 'bg-white text-[#17343A]/60'}`}
+                style={isActive ? { backgroundColor: color } : {}}
+              >
+                {i + 1}
+              </span>
+              <div className="flex flex-col min-w-0">
+                <span className={`text-sm font-bold truncate ${isActive ? 'text-[#075F5A]' : 'text-[#17343A]/80'}`}>
+                  {cat?.name ?? `类别${b.class_id}`}
+                </span>
+              </div>
             </button>
             <button
               type="button"
-              className="annotation-side-panel__item-delete"
+              className={`p-1.5 rounded-lg transition-colors ${isActive ? 'text-red-500 hover:bg-red-50' : 'text-[#17343A]/30 hover:text-red-500 hover:bg-red-50'}`}
               onClick={() => deleteBoxAt(i)}
               aria-label={`删除${cat?.name ?? "标注"}${i + 1}`}
+              title="删除"
             >
-              删除
+              <Icon name="trash" size={14} />
             </button>
           </li>
         );
       })}
     </ul>
   ) : (
-    <p className="annotation-side-panel__empty">暂无标注框 · 在图上拖拽可新建</p>
+    <div className="flex flex-col items-center justify-center py-8 text-center px-4 bg-[#F4FAF8]/50 rounded-xl border border-[#CFF4EC]/30 border-dashed">
+      <Icon name="image" size={24} className="text-[#10A88F]/40 mb-2" />
+      <p className="text-xs text-[#17343A]/50">暂无标注框<br/>在图上拖拽可新建</p>
+    </div>
   );
 
   const inlineBoxChips = boxes.length > 0 ? (
-    <div className="annotation-editor__box-list" role="list" aria-label="当前标注列表">
+    <div className="flex gap-2 flex-wrap" role="list" aria-label="当前标注列表">
       {boxes.map((b, i) => {
         const cat = categories.find((c) => c.class_id === b.class_id);
+        const isActive = selectedIdx === i;
+        const color = cat?.color || "#10A88F";
         return (
           <span
             key={`${frameId}-${i}-${b.x_center}-${b.y_center}`}
-            className={selectedIdx === i ? "annotation-editor__box-chip annotation-editor__box-chip--active" : "annotation-editor__box-chip"}
+            className={`flex items-center gap-1 pl-2 pr-1 py-1 rounded-lg text-xs font-medium border transition-all ${isActive ? 'bg-white border-[#10A88F] shadow-sm' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-white'}`}
             role="listitem"
+            style={isActive ? { color } : {}}
           >
-            <button type="button" className="annotation-editor__box-chip-label" onClick={() => setSelectedIdx(i)}>
+            <button type="button" className="focus:outline-none" onClick={() => setSelectedIdx(i)}>
               {cat?.name ?? `类别${b.class_id}`}
             </button>
-            <button type="button" className="annotation-editor__box-chip-delete" onClick={() => deleteBoxAt(i)} aria-label={`删除${cat?.name ?? "标注"}${i + 1}`}>
-              ×
+            <button type="button" className="p-0.5 rounded hover:bg-gray-200/50 text-gray-400 hover:text-red-500" onClick={() => deleteBoxAt(i)} aria-label={`删除${cat?.name ?? "标注"}${i + 1}`}>
+              <Icon name="x" size={12} />
             </button>
           </span>
         );
@@ -726,31 +770,31 @@ export function AnnotationEditor({
   ) : null;
 
   const inlineZoomControls = (
-    <div className="annotation-editor__zoom" role="group" aria-label="画布缩放">
-      <button type="button" className="btn-secondary text-xs" onClick={() => setUserZoom((z) => clamp(z / 1.25, 0.25, 8))} title="缩小">−</button>
-      <button type="button" className="btn-secondary text-xs annotation-editor__zoom-label" onClick={() => setUserZoom(1)} title="重置缩放">
+    <div className="flex items-center bg-gray-100 rounded-lg p-0.5" role="group" aria-label="画布缩放">
+      <button type="button" className="w-6 h-6 flex items-center justify-center rounded text-gray-500 hover:bg-white hover:text-gray-900 transition-colors shadow-sm" onClick={() => setUserZoom((z) => clamp(z / 1.25, 0.25, 8))} title="缩小">−</button>
+      <button type="button" className="px-2 text-xs font-mono font-medium text-gray-600 hover:text-gray-900" onClick={() => setUserZoom(1)} title="重置缩放">
         {Math.round(userZoom * 100)}%
       </button>
-      <button type="button" className="btn-secondary text-xs" onClick={() => setUserZoom((z) => clamp(z * 1.25, 0.25, 8))} title="放大">+</button>
+      <button type="button" className="w-6 h-6 flex items-center justify-center rounded text-gray-500 hover:bg-white hover:text-gray-900 transition-colors shadow-sm" onClick={() => setUserZoom((z) => clamp(z * 1.25, 0.25, 8))} title="放大">+</button>
     </div>
   );
 
   const sidePanelContent = useSidePanel ? (
-    <div className="annotation-side-panel">
-      <div className="annotation-side-panel__section">
-        <div className="annotation-side-panel__section-head">
-          <span className="project-section-kicker">当前标注</span>
-          <button
-            type="button"
-            className="annotation-side-panel__clear-all"
-            onClick={clearAll}
-            disabled={boxes.length === 0}
-            title="清除全部框"
-            aria-label="清除全部框"
-          >
-            <Icon name="trash" size={15} />
-          </button>
-        </div>
+    <div className="flex flex-col h-full">
+      <div className="flex items-center justify-between px-2 py-1 mb-2">
+        <span className="text-xs font-bold text-[#17343A]/60">标签</span>
+        <button
+          type="button"
+          className="p-1.5 rounded-lg text-[#17343A]/40 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[#17343A]/40"
+          onClick={clearAll}
+          disabled={boxes.length === 0}
+          title="清除全部框"
+          aria-label="清除全部框"
+        >
+          <Icon name="trash" size={14} />
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto custom-scrollbar">
         {boxList}
       </div>
     </div>
@@ -770,7 +814,6 @@ export function AnnotationEditor({
               {c.name}
             </button>
           ))}
-          <button className="btn-secondary" disabled={saving} onClick={() => void save("no_target")}>O 无目标</button>
         </div>
         {saveError && <p className="mt-3 text-sm text-red-600">保存失败，修改已保留：{saveError}</p>}
         <div className="mt-4 flex gap-2">
@@ -781,27 +824,58 @@ export function AnnotationEditor({
     );
   }
 
+  const actionButtons = (
+    <>
+      <button className="btn-primary" disabled={saving} onClick={() => void save("human_ok")}>{saving ? "保存中…" : "Y 确认"}</button>
+      <button className="btn-secondary" disabled={saving} onClick={() => void save("human_wrong")}>N 驳回</button>
+    </>
+  );
+
+  const shortcutsHint = (
+    <p className={useActionPanel ? "annotation-editor__shortcuts annotation-editor__shortcuts--side" : compact ? "annotation-editor__shortcuts" : "mt-2 text-xs text-slate-500"}>
+      快捷键：Y 确认 · N 驳回 · V 查看 · A 标注 · ←→ 翻页 · Del 删框
+    </p>
+  );
+
+  const actionPanelContent = (
+    <div className="flex flex-col gap-2">
+      <button 
+        className="flex items-center justify-between w-full px-4 py-3 bg-[#10A88F] text-white rounded-xl font-bold text-sm hover:bg-[#078D82] transition-colors shadow-sm shadow-[#10A88F]/20 disabled:opacity-50 disabled:shadow-none" 
+        disabled={saving} 
+        onClick={() => void save("human_ok")}
+      >
+        <span>{saving ? "保存中…" : "确认"}</span>
+        <kbd className="px-2 py-0.5 bg-white/20 rounded text-[10px] font-mono shadow-sm">Y</kbd>
+      </button>
+      <div className="flex gap-2">
+        <button 
+          className="flex-1 flex items-center justify-between px-4 py-2.5 bg-white border border-[#e4e7ec] text-[#d92d20] rounded-xl font-bold text-sm hover:bg-red-50 transition-colors shadow-sm disabled:opacity-50" 
+          disabled={saving} 
+          onClick={() => void save("human_wrong")}
+        >
+          <span>驳回</span>
+          <kbd className="px-1.5 py-0.5 bg-gray-100 border border-gray-200 text-gray-500 rounded text-[10px] font-mono">N</kbd>
+        </button>
+      </div>
+      <div className="mt-1 text-[10px] text-[#17343A]/40 flex flex-wrap gap-2 justify-center">
+        <span><kbd className="font-mono bg-gray-100 border border-gray-200 px-1 rounded">←</kbd> <kbd className="font-mono bg-gray-100 border border-gray-200 px-1 rounded">→</kbd> 翻页</span>
+        <span><kbd className="font-mono bg-gray-100 border border-gray-200 px-1 rounded">Del</kbd> 删框</span>
+      </div>
+      {saveError && (
+        <p className="mt-1 text-xs text-red-500">保存失败：{saveError}</p>
+      )}
+    </div>
+  );
+
   return (
     <>
       {sidePanelContent && sidePanel ? createPortal(sidePanelContent, sidePanel) : null}
+      {useActionPanel && actionPanel ? createPortal(actionPanelContent, actionPanel) : null}
       <div className={compact ? "annotation-editor annotation-editor--compact" : "annotation-editor"}>
+      {!useFloatingChrome && (
       <div className={compact ? "annotation-editor__toolbar annotation-editor__toolbar--compact" : "mb-3 flex flex-wrap items-center gap-2"}>
-        {categories.map((c) => (
-          <button
-            key={c.class_id}
-            className={`btn text-xs ${selectedClass === c.class_id ? "btn-primary" : "btn-secondary"}`}
-            onClick={() => setSelectedClass(c.class_id)}
-            style={{ borderColor: c.color }}
-          >
-            {c.name}
-          </button>
-        ))}
-        {useSidePanel && (
-          <div className="annotation-editor__mode annotation-editor__mode--compact" role="group" aria-label="编辑模式">
-            <button type="button" className={`btn text-xs ${editorMode === "view" ? "btn-primary" : "btn-secondary"}`} onClick={() => setEditorMode("view")}>V 查看</button>
-            <button type="button" className={`btn text-xs ${editorMode === "annotate" ? "btn-primary" : "btn-secondary"}`} onClick={() => setEditorMode("annotate")}>A 标注</button>
-          </div>
-        )}
+        {categoryButtons}
+        {useSidePanel && modeButtons}
         {!useSidePanel && (
           <>
             <div className="annotation-editor__mode" role="group" aria-label="编辑模式">
@@ -824,6 +898,7 @@ export function AnnotationEditor({
           </>
         )}
       </div>
+      )}
       {dirty && !compact && (
         <p className="mb-2 text-xs text-amber-400">有未保存修改 · 完成后请点「Y 确认 (保存)」</p>
       )}
@@ -854,16 +929,35 @@ export function AnnotationEditor({
             />
           </div>
         </div>
+        {useFloatingChrome && (
+          <>
+            <div className="annotation-editor__float-corner annotation-editor__float-corner--tl">
+              {categoryButtons}
+            </div>
+            <div className="annotation-editor__float-corner annotation-editor__float-corner--tr">
+              {modeButtons}
+            </div>
+          </>
+        )}
+        {compact && !useActionPanel && (
+          <div className="annotation-editor__float-corner annotation-editor__float-corner--br">
+            <div className="annotation-editor__float-panel annotation-editor__float-panel--stacked">
+              <div className="annotation-editor__actions">{actionButtons}</div>
+              {shortcutsHint}
+              {saveError && (
+                <p className="annotation-editor__save-error">保存失败，修改已保留：{saveError}</p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
-      <div className={compact ? "annotation-editor__actions" : "mt-4 flex flex-wrap gap-2"}>
-        <button className="btn-primary" disabled={saving} onClick={() => void save("human_ok")}>{saving ? "保存中…" : "Y 确认"}</button>
-        <button className="btn-secondary" disabled={saving} onClick={() => void save("human_wrong")}>N 驳回</button>
-        <button className="btn-secondary" disabled={saving} onClick={() => void save("no_target")}>O 无目标</button>
-      </div>
-      {saveError && <p className="mt-2 text-sm text-red-500">保存失败，修改已保留：{saveError}</p>}
-      <p className={compact ? "annotation-editor__shortcuts" : "mt-2 text-xs text-slate-500"}>
-        快捷键：Y 确认 · O 无目标 · N 驳回 · V 查看 · A 标注 · ←→ 翻页 · Del 删框
-      </p>
+      {!compact && (
+        <>
+          <div className="annotation-editor__actions">{actionButtons}</div>
+          {saveError && <p className="mt-2 text-sm text-red-500">保存失败，修改已保留：{saveError}</p>}
+          {shortcutsHint}
+        </>
+      )}
       {!compact && (
       <p className="mt-1 text-xs text-slate-500">
         操作：滚轮缩放 · 双击框放大 · 空白处拖拽画新框 · 1-9 选类别
