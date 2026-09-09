@@ -164,6 +164,25 @@ def run_train_task(
     val_ratio = float(params.get("val_ratio", 0.2))
     run_name = f"task_{task.id}"
 
+    def _optional_number(key: str, caster):
+        if key not in params or params.get(key) is None or params.get(key) == "":
+            return None
+        return caster(params[key])
+
+    advanced = {
+        "patience": _optional_number("patience", int),
+        "lr0": _optional_number("lr0", float),
+        "seed": _optional_number("seed", int),
+        "close_mosaic": _optional_number("close_mosaic", int),
+        "weight_decay": _optional_number("weight_decay", float),
+        "warmup_epochs": _optional_number("warmup_epochs", float),
+    }
+    optimizer = params.get("optimizer")
+    if isinstance(optimizer, str) and optimizer.strip():
+        advanced["optimizer"] = optimizer.strip()
+    else:
+        advanced["optimizer"] = None
+
     dataset_dir = exports_dir(project.id) / f"train_{task.id}"
     dataset_dir.mkdir(parents=True, exist_ok=True)
     dataset_service = DatasetService(DatasetVersionRepository(db))
@@ -221,6 +240,7 @@ def run_train_task(
                 "output_root": str(output_root.resolve()),
                 "run_name": run_name,
                 "metrics_path": str(metrics_path.resolve()),
+                **{key: value for key, value in advanced.items() if value is not None},
             },
             ensure_ascii=False,
             indent=2,

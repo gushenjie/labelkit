@@ -6,6 +6,18 @@ const config: Config = {
     extend: {
       fontFamily: {
         sans: ["var(--lk-font-sans)"],
+        mono: ["var(--lk-font-mono)"],
+      },
+      fontSize: {
+        "page-title": ["var(--lk-type-page-title-size)", { lineHeight: "var(--lk-type-page-title-line)" }],
+        "compact-title": ["var(--lk-type-compact-title-size)", { lineHeight: "var(--lk-type-compact-title-line)" }],
+        "section-title": ["var(--lk-type-section-title-size)", { lineHeight: "var(--lk-type-section-title-line)" }],
+        metric: ["var(--lk-type-metric-size)", { lineHeight: "var(--lk-type-metric-line)" }],
+        body: ["var(--lk-type-body-size)", { lineHeight: "var(--lk-type-body-line)" }],
+        "body-sm": ["var(--lk-type-body-sm-size)", { lineHeight: "var(--lk-type-body-sm-line)" }],
+        label: ["var(--lk-type-label-size)", { lineHeight: "var(--lk-type-label-line)" }],
+        caption: ["var(--lk-type-caption-size)", { lineHeight: "var(--lk-type-caption-line)" }],
+        micro: ["var(--lk-type-micro-size)", { lineHeight: "var(--lk-type-micro-line)" }],
       },
       colors: {
         brand: {

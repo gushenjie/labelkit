@@ -210,7 +210,7 @@ export default function DatasetCenterPage() {
 }
 
 function Metric({ icon, value, label, unit, hint }: { icon: "database" | "archive" | "layers" | "package"; value: number; label: string; unit: string; hint: string }) {
-  return <article><span><Icon name={icon} size={25} /></span><div><p>{label}</p><strong>{number(value)}</strong><small>{unit}</small><em>{hint}</em></div></article>;
+  return <article><span><Icon name={icon} size={30} /></span><div><p>{label}</p><strong>{number(value)}</strong><small>{unit}</small><em>{hint}</em></div></article>;
 }
 
 function SplitBar({ item }: { item: DatasetVersionSummary }) {

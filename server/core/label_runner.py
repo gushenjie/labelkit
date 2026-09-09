@@ -18,6 +18,7 @@ from server.core.labeling import (
     propose_detect,
 )
 from server.core.paths import label_path_for_frame
+from server.core.vlm_profiles import resolve_profile
 from server.core.yolo_io import write_labels
 from server.db.models import Annotation, Category, Frame, FrameStatus, Project, ProjectTaskType, Task
 
@@ -92,6 +93,7 @@ def run_label_task(db: Session, task: Task, *, is_cancelled: Callable[[], bool] 
     only_status = task.params.get("only_status", FrameStatus.UNLABELED.value)
     force = bool(task.params.get("force", False))
     limit = int(task.params.get("limit", 0))
+    profile = resolve_profile(task.params.get("vlm_profile_id"))
 
     frame_ids = task.params.get("frame_ids")
     frames = _resolve_label_frames(
@@ -135,15 +137,36 @@ def run_label_task(db: Session, task: Task, *, is_cancelled: Callable[[], bool] 
         if not img_path.exists():
             raise RuntimeError(f"Image file missing: {img_path}")
         if project_input.task_type == ProjectTaskType.CLASSIFY:
-            return ("classify", propose_classify(project_input, category_inputs, img_path))
+            return (
+                "classify",
+                propose_classify(
+                    project_input,
+                    category_inputs,
+                    img_path,
+                    vlm_model=profile.model,
+                    vlm_base_url=profile.base_url,
+                ),
+            )
         img = read_image_bgr(img_path)
         if img is None:
             raise RuntimeError(f"Cannot read image: {img_path}")
         ih, iw = img.shape[:2]
-        boxes, note = propose_detect(project_input, category_inputs, img_path)
+        boxes, note = propose_detect(
+            project_input,
+            category_inputs,
+            img_path,
+            vlm_model=profile.model,
+            vlm_base_url=profile.base_url,
+        )
         return ("detect", (boxes, note, iw, ih))
 
     concurrency = max(1, min(settings.vlm_max_concurrency, 16))
+    task.log = (
+        f"使用大模型：{profile.name} ({profile.model})"
+        if not task.log
+        else f"{task.log}\n使用大模型：{profile.name} ({profile.model})"
+    )
+    db.commit()
     for batch_start in range(0, len(frames), concurrency):
         if is_cancelled and is_cancelled():
             stopped = True

@@ -3,56 +3,96 @@
 import { useEffect, useState } from "react";
 import { Panel, PanelSection } from "@/components/ui/Panel";
 import { useToast } from "@/components/ui/ToastProvider";
-import { api } from "@/lib/api";
+import { api, VlmProfile } from "@/lib/api";
 import { Icon } from "@/components/Icon";
 import "./settings.css";
+
+const DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
+function newProfile(): VlmProfile {
+  return {
+    id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: "新增大模型",
+    model: "qwen-vl-max",
+    base_url: DEFAULT_BASE_URL,
+    cost_per_image: 0.02,
+    enabled: true,
+  };
+}
 
 export default function SettingsPage() {
   const { toast } = useToast();
   const [settings, setSettings] = useState({
     dashscope_api_key_set: false,
     vlm_model: "qwen-vl-max",
-    vlm_base_url: "",
+    vlm_base_url: DEFAULT_BASE_URL,
     vlm_max_concurrency: 3,
     vlm_cost_per_image: 0.02,
+    vlm_profiles: [] as VlmProfile[],
+    default_vlm_id: "",
   });
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
-  const [activeSection, setActiveSection] = useState("api");
 
   useEffect(() => {
     api.getSettings().then(setSettings);
   }, []);
 
-  useEffect(() => {
-    const sections = ["api", "model", "runtime"]
-      .map((id) => document.getElementById(id))
-      .filter((section): section is HTMLElement => Boolean(section));
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visibleSection = entries.find((entry) => entry.isIntersecting);
-        if (visibleSection) setActiveSection(visibleSection.target.id);
-      },
-      { rootMargin: "-18% 0px -62%", threshold: 0.05 },
-    );
-    sections.forEach((section) => observer.observe(section));
-    return () => observer.disconnect();
-  }, []);
+  const updateProfile = (id: string, patch: Partial<VlmProfile>) => {
+    setSettings((prev) => ({
+      ...prev,
+      vlm_profiles: prev.vlm_profiles.map((profile) =>
+        profile.id === id ? { ...profile, ...patch } : profile,
+      ),
+    }));
+  };
+
+  const addProfile = () => {
+    const profile = newProfile();
+    setSettings((prev) => ({
+      ...prev,
+      vlm_profiles: [...prev.vlm_profiles, profile],
+      default_vlm_id: prev.default_vlm_id || profile.id,
+    }));
+  };
+
+  const removeProfile = (id: string) => {
+    setSettings((prev) => {
+      if (prev.vlm_profiles.length <= 1) {
+        toast({ type: "error", message: "至少保留一个大模型配置" });
+        return prev;
+      }
+      const next = prev.vlm_profiles.filter((profile) => profile.id !== id);
+      const defaultId =
+        prev.default_vlm_id === id
+          ? (next.find((profile) => profile.enabled) ?? next[0]).id
+          : prev.default_vlm_id;
+      return { ...prev, vlm_profiles: next, default_vlm_id: defaultId };
+    });
+  };
 
   const save = async () => {
+    if (settings.vlm_profiles.length === 0) {
+      toast({ type: "error", message: "请至少添加一个大模型" });
+      return;
+    }
+    if (settings.vlm_profiles.some((profile) => !profile.name.trim() || !profile.model.trim())) {
+      toast({ type: "error", message: "请填写完整的模型名称与 model id" });
+      return;
+    }
     setSaving(true);
     try {
-      await api.updateSettings({
+      const next = await api.updateSettings({
         dashscope_api_key: apiKey || undefined,
-        vlm_model: settings.vlm_model,
-        vlm_base_url: settings.vlm_base_url,
         vlm_max_concurrency: settings.vlm_max_concurrency,
-        vlm_cost_per_image: settings.vlm_cost_per_image,
+        vlm_profiles: settings.vlm_profiles,
+        default_vlm_id: settings.default_vlm_id,
       });
-      const next = await api.getSettings();
       setSettings(next);
       setApiKey("");
       toast({ type: "success", message: "全局设置已保存" });
+    } catch (error) {
+      toast({ type: "error", message: String(error) });
     } finally {
       setSaving(false);
     }
@@ -64,57 +104,14 @@ export default function SettingsPage() {
       <span className="settings-page__glow settings-page__glow--bottom" aria-hidden="true" />
 
       <div className="settings-page__layout">
-        <aside className="settings-page__rail" aria-label="设置分组">
-          <div className="settings-page__rail-heading">
-            <span><Icon name="sliders" size={17} /></span>
-            <div>
-              <strong>服务设置</strong>
-              <small>模型调用与执行参数</small>
-            </div>
-          </div>
-          <nav className="settings-page__anchors">
-            <a
-              href="#api"
-              aria-current={activeSection === "api" ? "location" : undefined}
-              className={`settings-page__anchor ${activeSection === "api" ? "settings-page__anchor--active" : ""}`}
-              onClick={() => setActiveSection("api")}
-            >
-              <span>01</span>API 密钥
-            </a>
-            <a
-              href="#model"
-              aria-current={activeSection === "model" ? "location" : undefined}
-              className={`settings-page__anchor ${activeSection === "model" ? "settings-page__anchor--active" : ""}`}
-              onClick={() => setActiveSection("model")}
-            >
-              <span>02</span>模型参数
-            </a>
-            <a
-              href="#runtime"
-              aria-current={activeSection === "runtime" ? "location" : undefined}
-              className={`settings-page__anchor ${activeSection === "runtime" ? "settings-page__anchor--active" : ""}`}
-              onClick={() => setActiveSection("runtime")}
-            >
-              <span>03</span>执行策略
-            </a>
-          </nav>
-          <div className="settings-page__rail-status">
-            <span className={settings.dashscope_api_key_set ? "settings-health settings-health--ready" : "settings-health"}>
-              <i aria-hidden="true" />
-              {settings.dashscope_api_key_set ? "服务凭证就绪" : "等待配置凭证"}
-            </span>
-            <p>设置仅保存在当前工作区，不会同步到外部服务。</p>
-          </div>
-        </aside>
-
         <Panel className="settings-page__panel">
           <div className="settings-page__sections lk-scrollbar">
           <PanelSection title="API 密钥" id="api">
             <div className="settings-section-intro">
               <span><Icon name="lock" size={18} /></span>
               <div>
-                <strong>DashScope 访问凭证</strong>
-                <p>仅保存在本机，用于调用视觉大模型标注服务。</p>
+                <strong>服务访问凭证</strong>
+                <p>仅保存在本机，列表中的大模型共用此密钥（通义用 DashScope；智谱需换成智谱 Key）。</p>
               </div>
               <span className={settings.dashscope_api_key_set ? "settings-health settings-health--ready" : "settings-health"}>
                 <i aria-hidden="true" />
@@ -122,7 +119,7 @@ export default function SettingsPage() {
               </span>
             </div>
             <label className="settings-field">
-              <span>DashScope API Key</span>
+              <span>API Key</span>
               <input
                 className="input"
                 id="dashscope-api-key"
@@ -138,31 +135,106 @@ export default function SettingsPage() {
             </label>
           </PanelSection>
 
-          <PanelSection title="模型参数" id="model">
-            <div className="settings-form-grid">
-              <label className="settings-field">
-                <span>VLM 模型</span>
-              <input
-                className="input"
-                id="vlm-model"
-                name="vlm_model"
-                value={settings.vlm_model}
-                onChange={(e) => setSettings({ ...settings, vlm_model: e.target.value })}
-              />
-                <small>用于图片理解和标注生成</small>
-              </label>
-              <label className="settings-field settings-field--wide">
-                <span>API Base URL</span>
-              <input
-                className="input"
-                id="vlm-base-url"
-                name="vlm_base_url"
-                type="url"
-                value={settings.vlm_base_url}
-                onChange={(e) => setSettings({ ...settings, vlm_base_url: e.target.value })}
-              />
-                <small>兼容 OpenAI 协议的服务地址</small>
-              </label>
+          <PanelSection title="大模型列表" id="model">
+            <div className="settings-section-intro">
+              <span><Icon name="sparkles" size={18} /></span>
+              <div>
+                <strong>可选用的视觉大模型</strong>
+                <p>每家只保留一条最适合目标画框预标注的模型：通义主力，智谱作对照（需智谱 API Key）。</p>
+              </div>
+              <button type="button" className="btn-secondary settings-profile-add" onClick={addProfile}>
+                <Icon name="plus" size={14} /> 添加模型
+              </button>
+            </div>
+
+            <div className="settings-profile-list">
+              {settings.vlm_profiles.map((profile) => {
+                const isDefault = profile.id === settings.default_vlm_id;
+                return (
+                  <article
+                    key={profile.id}
+                    className={`settings-profile-card ${isDefault ? "settings-profile-card--default" : ""} ${profile.enabled ? "" : "settings-profile-card--disabled"}`}
+                  >
+                    <header className="settings-profile-card__head">
+                      <div>
+                        <strong>{profile.name || "未命名模型"}</strong>
+                        <span>{profile.model || "未填写 model"}</span>
+                      </div>
+                      <div className="settings-profile-card__badges">
+                        {isDefault && <em>默认</em>}
+                        {!profile.enabled && <em className="settings-profile-card__off">已禁用</em>}
+                      </div>
+                    </header>
+
+                    <div className="settings-form-grid">
+                      <label className="settings-field">
+                        <span>显示名称</span>
+                        <input
+                          className="input"
+                          value={profile.name}
+                          onChange={(e) => updateProfile(profile.id, { name: e.target.value })}
+                        />
+                      </label>
+                      <label className="settings-field">
+                        <span>Model ID</span>
+                        <input
+                          className="input"
+                          value={profile.model}
+                          onChange={(e) => updateProfile(profile.id, { model: e.target.value })}
+                        />
+                      </label>
+                      <label className="settings-field settings-field--wide">
+                        <span>API Base URL</span>
+                        <input
+                          className="input"
+                          type="url"
+                          value={profile.base_url}
+                          onChange={(e) => updateProfile(profile.id, { base_url: e.target.value })}
+                        />
+                      </label>
+                      <label className="settings-field">
+                        <span>单价（元/张）</span>
+                        <input
+                          className="input"
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={profile.cost_per_image}
+                          onChange={(e) =>
+                            updateProfile(profile.id, { cost_per_image: Number(e.target.value) })
+                          }
+                        />
+                      </label>
+                      <label className="settings-field settings-field--toggle">
+                        <span>启用</span>
+                        <input
+                          type="checkbox"
+                          checked={profile.enabled}
+                          onChange={(e) => updateProfile(profile.id, { enabled: e.target.checked })}
+                        />
+                      </label>
+                    </div>
+
+                    <footer className="settings-profile-card__foot">
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={isDefault}
+                        onClick={() => setSettings((prev) => ({ ...prev, default_vlm_id: profile.id }))}
+                      >
+                        {isDefault ? "当前默认" : "设为默认"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary settings-profile-card__delete"
+                        onClick={() => removeProfile(profile.id)}
+                      >
+                        删除
+                      </button>
+                    </footer>
+                  </article>
+                );
+              })}
             </div>
           </PanelSection>
 
@@ -183,22 +255,6 @@ export default function SettingsPage() {
                   }
                 />
                 <small>并发越高，处理越快但更容易触发限流</small>
-              </label>
-              <label className="settings-field">
-                <span>标注单价（元/张）</span>
-              <input
-                className="input"
-                id="vlm-cost-per-image"
-                name="vlm_cost_per_image"
-                type="number"
-                min={0}
-                step="0.01"
-                value={settings.vlm_cost_per_image}
-                onChange={(e) =>
-                  setSettings({ ...settings, vlm_cost_per_image: Number(e.target.value) })
-                }
-              />
-                <small>用于任务开始前的费用预估</small>
               </label>
             </div>
           </PanelSection>

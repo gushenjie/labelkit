@@ -14,14 +14,28 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from server.api.deps import get_optional_actor
-from server.api.schemas import AnnotationsUpdate, FrameFeedback, FrameOut, FramePage, LabelEstimate
-from server.config import settings
+from server.api.schemas import (
+    AnnotationsUpdate,
+    BatchFrameFeedback,
+    FrameFeedback,
+    FrameOut,
+    FramePage,
+    LabelEstimate,
+)
 from server.core.audit import record_audit
-from server.core.paths import label_path_for_frame
-from server.core.visualize import draw_labeled_image, save_review_image
+from server.core.paths import cache_dir, label_path_for_frame
+from server.core.review import is_infra_review_note, scrub_infra_review_notes
+from server.core.visualize import (
+    clear_frame_preview_cache,
+    ensure_frame_preview,
+    frame_preview_cache_path,
+)
+from server.core.vlm_profiles import resolve_profile
 from server.core.yolo_io import YoloLabel, write_labels
 from server.db.database import get_db
 from server.db.models import Annotation, Category, Frame, FrameStatus, Project
+
+_PREVIEW_CACHE_HEADERS = {"Cache-Control": "private, max-age=3600"}
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["frames"])
 
@@ -40,13 +54,14 @@ def _decode_cursor(cursor: str) -> dict:
 
 
 def _frame_out(frame: Frame) -> FrameOut:
+    note = frame.review_note or ""
     return FrameOut(
         id=frame.id,
         filename=frame.filename,
         split=frame.split,
         status=frame.status,
         note=frame.note,
-        review_note=frame.review_note,
+        review_note="" if is_infra_review_note(note) else note,
         source=frame.source,
         uncertainty=frame.uncertainty,
         video_id=frame.video_id,
@@ -89,6 +104,7 @@ def list_frames(
     if limit:
         q = q.limit(limit)
     frames = q.all()
+    scrub_infra_review_notes(db, frames)
     return [_frame_out(f) for f in frames]
 
 
@@ -161,6 +177,7 @@ def list_frames_page(
     rows = q.limit(limit + 1).all()
     has_more = len(rows) > limit
     rows = rows[:limit]
+    scrub_infra_review_notes(db, rows)
     next_cursor = None
     if has_more and rows:
         last = rows[-1]
@@ -195,23 +212,63 @@ def frame_stats(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/frames/{frame_id}/image")
-def frame_image(project_id: str, frame_id: str, annotated: bool = False, db: Session = Depends(get_db)):
+def frame_image(
+    project_id: str,
+    frame_id: str,
+    annotated: bool = False,
+    max_edge: int | None = Query(default=None, ge=64, le=2048),
+    db: Session = Depends(get_db),
+):
     frame = db.get(Frame, frame_id)
     if not frame or frame.project_id != project_id:
         raise HTTPException(404, "Frame not found")
     path = Path(frame.filepath)
     if not path.exists():
         raise HTTPException(404, "Image file missing")
-    if annotated and frame.annotations:
-        categories = db.query(Category).filter(Category.project_id == project_id).all()
-        lbl_path = label_path_for_frame(project_id, frame)
-        from server.core.image_io import write_image_bgr
-        from server.core.paths import cache_dir
-        cache = cache_dir(project_id) / "preview" / f"{frame_id}.jpg"
-        img = draw_labeled_image(categories, path, lbl_path)
-        write_image_bgr(cache, img, quality=92)
-        return FileResponse(cache)
-    return FileResponse(path)
+
+    # 主画布原图：直出文件，避免额外编解码
+    if not annotated and not max_edge:
+        return FileResponse(path)
+
+    want_boxes = bool(annotated and frame.annotations)
+    preview_root = cache_dir(project_id) / "preview"
+    cache_path = frame_preview_cache_path(
+        preview_root,
+        frame_id,
+        annotated=want_boxes,
+        max_edge=max_edge,
+    )
+    categories = (
+        db.query(Category).filter(Category.project_id == project_id).all()
+        if want_boxes
+        else []
+    )
+    label_path = label_path_for_frame(project_id, frame) if want_boxes else None
+    try:
+        ensure_frame_preview(
+            categories,
+            path,
+            label_path,
+            cache_path,
+            annotated=want_boxes,
+            max_edge=max_edge,
+            quality=78 if max_edge else 88,
+        )
+    except ValueError as error:
+        raise HTTPException(404, "Image file missing") from error
+    return FileResponse(cache_path, media_type="image/jpeg", headers=_PREVIEW_CACHE_HEADERS)
+
+
+# 允许一键确认为人工确认的来源状态（不含 unlabeled / 已确认）
+_BATCH_CONFIRM_FROM = frozenset(
+    {
+        FrameStatus.NEEDS_HUMAN,
+        FrameStatus.LLM_LABELED,
+        FrameStatus.AUTO_FIXED,
+        FrameStatus.HUMAN_WRONG,
+        FrameStatus.AUTO_OK,
+    }
+)
 
 
 @router.post("/frames/{frame_id}/feedback")
@@ -240,6 +297,55 @@ def frame_feedback(
         metadata={"note": body.note},
     )
     return {"ok": True}
+
+
+@router.post("/frames/batch-feedback")
+def batch_frame_feedback(
+    project_id: str,
+    body: BatchFrameFeedback,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
+    """批量将当前筛选来源状态的帧标为人工确认，保留现有标注。"""
+    if body.status != FrameStatus.HUMAN_OK:
+        raise HTTPException(400, "批量操作仅支持确认为 human_ok")
+    if not db.get(Project, project_id):
+        raise HTTPException(404, "Project not found")
+
+    from_statuses = []
+    for status in body.from_statuses:
+        if status not in _BATCH_CONFIRM_FROM:
+            raise HTTPException(400, f"不允许从来源状态批量确认：{status.value}")
+        from_statuses.append(status)
+
+    updated = (
+        db.query(Frame)
+        .filter(Frame.project_id == project_id, Frame.status.in_(from_statuses))
+        .update(
+            {
+                Frame.status: FrameStatus.HUMAN_OK,
+                Frame.source: "human",
+                Frame.review_note: "",
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    record_audit(
+        db,
+        actor=actor,
+        action="frame.batch_feedback",
+        resource_type="project",
+        resource_id=project_id,
+        project_id=project_id,
+        summary=f"一键确认 {updated} 张帧",
+        metadata={
+            "from_statuses": [s.value for s in from_statuses],
+            "status": FrameStatus.HUMAN_OK.value,
+            "updated": updated,
+        },
+    )
+    return {"ok": True, "updated": updated}
 
 
 @router.put("/frames/{frame_id}/annotations")
@@ -325,6 +431,8 @@ def update_annotations(
         lbl_path = label_path_for_frame(project_id, frame)
         write_labels(lbl_path, yolo_labels)
 
+    clear_frame_preview_cache(cache_dir(project_id) / "preview", frame_id)
+
     frame.status = body.status
     frame.source = "human"
     db.commit()
@@ -342,7 +450,11 @@ def update_annotations(
 
 
 @router.get("/label/estimate", response_model=LabelEstimate)
-def label_estimate(project_id: str, db: Session = Depends(get_db)):
+def label_estimate(
+    project_id: str,
+    vlm_profile_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
     count = (
         db.query(Frame)
         .filter(
@@ -357,5 +469,6 @@ def label_estimate(project_id: str, db: Session = Depends(get_db)):
         )
         .count()
     )
-    cost = settings.vlm_cost_per_image
+    profile = resolve_profile(vlm_profile_id)
+    cost = profile.cost_per_image
     return LabelEstimate(frame_count=count, cost_per_image=cost, estimated_cost=round(count * cost, 2))

@@ -262,7 +262,7 @@ export default function GlobalTasksPage() {
 }
 
 function Metric({ icon, value, label, trend, hint }: { icon: "folder" | "layers" | "users" | "clock"; value: string; label: string; trend: string; hint: string }) {
-  return <article><span className="task-metric__icon"><Icon name={icon} size={28} /></span><div><strong>{value}</strong><p>{label}</p><small>↑ {trend} <em>{hint}</em></small></div></article>;
+  return <article><span className="task-metric__icon"><Icon name={icon} size={30} /></span><div><strong>{value}</strong><p>{label}</p><small>↑ {trend} <em>{hint}</em></small></div></article>;
 }
 
 function Filter({ className = "", label, ariaLabel, value, onChange, options }: { className?: string; label: string; ariaLabel: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {

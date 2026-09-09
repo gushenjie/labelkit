@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, Annotation, Frame, Project, PublicDatasetImport, Task } from "@/lib/api";
 import { AnnotationEditor } from "@/components/AnnotationEditor";
 import { LlmLabelPanel } from "@/components/LlmLabelPanel";
@@ -16,6 +16,7 @@ import { TaskProgress } from "@/components/ui/TaskProgress";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useToast } from "@/components/ui/ToastProvider";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
 import {
   countBlockingReview,
   countConfirmed,
@@ -28,7 +29,68 @@ import {
   reviewStatuses,
   REVIEW_FILTERS,
   ReviewFilter,
+  visibleReviewFilters,
 } from "@/lib/status";
+import {
+  matchesProjectLiveEvent,
+  PROJECT_STATS_REFRESH_EVENT,
+  requestProjectStatsRefresh,
+} from "@/lib/project-live";
+
+/** 胶片条窗口：缩小并发，避免挤占主图画布带宽 */
+const FILMSTRIP_RADIUS = 8;
+const FILMSTRIP_MAX_EDGE = 320;
+
+/** 始终凑满约 2R+1 张；贴左边/右边时向另一侧补齐，避免首页右侧空一格 */
+function getFilmstripBounds(idx: number, length: number, radius: number) {
+  const windowSize = Math.min(length, radius * 2 + 1);
+  let start = Math.max(0, idx - radius);
+  let end = Math.min(length, start + windowSize);
+  start = Math.max(0, end - windowSize);
+  return { start, end };
+}
+
+function FilmstripThumb({
+  src,
+  alt,
+  staggerMs,
+  allowLoad,
+}: {
+  src: string;
+  alt: string;
+  staggerMs: number;
+  allowLoad: boolean;
+}) {
+  const [activeSrc, setActiveSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!allowLoad) {
+      setActiveSrc(null);
+      return;
+    }
+    if (staggerMs <= 0) {
+      setActiveSrc(src);
+      return;
+    }
+    const timer = window.setTimeout(() => setActiveSrc(src), staggerMs);
+    return () => window.clearTimeout(timer);
+  }, [allowLoad, src, staggerMs]);
+
+  if (!activeSrc) {
+    return <div className="w-full h-full bg-[#E8F2EF]" aria-hidden="true" />;
+  }
+
+  return (
+    <img
+      src={activeSrc}
+      alt={alt}
+      // 横滑胶片条不要用原生 lazy：边缘格会被当成「屏外」一直不加载
+      loading="eager"
+      decoding="async"
+      className="w-full h-full object-cover"
+    />
+  );
+}
 
 export default function ReviewPage() {
   const { id } = useParams<{ id: string }>();
@@ -37,6 +99,7 @@ export default function ReviewPage() {
   const frameParam = searchParams.get("frame");
   const filterParam = searchParams.get("filter") ?? searchParams.get("status");
   const { toast } = useToast();
+  const confirm = useConfirm();
 
   const [project, setProject] = useState<Project | null>(null);
   const [frames, setFrames] = useState<Frame[]>([]);
@@ -66,6 +129,8 @@ export default function ReviewPage() {
   const [annotationActionPanel, setAnnotationActionPanel] = useState<HTMLDivElement | null>(null);
   const [publicImports, setPublicImports] = useState<PublicDatasetImport[]>([]);
   const [approvingTrain, setApprovingTrain] = useState(false);
+  const [mainImageReady, setMainImageReady] = useState(false);
+  const [batchConfirming, setBatchConfirming] = useState(false);
 
   const pendingReviewImports = publicImports.filter((item) =>
     ["review", "review_expanded", "full_review_required"].includes(item.state),
@@ -78,6 +143,13 @@ export default function ReviewPage() {
   const pendingCount = countPendingReview(frameStats);
   const rejectedCount = countRejected(frameStats);
   const confirmedCount = countConfirmed(frameStats);
+  const visibleFilters = useMemo(() => visibleReviewFilters(frameStats), [frameStats]);
+
+  useEffect(() => {
+    if (!filter) return;
+    if (visibleFilters.includes(filter)) return;
+    setFilter(visibleFilters[0] ?? "all");
+  }, [filter, visibleFilters]);
 
   useEffect(() => {
     if (!id) return;
@@ -91,8 +163,9 @@ export default function ReviewPage() {
       return;
     }
     api.frameStats(id).then((stats) => {
-      if (countSampleReview(stats) > 0) setFilter("sample");
-      else if (countPendingReview(stats) > 0) setFilter("pending");
+      const visible = visibleReviewFilters(stats);
+      if (visible.includes("sample")) setFilter("sample");
+      else if (visible.includes("pending")) setFilter("pending");
       else if (countRejected(stats) > 0) setFilter("rejected");
       else if (countConfirmed(stats) > 0) setFilter("confirmed");
       else setFilter("all");
@@ -180,9 +253,27 @@ export default function ReviewPage() {
 
   useEffect(() => {
     refreshMeta();
-    const t = setInterval(refreshMeta, running ? 2000 : 8000);
+    if (!running) return;
+    const t = setInterval(refreshMeta, 2000);
     return () => clearInterval(t);
   }, [refreshMeta, running]);
+
+  useEffect(() => {
+    if (!id) return;
+    const onRefresh = (event: Event) => {
+      if (!matchesProjectLiveEvent(event, id)) return;
+      refreshMeta();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshMeta();
+    };
+    window.addEventListener(PROJECT_STATS_REFRESH_EVENT, onRefresh);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener(PROJECT_STATS_REFRESH_EVENT, onRefresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [id, refreshMeta]);
 
   useEffect(() => {
     if (!isEditing) loadFrames();
@@ -191,18 +282,20 @@ export default function ReviewPage() {
   const current = frames[idx];
 
   useEffect(() => {
-    if (!id || frames.length === 0) return;
+    setMainImageReady(false);
+  }, [current?.id]);
+
+  useEffect(() => {
+    if (!id || frames.length === 0 || !mainImageReady) return;
     const preload = (i: number) => {
       if (i < 0 || i >= frames.length) return;
       const img = new Image();
       img.crossOrigin = "anonymous";
       img.src = api.frameImageUrl(id, frames[i].id, false);
     };
-    preload(idx - 2);
     preload(idx - 1);
     preload(idx + 1);
-    preload(idx + 2);
-  }, [id, frames, idx]);
+  }, [id, frames, idx, mainImageReady]);
 
   useEffect(() => {
     if (nextCursor && idx >= frames.length - 10) void loadNextPage();
@@ -300,9 +393,50 @@ export default function ReviewPage() {
       draftsRef.current.delete(frameId);
       if (idx >= nextFrames.length) setIdx(Math.max(0, nextFrames.length - 1));
       refreshMeta();
+      requestProjectStatsRefresh(id);
     } catch (error) {
       toast({ type: "error", message: `保存失败：${error}` });
       throw error;
+    }
+  };
+
+  const batchConfirmCount =
+    filter === "sample"
+      ? countSampleReview(frameStats)
+      : filter === "pending"
+        ? pendingCount
+        : filter === "rejected"
+          ? rejectedCount
+          : 0;
+  const canBatchConfirm =
+    (filter === "sample" || filter === "pending" || filter === "rejected") && batchConfirmCount > 0;
+
+  const handleBatchConfirm = async () => {
+    if (!id || !filter || !canBatchConfirm) return;
+    if (!confirmDiscard()) return;
+    const filterLabel = REVIEW_FILTERS.find((f) => f.value === filter)?.label ?? "当前筛选";
+    const ok = await confirm({
+      title: "一键确认",
+      message: `将「${filterLabel}」下剩余 ${batchConfirmCount} 张全部标记为已确认，保留现有标注且不再逐张查看。确定继续？`,
+      confirmLabel: "全部确认",
+    });
+    if (!ok) return;
+    setBatchConfirming(true);
+    setActionError("");
+    try {
+      const result = await api.batchFrameFeedback(id, reviewStatuses(filter), "human_ok");
+      setConfirmedInSession((n) => n + (result.updated ?? 0));
+      setIsEditing(false);
+      draftsRef.current.clear();
+      setIdx(0);
+      toast({ type: "success", message: `已确认 ${result.updated} 张` });
+      loadFrames();
+      refreshMeta();
+      requestProjectStatsRefresh(id);
+    } catch (error) {
+      toast({ type: "error", message: `一键确认失败：${error}` });
+    } finally {
+      setBatchConfirming(false);
     }
   };
 
@@ -313,6 +447,7 @@ export default function ReviewPage() {
     try {
       await api.createTask(id, "review", {});
       refreshMeta();
+      requestProjectStatsRefresh(id);
     } catch (e) {
       setActionError(String(e));
     }
@@ -504,7 +639,7 @@ export default function ReviewPage() {
         <div className="flex-1 flex flex-col min-h-0 bg-white/40 backdrop-blur-3xl rounded-3xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] p-2">
           <div className="flex justify-between items-center mb-2 shrink-0 bg-white/80 rounded-2xl p-2 shadow-sm border border-white">
             <div className="flex items-center gap-1 overflow-x-auto custom-scrollbar">
-              {REVIEW_FILTERS.map((f) => {
+              {REVIEW_FILTERS.filter((f) => visibleFilters.includes(f.value)).map((f) => {
                 const count =
                   f.value === "sample" ? sampleCount :
                   f.value === "pending" ? pendingCount :
@@ -548,6 +683,16 @@ export default function ReviewPage() {
                 <Icon name="sparkles" size={14} className="text-[#10A88F]" />
                 机器预审
               </button>
+              {canBatchConfirm && (
+                <button
+                  type="button"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors shadow-sm bg-[#10A88F] text-white hover:bg-[#078D82] disabled:opacity-50"
+                  disabled={batchConfirming}
+                  onClick={() => void handleBatchConfirm()}
+                >
+                  {batchConfirming ? "确认中…" : `一键确认 (${batchConfirmCount})`}
+                </button>
+              )}
               {filter === "rejected" && rejectedCount > 0 && (
                 <button
                   type="button"
@@ -628,6 +773,7 @@ export default function ReviewPage() {
                       taskType={project.task_type}
                       onSave={handleSave}
                       onDirtyChange={setIsEditing}
+                      onImageReadyChange={setMainImageReady}
                       darkCanvas
                       compact
                       sidePanel={annotationSidePanel}
@@ -639,17 +785,27 @@ export default function ReviewPage() {
                   {current && (
                     <>
                       <span className="text-[10px] font-bold tracking-wider text-[#10A88F] uppercase">当前帧</span>
-                      <h2 className="text-sm font-bold text-[#075F5A] truncate mt-1" title={current.filename}>{current.filename}</h2>
-                      <span className="review-side__status mt-2">
-                        <i aria-hidden="true" />
-                        {FRAME_STATUS_SIMPLE[current.status] ?? current.status}
-                      </span>
-                      {current.review_note && (
-                        <p className="review-side__note">
-                          <strong>审查提示：</strong>
-                          {current.review_note}
-                        </p>
-                      )}
+                      <div className="mt-1 flex items-start gap-1.5 min-w-0">
+                        <h2 className="text-sm font-bold text-[#075F5A] truncate min-w-0 flex-1" title={current.filename}>
+                          {current.filename}
+                        </h2>
+                        <button
+                          type="button"
+                          className="shrink-0 mt-0.5 p-1 rounded-md text-[#17343A]/45 hover:text-[#10A88F] hover:bg-[#F4FAF8] transition-colors"
+                          title="复制文件名"
+                          aria-label="复制文件名"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(current.filename);
+                              toast({ type: "success", message: "已复制文件名" });
+                            } catch {
+                              toast({ type: "error", message: "复制失败，请检查剪贴板权限" });
+                            }
+                          }}
+                        >
+                          <Icon name="copy" size={14} />
+                        </button>
+                      </div>
                       <div ref={setAnnotationActionPanel} className="review-side__actions mt-4 shrink-0" />
                       <div ref={setAnnotationSidePanel} className="review-side__annotations mt-3 min-h-0 flex-1" />
                     </>
@@ -660,22 +816,30 @@ export default function ReviewPage() {
                 ref={filmstripRef}
                 className="h-[104px] shrink-0 bg-white/80 rounded-2xl border border-white shadow-sm flex items-center px-2 overflow-x-auto overflow-y-hidden custom-scrollbar"
               >
-                <div className="flex gap-2 items-center h-full py-2">
-                  {frames.slice(Math.max(0, idx - 50), Math.min(frames.length, idx + 51)).map((f, offset) => {
-                    const i = Math.max(0, idx - 50) + offset;
+                <div className="flex gap-2 items-center h-full py-2 px-1">
+                  {(() => {
+                    const { start, end } = getFilmstripBounds(idx, frames.length, FILMSTRIP_RADIUS);
+                    return frames.slice(start, end).map((f, offset) => {
+                    const i = start + offset;
                     const selected = i === idx;
+                    const distance = Math.abs(i - idx);
                     return (
                       <div
                         key={f.id}
                         ref={selected ? activeThumbRef : undefined}
                         className={`h-full aspect-video shrink-0 rounded-lg overflow-hidden cursor-pointer transition-all border-2 relative ${
                           selected
-                            ? "border-[#10A88F] shadow-md ring-2 ring-[#10A88F]/20 scale-105 z-10"
+                            ? "border-[#10A88F] shadow-md ring-2 ring-[#10A88F]/20 z-10"
                             : "border-transparent hover:border-[#CFF4EC] shadow-sm opacity-60 hover:opacity-100"
                         }`}
                         onClick={() => goFrame(i)}
                       >
-                        <img src={api.frameImageUrl(id!, f.id, true)} alt={f.filename} className="w-full h-full object-cover" />
+                        <FilmstripThumb
+                          src={api.frameImageUrl(id!, f.id, true, { maxEdge: FILMSTRIP_MAX_EDGE })}
+                          alt={f.filename}
+                          staggerMs={distance <= 1 ? 0 : Math.min(280, distance * 30)}
+                          allowLoad={mainImageReady}
+                        />
                         <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 via-black/35 to-transparent px-1.5 py-1 flex justify-center">
                           <span className="text-[9px] font-bold text-white whitespace-nowrap leading-none">
                             {FRAME_STATUS_SIMPLE[f.status] ?? f.status}
@@ -683,7 +847,8 @@ export default function ReviewPage() {
                         </div>
                       </div>
                     );
-                  })}
+                  });
+                  })()}
                   {loadingNext && <span className="text-xs text-[#17343A]/40 px-4 whitespace-nowrap">加载下一页…</span>}
                 </div>
               </div>

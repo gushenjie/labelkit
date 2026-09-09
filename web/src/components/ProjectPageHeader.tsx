@@ -26,10 +26,10 @@ export function ProjectPageHeader({
       className={`project-page-heading flex justify-between items-start gap-6 shrink-0 w-full relative z-10 ${compact ? "mb-2" : "mb-6"}`}
     >
       <div className="flex min-w-0 flex-1 flex-col pr-2">
-        {eyebrow && <span className="text-[10px] font-bold tracking-wider text-[var(--lk-brand-700)] uppercase mb-1 block">{eyebrow}</span>}
-        <h1 className={`font-bold text-[var(--lk-ink)] ${compact ? "text-lg leading-tight" : "text-2xl"}`}>{title}</h1>
+        {eyebrow && <span className="text-micro font-bold tracking-wider text-[var(--lk-brand-700)] uppercase mb-1 block">{eyebrow}</span>}
+        <h1 className={`font-bold text-[var(--lk-ink)] ${compact ? "text-compact-title" : "text-page-title"}`}>{title}</h1>
         {description && !compact && (
-          <div className="page-header__copy text-sm text-[var(--lk-muted)] mt-1 max-w-2xl">{description}</div>
+          <div className="page-header__copy text-body-sm text-[var(--lk-muted)] mt-1 max-w-2xl">{description}</div>
         )}
         {meta && <div className="mt-3">{meta}</div>}
       </div>

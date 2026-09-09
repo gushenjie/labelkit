@@ -63,6 +63,8 @@ ZH_SEARCH_TERMS = {
     "线路": "power line",
     "拉线": "guy wire",
     "绝缘子": "insulator",
+    "马路": "road street",
+    "道路": "road",
     "检测": "detection",
     "识别": "detection",
 }
@@ -691,7 +693,11 @@ def discover_roboflow(
     task_type: str | None = None,
     limit: int = 12,
 ) -> tuple[list[PublicDatasetCandidateDTO], int]:
-    """Search Roboflow Universe by natural language and fix each hit to latestVersion."""
+    """Search Roboflow Universe by natural language and fix each hit to latestVersion.
+
+    检索阶段不做逐条 version/splits 校验（外网串行会超过前端超时）；
+    仅有训练集的数据集在 inspect/fetch 时再拦截。
+    """
     if not os.environ.get("ROBOFLOW_API_KEY"):
         raise RuntimeError("未配置 ROBOFLOW_API_KEY")
     cleaned = query.strip()
@@ -705,7 +711,6 @@ def discover_roboflow(
     payload = _roboflow_json(f"universe/search?q={urllib.parse.quote(search_q)}&page=1")
     results = payload.get("results") or []
     candidates: list[PublicDatasetCandidateDTO] = []
-    filtered_train_only = 0
     for item in list(results)[:limit]:
         if not isinstance(item, dict):
             continue
@@ -722,10 +727,6 @@ def discover_roboflow(
         if not match:
             continue
         workspace, project, fixed_version = match.group(1), match.group(2), match.group(3)
-        splits = _fetch_roboflow_version_splits(workspace, project, str(fixed_version))
-        if splits is not None and task_type == "detect" and not roboflow_splits_usable_for_task(splits, task_type):
-            filtered_train_only += 1
-            continue
         raw_classes = item.get("classes") or []
         if isinstance(raw_classes, dict):
             classes = tuple(str(name) for name in raw_classes.keys())
@@ -766,7 +767,7 @@ def discover_roboflow(
                 annotation_thumbnail=annotation_thumbnail,
             )
         )
-    return candidates, filtered_train_only
+    return candidates, 0
 
 
 def inspect_roboflow_url(url: str, *, task_type: str | None = None) -> PublicDatasetCandidateDTO:

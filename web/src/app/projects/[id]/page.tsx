@@ -5,7 +5,11 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { api, Frame, ModelVersion, Project, Task } from "@/lib/api";
 import { countBlockingReview, countConfirmed, countRejected } from "@/lib/status";
-import { computeContinueAction, computeProjectEntryHref, taskTypeLabel, WORKFLOW_STEPS, WorkflowStep } from "@/lib/workflow";
+import {
+  matchesProjectLiveEvent,
+  PROJECT_STATS_REFRESH_EVENT,
+} from "@/lib/project-live";
+import { computeContinueAction, computeProjectEntryHref, computeStepBadges, isWorkflowStepUnlocked, taskTypeLabel, WORKFLOW_STEPS, WorkflowStep } from "@/lib/workflow";
 import { Icon } from "@/components/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TaskProgress } from "@/components/ui/TaskProgress";
@@ -13,6 +17,7 @@ import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/ToastProvider";
 
 const FLOW_STEPS = WORKFLOW_STEPS;
+const DEFAULT_PROJECT_COVER = "/project-art/default-project-cover.png";
 
 const TASK_STEP: Record<string, WorkflowStep> = {
   import: "materials",
@@ -93,22 +98,37 @@ export default function ProjectPage() {
       }
     };
 
-    const refreshLiveData = async () => {
+    let timer = 0;
+    let refreshLiveData = async () => {};
+
+    const schedule = (ms: number) => {
+      window.clearInterval(timer);
+      timer = window.setInterval(() => {
+        if (document.visibilityState === "hidden") return;
+        void refreshLiveData();
+      }, ms);
+    };
+
+    refreshLiveData = async () => {
       try {
         const [statsData, taskData] = await Promise.all([
           api.frameStats(id),
           api.listTasks(id),
         ]);
-        if (!disposed) {
-          setStats(statsData);
-          setTasks(taskData);
-        }
+        if (disposed) return;
+        setStats(statsData);
+        setTasks(taskData);
+        const active = taskData.some((t) => t.status === "running" || t.status === "pending");
+        schedule(active ? 2500 : 15000);
       } catch {
         // 保留上一次成功数据，避免短暂连接波动让页面闪空。
       }
     };
 
-    void loadOverview();
+    void loadOverview().then(() => {
+      if (disposed) return;
+      void refreshLiveData();
+    });
     void api.getProjectDiskUsage(id)
       .then((usage) => {
         if (!disposed) setDiskUsageMb(usage.disk_usage_mb);
@@ -116,10 +136,23 @@ export default function ProjectPage() {
       .catch(() => {
         // 磁盘统计是非关键数据，不阻塞项目首屏。
       });
-    const timer = window.setInterval(refreshLiveData, 5000);
+
+    const onStatsRefresh = (event: Event) => {
+      if (!matchesProjectLiveEvent(event, id)) return;
+      void refreshLiveData();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshLiveData();
+    };
+
+    window.addEventListener(PROJECT_STATS_REFRESH_EVENT, onStatsRefresh);
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      window.removeEventListener(PROJECT_STATS_REFRESH_EVENT, onStatsRefresh);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [id]);
 
@@ -189,6 +222,7 @@ export default function ProjectPage() {
   const reviewRate = total > 0 ? Math.round((reviewed / total) * 100) : 0;
   const continueAction = computeContinueAction(id, stats, tasks, models.length);
   const entryHref = computeProjectEntryHref(id, stats, tasks, models.length);
+  const stepBadges = computeStepBadges(stats, models.length);
   const activeTask = sortedTasks.find(
     (task) => task.status === "running" || task.status === "pending",
   );
@@ -242,7 +276,7 @@ export default function ProjectPage() {
           <h1>{project.name}</h1>
           <p>{project.description || "基于视觉识别技术，构建、验证与迭代火焰检测模型。"}</p>
           <div className="project-overview__meta">
-            <span><small>项目负责人</small><strong><i>刘</i>刘智</strong></span>
+            <span><small>项目负责人</small><strong><i>{(project.created_by || "未").slice(0, 1)}</i>{project.created_by || "未指定"}</strong></span>
             <span><small>项目阶段</small><strong>数据生产中 <Icon name="chevron-down" size={14} /></strong></span>
             <span><small>创建时间</small><strong>{formatProjectDate(project.created_at)}</strong></span>
             <span><small>项目 ID</small><strong>PJ-{project.id.slice(0, 8).toUpperCase()}</strong></span>
@@ -252,9 +286,9 @@ export default function ProjectPage() {
             <p>{readinessMessage}</p>
           </div>
           <div className="project-overview__actions">
-            <Link href={entryHref} className="project-overview__primary-action">
+            <Link href={entryHref} className="project-overview__primary-action" title={continueAction.description}>
               <span>
-                <strong>进入项目</strong>
+                <strong>{continueAction.label}</strong>
               </span>
               <Icon name="arrow-right" size={18} />
             </Link>
@@ -266,17 +300,25 @@ export default function ProjectPage() {
         </div>
 
         <div className="project-overview__preview">
-          {previewFrame ? (
-            <img
-              src={api.frameImageUrl(id, previewFrame.id)}
-              alt={`${project.name} 最近素材：${previewFrame.filename}`}
-            />
-          ) : (
-            <span className="project-overview__preview-empty">
-              <Icon name="image" size={28} />
-              暂无项目素材
-            </span>
-          )}
+          <img
+            src={
+              project.has_custom_cover
+                ? api.projectCoverUrl(id)
+                : previewFrame
+                  ? api.frameImageUrl(id, previewFrame.id)
+                  : DEFAULT_PROJECT_COVER
+            }
+            alt={
+              project.has_custom_cover
+                ? `${project.name}项目封面`
+                : previewFrame
+                  ? `${project.name} 最近素材：${previewFrame.filename}`
+                  : `${project.name}默认封面`
+            }
+            onError={(event) => {
+              event.currentTarget.src = DEFAULT_PROJECT_COVER;
+            }}
+          />
         </div>
       </section>
 
@@ -300,20 +342,40 @@ export default function ProjectPage() {
                   : stepMeta[step.slug].done
                     ? "done"
                     : "waiting";
-                return (
-                  <Link
-                    key={step.slug}
-                    href={`/projects/${id}/${step.slug}`}
-                    className={`project-pipeline__step project-pipeline__step--${state}`}
-                  >
+                const unlocked = isWorkflowStepUnlocked(step.slug, stepBadges, stats);
+                const previousLabel = index > 0 ? FLOW_STEPS[index - 1].label : "";
+                const className = `project-pipeline__step project-pipeline__step--${state}${unlocked ? "" : " project-pipeline__step--locked"}`;
+                const body = (
+                  <>
                     <span className="project-pipeline__marker">
                       {state === "done" ? <Icon name="check" size={14} /> : index + 1}
                     </span>
                     <span className="project-pipeline__copy">
                       <strong>{step.label}</strong>
-                      <small>{state === "done" ? "已完成" : state === "active" ? "进行中" : "待开始"}</small>
+                      <small>{state === "done" ? "已完成" : state === "active" ? "进行中" : unlocked ? "待开始" : "未解锁"}</small>
                     </span>
                     <em>{stepMeta[step.slug].value}</em>
+                  </>
+                );
+                if (!unlocked) {
+                  return (
+                    <span
+                      key={step.slug}
+                      className={className}
+                      aria-disabled="true"
+                      title={`请先完成「${previousLabel}」后再进入此步骤`}
+                    >
+                      {body}
+                    </span>
+                  );
+                }
+                return (
+                  <Link
+                    key={step.slug}
+                    href={`/projects/${id}/${step.slug}`}
+                    className={className}
+                  >
+                    {body}
                   </Link>
                 );
               })}

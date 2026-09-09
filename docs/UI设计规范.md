@@ -58,23 +58,33 @@
 
 ### 2.2 字体
 
-字体栈：
+字体栈：拉丁字符和数字优先使用随应用打包的 Inter，中文按操作系统回退到系统中文字体。业务页面统一继承 `--lk-font-sans`，不得在页面内重新声明字体家族；训练日志、代码、ID 等需要纵向对齐的内容使用 `--lk-font-mono`。
 
 ```css
--apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
-"Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif
+var(--font-inter), -apple-system, BlinkMacSystemFont, "SF Pro Text",
+"PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+"Noto Sans CJK SC", sans-serif
 ```
 
-| 层级 | 字号 / 行高 | 字重 | 用途 |
-|---|---|---:|---|
-| 页面标题 | 26 / 40 | 700–730 | 一级页面名称 |
-| 区块标题 | 14 / 20 | 650–680 | 面板、列表分组 |
-| 关键数据 | 18–21 / 26 | 700 | 汇总指标 |
-| 正文 | 13–14 / 20 | 400–500 | 表单、说明 |
-| 列表主信息 | 14 / 20 | 650–680 | 项目名称 |
-| 辅助信息 | 10–12 / 16 | 400–500 | 元数据、提示 |
+| 语义层级 | CSS Token / Tailwind | 字号 / 行高 | 字重 | 用途 |
+|---|---|---:|---:|---|
+| 页面标题 | `--lk-type-page-title-*` / `text-page-title` | 26 / 40 | 700 | 一级页面名称 |
+| 紧凑标题 | `--lk-type-compact-title-*` / `text-compact-title` | 18 / 24 | 700 | 紧凑工作区标题、次级关键标题 |
+| 区块标题 | `--lk-type-section-title-*` / `text-section-title` | 14 / 20 | 600 | 面板、列表分组 |
+| 关键数据 | `--lk-type-metric-*` / `text-metric` | 20 / 26 | 700 | 汇总指标、核心数量 |
+| 正文 | `--lk-type-body-*` / `text-body` | 14 / 20 | 400 | 表单值、主要说明 |
+| 次级正文 | `--lk-type-body-sm-*` / `text-body-sm` | 13 / 20 | 400 | 页面描述、次要说明 |
+| 标签 | `--lk-type-label-*` / `text-label` | 12 / 16 | 500–600 | 表单标签、状态文字 |
+| 辅助信息 | `--lk-type-caption-*` / `text-caption` | 11 / 16 | 400–500 | 元数据、提示、日志 |
+| 微型标识 | `--lk-type-micro-*` / `text-micro` | 10 / 14 | 500–700 | Step、Eyebrow、Badge，不承载长句 |
 
-中文正文不使用小于 10px 的可操作文本。数字保持等宽视觉节奏，不为装饰使用超粗字重。
+字重只使用 `400 / 500 / 600 / 700` 四档，避免 `650 / 680 / 720 / 760` 在中文回退字体中产生不可预测的映射。中文可操作文本不得小于 10px，正文不得小于 13px。数字指标使用 `font-variant-numeric: tabular-nums`；仅日志、代码和编号可使用等宽字体。
+
+实现约束：
+
+- 新组件优先使用上述语义 Token 或对应 Tailwind 类，不直接写 `text-[11px]`、`font-[650]` 等任意值。
+- 页面可以调整间距和容器，但不得私自创建新的字号、行高或字重层级。
+- 需要新增层级时先更新 `globals.css`、`tailwind.config.ts` 与本规范，再在页面中使用。
 
 ### 2.3 圆角、边框、阴影
 

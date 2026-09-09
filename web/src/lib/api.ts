@@ -11,6 +11,10 @@ export function getApiBase(): string {
 }
 
 const REQUEST_TIMEOUT_MS = 20000;
+const DISCOVER_TIMEOUT_MS = 90000;
+const PUBLIC_FETCH_TIMEOUT_MS = 90000;
+
+type RequestOptions = RequestInit & { timeoutMs?: number };
 
 /** 给 img/src 等无法带 Authorization 的资源 URL 追加 token */
 function withAuthQuery(url: string): string {
@@ -20,11 +24,11 @@ function withAuthQuery(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   const token = getAuthToken();
+  const { timeoutMs = REQUEST_TIMEOUT_MS, signal: externalSignal, ...fetchOptions } = options ?? {};
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  const externalSignal = options?.signal;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const abortFromExternal = () => controller.abort();
 
   if (externalSignal) {
@@ -34,12 +38,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   try {
     const res = await fetch(`${getApiBase()}${path}`, {
-      ...options,
+      ...fetchOptions,
       signal: controller.signal,
       headers: {
-        ...(options?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+        ...(fetchOptions.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...options?.headers,
+        ...fetchOptions.headers,
       },
     });
     if (!res.ok) {
@@ -56,7 +60,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     return res.json();
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("请求超时，请检查后端服务是否已启动");
+      throw new Error(
+        timeoutMs > REQUEST_TIMEOUT_MS
+          ? "公开数据检索超时，可能是外网数据源响应较慢，请稍后重试"
+          : "请求超时，请检查后端服务是否已启动",
+      );
     }
     throw error;
   } finally {
@@ -77,6 +85,7 @@ export type Project = {
   video_count: number;
   disk_usage_mb: number;
   has_custom_cover: boolean;
+  created_by: string;
   created_at: string;
   updated_at: string;
 };
@@ -294,11 +303,22 @@ export type ModelCatalogItem = {
   metrics: ModelCatalogMetric[];
   updated_at: string;
   source?: string;
+  metadata?: string[];
   project_name?: string | null;
   project_id?: string | null;
   model_id?: string | null;
+  preview_frame_id?: string | null;
 };
 export type ModelCatalog = { stats: ModelCatalogStat[]; models: ModelCatalogItem[]; total: number };
+
+export type VlmProfile = {
+  id: string;
+  name: string;
+  model: string;
+  base_url: string;
+  cost_per_image: number;
+  enabled: boolean;
+};
 
 export type PublicDatasetProvider = {
   provider: "kaggle" | "roboflow";
@@ -522,7 +542,11 @@ export const api = {
   discoverPublicDatasets: (projectId: string, query: string, roboflowUrl = "") =>
     request<{ candidates: PublicDatasetCandidate[]; errors: Record<string, string> }>(
       `/api/projects/${projectId}/public-datasets/discover`,
-      { method: "POST", body: JSON.stringify({ query, roboflow_url: roboflowUrl }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ query, roboflow_url: roboflowUrl }),
+        timeoutMs: DISCOVER_TIMEOUT_MS,
+      },
     ),
   fetchPublicDataset: (projectId: string, candidate: PublicDatasetCandidate) =>
     request<PublicDatasetImport>(`/api/projects/${projectId}/public-datasets/fetch`, {
@@ -534,6 +558,7 @@ export const api = {
         license_fingerprint: candidate.license_fingerprint,
         license_confirmed: true,
       }),
+      timeoutMs: PUBLIC_FETCH_TIMEOUT_MS,
     }),
   getPublicDatasetImport: (projectId: string, importId: string) =>
     request<PublicDatasetImport>(`/api/projects/${projectId}/public-dataset-imports/${importId}`),
@@ -568,24 +593,41 @@ export const api = {
     ),
   frameStats: (projectId: string) =>
     request<Record<string, number>>(`/api/projects/${projectId}/frames/stats`),
-  frameImageUrl: (projectId: string, frameId: string, annotated = false) =>
-    withAuthQuery(
-      `${getApiBase()}/api/projects/${projectId}/frames/${frameId}/image?annotated=${annotated}`,
-    ),
+  frameImageUrl: (
+    projectId: string,
+    frameId: string,
+    annotated = false,
+    options?: { maxEdge?: number },
+  ) => {
+    const params = new URLSearchParams({ annotated: String(annotated) });
+    if (options?.maxEdge && options.maxEdge > 0) {
+      params.set("max_edge", String(options.maxEdge));
+    }
+    return withAuthQuery(
+      `${getApiBase()}/api/projects/${projectId}/frames/${frameId}/image?${params.toString()}`,
+    );
+  },
   frameFeedback: (projectId: string, frameId: string, status: string, note = "") =>
     request(`/api/projects/${projectId}/frames/${frameId}/feedback`, {
       method: "POST",
       body: JSON.stringify({ status, note }),
+    }),
+  batchFrameFeedback: (projectId: string, fromStatuses: string[], status = "human_ok") =>
+    request<{ ok: boolean; updated: number }>(`/api/projects/${projectId}/frames/batch-feedback`, {
+      method: "POST",
+      body: JSON.stringify({ from_statuses: fromStatuses, status }),
     }),
   updateAnnotations: (projectId: string, frameId: string, annotations: Annotation[], status = "human_ok") =>
     request(`/api/projects/${projectId}/frames/${frameId}/annotations`, {
       method: "PUT",
       body: JSON.stringify({ annotations, status }),
     }),
-  labelEstimate: (projectId: string) =>
-    request<{ frame_count: number; cost_per_image: number; estimated_cost: number }>(
-      `/api/projects/${projectId}/label/estimate`
-    ),
+  labelEstimate: (projectId: string, vlmProfileId?: string) => {
+    const query = vlmProfileId ? `?vlm_profile_id=${encodeURIComponent(vlmProfileId)}` : "";
+    return request<{ frame_count: number; cost_per_image: number; estimated_cost: number }>(
+      `/api/projects/${projectId}/label/estimate${query}`,
+    );
+  },
 
   listTasks: (projectId: string) => request<Task[]>(`/api/projects/${projectId}/tasks`),
   listAllTasks: () => request<GlobalTask[]>("/api/tasks"),
@@ -606,6 +648,40 @@ export const api = {
     request<Task>(`/api/projects/${projectId}/tasks/${taskId}/retry`, { method: "POST" }),
 
   listModels: (projectId: string) => request<ModelVersion[]>(`/api/projects/${projectId}/models`),
+  listBaseModelCandidates: (taskType?: string) => {
+    const query = taskType ? `?task_type=${encodeURIComponent(taskType)}` : "";
+    return request<
+      Array<{
+        id: string;
+        project_id: string;
+        project_name: string;
+        version: number;
+        name: string;
+        filepath: string;
+        task_type: string;
+        origin: string;
+        created_at: string;
+      }>
+    >(`/api/models/base-candidates${query}`);
+  },
+  listBuiltinModels: (taskType?: string) => {
+    const query = taskType ? `?task_type=${encodeURIComponent(taskType)}` : "";
+    return request<
+      Array<{ key: string; name: string; hint: string; filename: string; task: string; cached: boolean }>
+    >(`/api/models/builtin${query}`);
+  },
+  registerBuiltinModels: (projectId: string, keys?: string[]) =>
+    request<{
+      ok: boolean;
+      created: ModelVersion[];
+      skipped_keys: string[];
+      downloaded: string[];
+      task_type: string;
+    }>(`/api/projects/${projectId}/models/register-builtin`, {
+      method: "POST",
+      body: JSON.stringify(keys?.length ? { keys } : {}),
+      timeoutMs: 600_000,
+    }),
   uploadModel: (projectId: string, file: File, name = "") => {
     const fd = new FormData();
     fd.append("file", file);
@@ -628,9 +704,19 @@ export const api = {
       vlm_base_url: string;
       vlm_max_concurrency: number;
       vlm_cost_per_image: number;
+      vlm_profiles: VlmProfile[];
+      default_vlm_id: string;
     }>("/api/settings"),
   updateSettings: (body: Record<string, unknown>) =>
-    request("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
+    request<{
+      dashscope_api_key_set: boolean;
+      vlm_model: string;
+      vlm_base_url: string;
+      vlm_max_concurrency: number;
+      vlm_cost_per_image: number;
+      vlm_profiles: VlmProfile[];
+      default_vlm_id: string;
+    }>("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
 
   listAuditLogs: (params: {
     page?: number;

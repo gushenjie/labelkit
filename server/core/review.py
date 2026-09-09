@@ -28,6 +28,60 @@ verdict 只能是 "pass" 或 "fail"。
 - pass：框位置准确，无漏标、无误标；画面中无目标时不应有框。
 - fail：框偏移、漏标、误标、编造目标。"""
 
+# 接口/鉴权类错误：只应提示任务失败一次，不得写入帧「审查提示」
+_INFRA_NOTE_MARKERS = (
+    "access_denied",
+    "error code:",
+    "chatcmpl-",
+    "request_id",
+    "dashscope",
+    "api key",
+    "unauthorized",
+    "authentication",
+    "rate limit",
+    "insufficient_quota",
+    "connection error",
+    "timed out",
+    "timeout",
+)
+
+
+class ReviewInfraError(RuntimeError):
+    """机器预审基础设施错误（鉴权、配额、网络等）。"""
+
+
+def is_infra_review_note(note: str) -> bool:
+    text = (note or "").strip().lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _INFRA_NOTE_MARKERS)
+
+
+def scrub_infra_review_notes(db: Session, frames: list[Frame]) -> int:
+    """清理误写入帧上的接口错误文案；返回清理条数。"""
+    cleared = 0
+    for frame in frames:
+        if is_infra_review_note(frame.review_note or ""):
+            frame.review_note = ""
+            cleared += 1
+    if cleared:
+        db.commit()
+    return cleared
+
+
+def _friendly_infra_message(exc: BaseException) -> str:
+    text = str(exc)
+    lower = text.lower()
+    if "access_denied" in lower or "403" in lower:
+        return "机器预审失败：当前视觉模型无访问权限，请在系统设置更换可用模型后重试"
+    if "api key" in lower or "unauthorized" in lower or "401" in lower:
+        return "机器预审失败：API Key 无效或未配置，请在系统设置中检查"
+    if "rate limit" in lower or "insufficient_quota" in lower:
+        return "机器预审失败：调用额度或限流不足，请稍后重试"
+    if "timeout" in lower or "timed out" in lower or "connection" in lower:
+        return "机器预审失败：网络异常，请稍后重试"
+    return f"机器预审失败：{text[:160]}"
+
 
 def _parse_json(text: str) -> dict:
     text = text.strip()
@@ -40,7 +94,7 @@ def _parse_json(text: str) -> dict:
 def _call_vlm_review(image_path: Path, prompt: str) -> dict:
     api_key = settings.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "")
     if not api_key:
-        return {"verdict": "fail", "issues": ["未配置 API Key"], "summary": "无法审查，转人工"}
+        raise ReviewInfraError("未配置 API Key")
     from openai import OpenAI
 
     b64 = base64.standard_b64encode(image_path.read_bytes()).decode("ascii")
@@ -126,9 +180,16 @@ def run_review_task(db: Session, task: Task, *, cancelled: Callable[[], bool] | 
                 frame.note = "; ".join(issues) if issues else summary
                 frame.review_note = review_note
                 fail_n += 1
-        except Exception as e:
+        except ReviewInfraError as error:
+            task.result = {"pass": pass_n, "fail": fail_n, "aborted": True}
+            raise ReviewInfraError(_friendly_infra_message(error)) from error
+        except Exception as error:
+            if is_infra_review_note(str(error)):
+                task.result = {"pass": pass_n, "fail": fail_n, "aborted": True}
+                raise ReviewInfraError(_friendly_infra_message(error)) from error
+            # 单帧业务异常仍记在该帧，不中断整批
             frame.status = FrameStatus.NEEDS_HUMAN
-            frame.review_note = str(e)
+            frame.review_note = str(error)[:200]
             fail_n += 1
 
         task.progress = i + 1

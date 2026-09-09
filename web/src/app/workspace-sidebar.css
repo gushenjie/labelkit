@@ -1,6 +1,6 @@
 /* 工作区侧栏由 Nav 组件统一控制，不随当前页面切换视觉样式。 */
 .app-shell {
-  --lk-shell-sidebar: 260px;
+  --lk-shell-sidebar: 232px;
   grid-template-columns: var(--lk-shell-sidebar) minmax(0, 1fr);
   gap: 0 10px;
   padding: 0;
@@ -21,9 +21,9 @@
   backdrop-filter: blur(18px);
 }
 
-/* 数据集页保留 260px 导航轨道，并按数据集设计稿使用 10px 页面缝隙。 */
+/* 数据集页与其它工作区菜单共用 232px 侧栏轨道 + 10px 缝隙。 */
 .app-shell:has(.dataset-center-page) {
-  --lk-shell-sidebar: 260px;
+  --lk-shell-sidebar: 232px;
   grid-template-columns: var(--lk-shell-sidebar) minmax(0, 1fr);
   gap: 0 10px;
   padding: 0;

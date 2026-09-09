@@ -33,6 +33,8 @@ const DETECT_PROGRESS_RE =
 const CLASSIFY_PROGRESS_RE =
   /^(\d+)\/(\d+)\s+(\S+)\s+([\d.]+)\s+(\d+)\s+(\d+):\s*(\d+)%.*?(\d+)\/(\d+)(?:\s+([\d.]+s\/it))?(?:\s+([\d.]+s)?<(.+))?/;
 
+const ANSI_ESCAPE_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+
 function parseBatchTail(tail: string) {
   const detect = tail.match(DETECT_PROGRESS_RE);
   if (detect) {
@@ -110,7 +112,7 @@ export function parseTrainLogLine(line: string): TrainLogEntry {
 export function formatTrainLog(log: string, maxLines = 80): string[] {
   return log
     .split("\n")
-    .map((line) => line.trim())
+    .map((line) => line.replace(ANSI_ESCAPE_RE, "").trim())
     .filter(Boolean)
     .slice(-maxLines);
 }

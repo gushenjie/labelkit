@@ -40,7 +40,7 @@ test("project dashboard API and visual controls stay connected", async ({ page }
   await page.goto("/");
   await expect(page).toHaveURL(/\/login\?next=/);
   await expect(page.getByRole("heading", { name: "欢迎登录" })).toBeVisible();
-  await page.getByLabel("账号").fill("admin");
+  await page.getByPlaceholder("请输入账号").fill("admin");
   await page.locator('input[autocomplete="current-password"]').fill("admin");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
@@ -54,6 +54,24 @@ test("project dashboard API and visual controls stay connected", async ({ page }
   const listShot = testInfo.outputPath("project-list-desktop.png");
   await page.screenshot({ path: listShot });
   await testInfo.attach("project-list-desktop", { path: listShot, contentType: "image/png" });
+  await expect(page.locator(".pm-steps").first()).toBeVisible();
+
+  const firstProjectCard = page.locator(".pm-project-card").first();
+  await firstProjectCard.hover();
+  await expect.poll(() => firstProjectCard.evaluate((element) => getComputedStyle(element).transform)).not.toBe("none");
+  const currentStep = page.locator(".pm-steps li.current > span").first();
+  await expect(currentStep).toBeVisible();
+  expect(await currentStep.evaluate((element) => getComputedStyle(element, "::after").animationName)).toBe("pm-current-pulse");
+
+  await page.locator(".pm-filter-button").click();
+  await expect(page.locator(".pm-more-filters__popover")).toBeVisible();
+  expect(await page.locator(".pm-more-filters__popover").evaluate((element) => getComputedStyle(element).animationName)).toBe("pm-popover-in");
+  await page.locator(".pm-filter-button").click();
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  expect(await firstProjectCard.evaluate((element) => getComputedStyle(element).animationName)).toBe("none");
+  expect(await currentStep.evaluate((element) => getComputedStyle(element, "::after").display)).toBe("none");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
 
   await page.getByRole("button", { name: "新建项目", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "新建项目" });

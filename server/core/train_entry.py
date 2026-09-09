@@ -24,6 +24,31 @@ class TrainingRequest(BaseModel):
     output_root: Path
     run_name: str = Field(pattern=r"^task_[0-9a-f-]+$")
     metrics_path: Path
+    # 常用高级参数；None 表示交给 Ultralytics 默认值
+    patience: int | None = Field(default=None, ge=0, le=10_000)
+    lr0: float | None = Field(default=None, gt=0, le=1.0)
+    optimizer: Literal["auto", "SGD", "Adam", "AdamW", "RMSProp"] | None = None
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    close_mosaic: int | None = Field(default=None, ge=0, le=10_000)
+    weight_decay: float | None = Field(default=None, ge=0.0, le=1.0)
+    warmup_epochs: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+def _optional_train_kwargs(request: TrainingRequest) -> dict:
+    kwargs: dict = {}
+    for key in (
+        "patience",
+        "lr0",
+        "optimizer",
+        "seed",
+        "close_mosaic",
+        "weight_decay",
+        "warmup_epochs",
+    ):
+        value = getattr(request, key)
+        if value is not None:
+            kwargs[key] = value
+    return kwargs
 
 
 def _resolve_device(requested: str) -> str:
@@ -71,6 +96,7 @@ def main() -> None:
         project=str(request.output_root),
         name=request.run_name,
         exist_ok=False,
+        **_optional_train_kwargs(request),
     )
     metrics = _json_safe(getattr(results, "results_dict", {}))
     request.metrics_path.write_text(

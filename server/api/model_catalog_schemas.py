@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ModelCatalogStatOut(BaseModel):
@@ -32,9 +32,11 @@ class ModelCatalogItemOut(BaseModel):
     metrics: list[ModelCatalogMetricOut]
     updated_at: str
     source: str = "内置模型"
+    metadata: list[str] = Field(default_factory=list)
     project_name: str | None = None
     project_id: str | None = None
     model_id: str | None = None
+    preview_frame_id: str | None = None
 
 
 class ModelCatalogOut(BaseModel):

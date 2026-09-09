@@ -21,7 +21,12 @@ import { TaskProgress } from "@/components/ui/TaskProgress";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/ToastProvider";
-import { formatDatasetFormat, allSourceLabelsIgnored, classMappingSelectValue, candidatePreviewUrl, formatCandidateClasses, formatCompactCount } from "@/lib/publicDatasetLabels";
+import {
+  matchesProjectLiveEvent,
+  PROJECT_STATS_REFRESH_EVENT,
+  requestProjectStatsRefresh,
+} from "@/lib/project-live";
+import { formatDatasetFormat, formatPublicImportState, allSourceLabelsIgnored, classMappingSelectValue, candidatePreviewUrl, formatCandidateClasses, formatCompactCount } from "@/lib/publicDatasetLabels";
 
 type UploadItem = {
   name: string;
@@ -81,6 +86,167 @@ function isPublicDialogState(state: string): boolean {
 
 function isPublicReviewState(state: string): boolean {
   return (PUBLIC_REVIEW_STATES as readonly string[]).includes(state);
+}
+
+/** 下载失败/中断：不算已导入资产，列表不展示，也不阻塞重新下载 */
+function isPublicImportFailed(state: string): boolean {
+  return state === "fetch_failed" || state === "fetch_interrupted";
+}
+
+function publicImportImageCount(item: PublicDatasetImport): number {
+  const raw = Number(item.quality_report?.image_count ?? 0);
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+function publicImportSampleCount(item: PublicDatasetImport): number {
+  return item.review_frame_ids?.length ?? 0;
+}
+
+function publicImportTone(state: string): "progress" | "review" | "done" | "danger" | "muted" {
+  if (["fetch_failed", "fetch_interrupted", "publish_interrupted"].includes(state)) return "danger";
+  if (isPublicReviewState(state)) return "review";
+  if (isPublicDialogState(state) || state === "training") return "progress";
+  if (["published", "completed"].includes(state)) return "done";
+  return "muted";
+}
+
+/** 列表态标签：短、可扫，不与操作文案撞车 */
+function inventoryStateLabel(state: string): string {
+  if (isPublicReviewState(state)) return "待复核";
+  if (state === "needs_label") return "待补标";
+  if (isPublicDialogState(state)) return "处理中";
+  if (state === "training") return "训练中";
+  if (["published", "completed"].includes(state)) return "已就绪";
+  return formatPublicImportState(state);
+}
+
+function sortPublicImports(items: PublicDatasetImport[]): PublicDatasetImport[] {
+  const rank = (state: string) => {
+    if (isPublicDialogState(state)) return 0;
+    if (isPublicReviewState(state)) return 1;
+    if (state === "needs_label") return 2;
+    if (["fetch_failed", "fetch_interrupted", "publish_interrupted"].includes(state)) return 3;
+    if (state === "training") return 4;
+    return 5;
+  };
+  return [...items].sort((a, b) => {
+    const diff = rank(a.state) - rank(b.state);
+    if (diff !== 0) return diff;
+    return (a.title || a.source_ref).localeCompare(b.title || b.source_ref, "zh-CN");
+  });
+}
+
+/** 同一来源指纹只保留优先级最高的一条，避免同名重复卡 */
+function dedupePublicImports(items: PublicDatasetImport[]): PublicDatasetImport[] {
+  const ordered = sortPublicImports(items);
+  const seen = new Set<string>();
+  const result: PublicDatasetImport[] = [];
+  for (const item of ordered) {
+    const key = item.license_fingerprint || item.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function PublicImportInventory({
+  projectId,
+  imports,
+  sampleReviewPending,
+}: {
+  projectId: string;
+  imports: PublicDatasetImport[];
+  sampleReviewPending: number;
+}) {
+  const visible = dedupePublicImports(imports.filter((item) => !isPublicImportFailed(item.state)));
+  if (visible.length === 0) return null;
+  const totalImages = visible.reduce((sum, item) => sum + publicImportImageCount(item), 0);
+
+  return (
+    <section className="materials-public-inventory" aria-label="已导入公开数据集">
+      <header className="materials-public-inventory__head">
+        <div>
+          <h3>已导入</h3>
+          <p>
+            {visible.length} 批
+            {totalImages > 0 ? ` · ${numberFormatter.format(totalImages)} 张` : ""}
+            {sampleReviewPending > 0 ? ` · ${numberFormatter.format(sampleReviewPending)} 张待复核` : ""}
+          </p>
+        </div>
+        {sampleReviewPending > 0 && (
+          <Link href={`/projects/${projectId}/review?filter=sample`} className="btn-secondary">
+            去复核
+          </Link>
+        )}
+      </header>
+      <ul className="materials-public-inventory__list">
+        {visible.map((item) => {
+          const imageCount = publicImportImageCount(item);
+          const sampleCount = publicImportSampleCount(item);
+          const tone = publicImportTone(item.state);
+          const title = item.title || item.source_ref;
+          const meta = [
+            item.source_version ? `v${item.source_version}` : "",
+            imageCount > 0 ? `${numberFormatter.format(imageCount)} 张` : "",
+            sampleCount > 0 && isPublicReviewState(item.state)
+              ? `抽 ${numberFormatter.format(sampleCount)}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
+
+          const actionHref = isPublicReviewState(item.state)
+            ? `/projects/${projectId}/review?filter=sample`
+            : item.state === "needs_label"
+              ? `/projects/${projectId}/label`
+              : null;
+
+          const body = (
+            <>
+              <div className="materials-public-inventory__title-row">
+                <strong title={title}>{title}</strong>
+                <em>{inventoryStateLabel(item.state)}</em>
+              </div>
+              {meta ? <p>{meta}</p> : null}
+            </>
+          );
+
+          return (
+            <li key={item.id}>
+              {actionHref ? (
+                <Link
+                  href={actionHref}
+                  className={`materials-public-inventory__item is-${tone} is-actionable`}
+                  title={isPublicReviewState(item.state) ? "进入抽样复核" : "进入 AI 预标注"}
+                >
+                  {body}
+                  <span className="materials-public-inventory__chevron" aria-hidden="true">
+                    <Icon name="chevron-right" size={14} />
+                  </span>
+                </Link>
+              ) : (
+                <div className={`materials-public-inventory__item is-${tone}`}>
+                  {body}
+                  {item.source_url ? (
+                    <a
+                      href={item.source_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="materials-public-inventory__link materials-public-inventory__link--muted"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      来源
+                    </a>
+                  ) : null}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
 }
 
 function upsertPublicImport(list: PublicDatasetImport[], next: PublicDatasetImport): PublicDatasetImport[] {
@@ -259,7 +425,9 @@ function PublicDatasetImportDialog({
       : "正在下载并分析…"
     : publicImport.state === "fetched"
       ? `${String(publicImport.quality_report.image_count ?? 0)} 张 · ${publishAnnotationCount} 条标注${publicImport.detected_format ? ` · ${formatDatasetFormat(publicImport.detected_format)}` : ""}`
-      : "正在发布并写入项目…";
+      : publicImport.state === "needs_label"
+        ? "导入完成，部分图片仍待预标注"
+        : "导入进行中";
 
   const handleBackdropClose = () => {
     if (!canDiscard || publicBusy) return;
@@ -462,7 +630,18 @@ function PublicDatasetImportDialog({
           {["publishing", "needs_label"].includes(publicImport.state) && (
             <div className="materials-public-import__status">
               <Icon name="sparkles" size={16} className="text-[#10A88F]" />
-              正在发布并写入项目…
+              <div className="materials-public-import__status-copy">
+                <strong>
+                  {publicImport.state === "needs_label"
+                    ? "已写入项目，可继续补标"
+                    : "正在写入图片与标注"}
+                </strong>
+                <span>
+                  {publicImport.state === "needs_label"
+                    ? "无标注图片可在「AI 预标注」中处理，有标注图片可去做抽样复核。"
+                    : "请稍候，完成后可在左侧查看该数据集，并进入抽样复核。"}
+                </span>
+              </div>
             </div>
           )}
         </div>
@@ -480,7 +659,91 @@ function PublicDatasetImportDialog({
               disabled={publicBusy || !canPublish}
               onClick={onPublish}
             >
-              发布到项目
+              导入到项目
+            </button>
+          )}
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+type PublicFetchBootstrap = {
+  title: string;
+  sourceVersion: string;
+  phase: "preparing" | "failed";
+  error?: string;
+};
+
+function PublicFetchPreparingDialog({
+  bootstrap,
+  onClose,
+}: {
+  bootstrap: PublicFetchBootstrap;
+  onClose: () => void;
+}) {
+  const failed = bootstrap.phase === "failed";
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (failed && event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="materials-public-import-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="public-fetch-preparing-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="materials-public-import-dialog__head">
+          <div>
+            <h2 id="public-fetch-preparing-title">{bootstrap.title}</h2>
+            <p>
+              {failed
+                ? "创建下载任务失败"
+                : `v${bootstrap.sourceVersion} · 正在准备导入`}
+            </p>
+          </div>
+          {failed && (
+            <button type="button" className="modal-close-button" aria-label="关闭" onClick={onClose}>
+              <Icon name="x" size={18} />
+            </button>
+          )}
+        </header>
+        <div className="materials-public-import-dialog__body">
+          <div className="materials-public-import-dialog__loading">
+            <Icon
+              name="sparkles"
+              size={36}
+              className={`text-[#10A88F]${failed ? "" : " animate-pulse"}`}
+            />
+            <strong>{failed ? "无法开始下载" : "正在创建下载任务"}</strong>
+            {failed ? (
+              <span>{bootstrap.error || "请稍后重试"}</span>
+            ) : (
+              <>
+                <ol className="materials-public-import-dialog__steps">
+                  <li className="is-active">确认数据集版本、许可证与任务类型</li>
+                  <li>在项目中创建导入记录与下载任务</li>
+                  <li>下载数据包并分析标签</li>
+                </ol>
+                <span>正在确认数据集信息，通常只需几秒</span>
+              </>
+            )}
+          </div>
+        </div>
+        <footer className="materials-public-import-dialog__footer">
+          <span>
+            {failed
+              ? "可关闭后重新选择数据集"
+              : "请保持页面打开，准备完成后会自动开始下载"}
+          </span>
+          {failed && (
+            <button type="button" className="btn-secondary" onClick={onClose}>
+              关闭
             </button>
           )}
         </footer>
@@ -676,6 +939,7 @@ export default function MaterialsPage() {
   const [costConfirmed, setCostConfirmed] = useState(false);
   const [trainingParams, setTrainingParams] = useState({ epochs: 80, imgsz: 640, batch: 8, device: "auto" });
   const [publicBusy, setPublicBusy] = useState(false);
+  const [fetchBootstrap, setFetchBootstrap] = useState<PublicFetchBootstrap | null>(null);
   const [fetchTaskProgress, setFetchTaskProgress] = useState<{ progress: number; total: number } | null>(null);
   const [sourceMode, setSourceMode] = useState<MaterialSource>("local");
   const [deletingVideoId, setDeletingVideoId] = useState<string | null>(null);
@@ -688,13 +952,13 @@ export default function MaterialsPage() {
     () => publicImports.find((item) => isPublicDialogState(item.state)) ?? null,
     [publicImports],
   );
-  const pendingReviewImports = useMemo(
-    () => publicImports.filter((item) => isPublicReviewState(item.state)),
-    [publicImports],
-  );
   const selectedCandidateImport = useMemo(
     () => (selectedCandidate
-      ? publicImports.find((item) => item.license_fingerprint === selectedCandidate.license_fingerprint) ?? null
+      ? publicImports.find(
+          (item) =>
+            item.license_fingerprint === selectedCandidate.license_fingerprint
+            && !isPublicImportFailed(item.state),
+        ) ?? null
       : null),
     [publicImports, selectedCandidate],
   );
@@ -751,6 +1015,32 @@ export default function MaterialsPage() {
     const timer = window.setInterval(refresh, 2000);
     return () => window.clearInterval(timer);
   }, [id, running]);
+
+  useEffect(() => {
+    if (!id) return;
+    const onRefresh = (event: Event) => {
+      if (!matchesProjectLiveEvent(event, id)) return;
+      api.frameStats(id).then(setFrameStats).catch(() => undefined);
+      api.listTasks(id).then((items) => {
+        setTasks(items);
+        setRunning(
+          items.some(
+            (item) =>
+              item.status === "running" && ["extract", "dedup"].includes(item.task_type),
+          ),
+        );
+      }).catch(() => undefined);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") onRefresh(new Event(PROJECT_STATS_REFRESH_EVENT));
+    };
+    window.addEventListener(PROJECT_STATS_REFRESH_EVENT, onRefresh);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener(PROJECT_STATS_REFRESH_EVENT, onRefresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [id]);
 
   useEffect(() => {
     if (!id || sourceMode !== "public") return;
@@ -946,6 +1236,7 @@ export default function MaterialsPage() {
         ...DEFAULT_EXTRACT_PARAMS,
       });
       refresh();
+      requestProjectStatsRefresh(id);
       toast({ type: "success", message: "提取任务已启动，进度可在页面上方查看" });
     } catch (error) {
       toast({ type: "error", message: `提取失败：${error}` });
@@ -1015,15 +1306,28 @@ export default function MaterialsPage() {
       confirmLabel: "开始下载",
     });
     if (!confirmed) return;
+    const candidate = selectedCandidate;
+    setFetchBootstrap({
+      title: candidate.title,
+      sourceVersion: candidate.source_version,
+      phase: "preparing",
+    });
     setPublicBusy(true);
     try {
-      const created = await api.fetchPublicDataset(id, selectedCandidate);
+      const created = await api.fetchPublicDataset(id, candidate);
       setPublicImports((previous) => upsertPublicImport(previous, created));
       setShowDiscoveryPlan(true);
       setMappingInitializedFor(null);
       setClassMapping({});
+      setFetchBootstrap(null);
       toast({ type: "info", message: "已开始下载固定版本并执行安全检查" });
     } catch (error) {
+      setFetchBootstrap({
+        title: candidate.title,
+        sourceVersion: candidate.source_version,
+        phase: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
       toast({ type: "error", message: `无法开始下载：${error}` });
     } finally {
       setPublicBusy(false);
@@ -1054,9 +1358,9 @@ export default function MaterialsPage() {
         training_params: trainingParams,
       });
       setPublicImports((previous) => upsertPublicImport(previous, { ...dialogImport, state: "publishing" }));
-      toast({ type: "info", message: "正在原子发布公开数据，可在任务中心查看进度" });
+      toast({ type: "info", message: "正在导入公开数据，可在任务中心查看进度" });
     } catch (error) {
-      toast({ type: "error", message: `公开数据发布失败：${error}` });
+      toast({ type: "error", message: `公开数据导入失败：${error}` });
     } finally {
       setPublicBusy(false);
     }
@@ -1088,7 +1392,8 @@ export default function MaterialsPage() {
   const canStartPublicFetch = Boolean(
     selectedCandidate
     && !selectedCandidateImport
-    && !dialogImport,
+    && !dialogImport
+    && !fetchBootstrap,
   );
   const selectedImportInReview = Boolean(
     selectedCandidateImport && isPublicReviewState(selectedCandidateImport.state),
@@ -1339,35 +1644,53 @@ export default function MaterialsPage() {
             {sourceMode === "public" && (
               <div className="materials-public-layout">
                 <aside className="materials-public-layout__search">
-                  <div className="bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-5">
-                    <h2 className="text-base font-bold text-[#075F5A] mb-1">公开数据检索</h2>
-                    <p className="text-xs text-[#17343A]/70 mb-4">输入你想识别的目标或场景名称</p>
-                    
-                    <div className="materials-public-search-field">
-                      <textarea
-                        className="input materials-public-search-input"
-                        rows={2}
-                        value={discoveryIntent}
-                        placeholder="例如：反光衣检测"
-                        onChange={(e) => { setDiscoveryIntent(e.target.value); setShowDiscoveryPlan(false); }}
-                      />
-                      <button 
-                        type="button"
-                        className="materials-public-search-field__action"
-                        disabled={discovering}
-                        onClick={buildDiscoveryPlan}
-                      >
-                        <Icon name="search" size={14} />
-                      </button>
-                    </div>
-                    
-                    <div className="flex flex-wrap gap-1.5">
-                      {publicExamples.map(ex => (
-                        <button key={ex} onClick={() => { setDiscoveryIntent(ex); setShowDiscoveryPlan(false); }} className="px-2 py-0.5 bg-white border border-[#e4e7ec] rounded text-[11px] font-medium text-[#17343A]/70 hover:border-[#10A88F] hover:text-[#10A88F] transition-colors">
-                          {ex}
+                  <div className="materials-public-layout__search-card">
+                    <div className="materials-public-layout__search-top">
+                      <h2 className="text-base font-bold text-[#075F5A] mb-1">公开数据检索</h2>
+                      <p className="text-xs text-[#17343A]/70 mb-4">输入你想识别的目标或场景名称</p>
+
+                      <div className="materials-public-search-field">
+                        <textarea
+                          className="input materials-public-search-input"
+                          rows={2}
+                          value={discoveryIntent}
+                          placeholder="例如：反光衣检测"
+                          onChange={(e) => { setDiscoveryIntent(e.target.value); setShowDiscoveryPlan(false); }}
+                        />
+                        <button
+                          type="button"
+                          className="materials-public-search-field__action"
+                          disabled={discovering}
+                          onClick={buildDiscoveryPlan}
+                        >
+                          <Icon name="search" size={14} />
                         </button>
-                      ))}
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5">
+                        {publicExamples.map((ex) => (
+                          <button
+                            key={ex}
+                            type="button"
+                            onClick={() => {
+                              setDiscoveryIntent(ex);
+                              setShowDiscoveryPlan(false);
+                            }}
+                            className="px-2 py-0.5 bg-white border border-[#e4e7ec] rounded text-[11px] font-medium text-[#17343A]/70 hover:border-[#10A88F] hover:text-[#10A88F] transition-colors"
+                          >
+                            {ex}
+                          </button>
+                        ))}
+                      </div>
                     </div>
+
+                    {id && publicImports.some((item) => !isPublicImportFailed(item.state)) && (
+                      <PublicImportInventory
+                        projectId={id}
+                        imports={publicImports}
+                        sampleReviewPending={sampleReviewPending}
+                      />
+                    )}
                   </div>
                 </aside>
 
@@ -1388,21 +1711,16 @@ export default function MaterialsPage() {
                        )}
                        {selectedImportInReview && selectedCandidateImport && (
                          <p className="materials-panel__head-hint">
-                           已选：{selectedCandidate!.title} · v{selectedCandidate!.source_version}（已导入，可在项目抽样复核中处理）
+                           已选：{selectedCandidate!.title} · v{selectedCandidate!.source_version} · 已导入
                          </p>
                        )}
                        {selectedCandidateImport && isPublicDialogState(selectedCandidateImport.state) && (
                          <p className="materials-panel__head-hint">
-                           「{selectedCandidateImport.title}」正在导入，请在弹窗继续操作
+                           「{selectedCandidateImport.title}」正在导入
                          </p>
                        )}
-                       {dialogImport && (
-                         <p className="materials-panel__head-hint">正在导入「{dialogImport.title}」，可在弹窗继续操作</p>
-                       )}
-                       {pendingReviewImports.length > 0 && !selectedCandidate && (
-                         <p className="materials-panel__head-hint">
-                           项目内 {pendingReviewImports.length} 批公开数据待复核，共 {sampleReviewPending} 张抽样帧
-                         </p>
+                       {dialogImport && !selectedCandidateImport && (
+                         <p className="materials-panel__head-hint">正在导入「{dialogImport.title}」</p>
                        )}
                      </div>
                      <div className="materials-panel__head-actions">
@@ -1410,24 +1728,16 @@ export default function MaterialsPage() {
                          <button
                            type="button"
                            className="btn-primary materials-panel__head-action"
-                           disabled={publicBusy || Boolean(dialogImport)}
+                           disabled={publicBusy || Boolean(dialogImport) || Boolean(fetchBootstrap)}
                            onClick={startPublicFetch}
                          >
-                           {publicBusy ? "正在创建任务…" : "下载并分析"}
+                           {publicBusy && !fetchBootstrap ? "正在创建任务…" : "下载并分析"}
                          </button>
                        )}
                        {selectedImportInReview && (
                          <Link
                            href={`/projects/${id}/review?filter=sample`}
                            className="btn-primary materials-panel__head-action"
-                         >
-                           前往抽样复核
-                         </Link>
-                       )}
-                       {pendingReviewImports.length > 0 && !selectedCandidate && sampleReviewPending > 0 && (
-                         <Link
-                           href={`/projects/${id}/review?filter=sample`}
-                           className="btn-secondary materials-panel__head-action"
                          >
                            去复核
                          </Link>
@@ -1472,7 +1782,9 @@ export default function MaterialsPage() {
                          <div className="public-dataset-grid">
                            {candidates.map((candidate, index) => {
                              const matchedImport = publicImports.find(
-                               (item) => item.license_fingerprint === candidate.license_fingerprint,
+                               (item) =>
+                                 item.license_fingerprint === candidate.license_fingerprint
+                                 && !isPublicImportFailed(item.state),
                              );
                              const importStatus = matchedImport
                                ? publicImportCardStatus(matchedImport.state)
@@ -1528,6 +1840,13 @@ export default function MaterialsPage() {
 
       {uploads.length > 0 && (
         <MaterialsUploadDialog uploads={uploads} uploading={uploading} onClose={closeUploadDialog} />
+      )}
+
+      {fetchBootstrap && !dialogImport && (
+        <PublicFetchPreparingDialog
+          bootstrap={fetchBootstrap}
+          onClose={() => setFetchBootstrap(null)}
+        />
       )}
 
       {showPublicImportDialog && dialogImport && (

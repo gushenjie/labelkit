@@ -26,9 +26,9 @@ export const FRAME_STATUS_ZH: Record<string, string> = {
 export const FRAME_STATUS_SIMPLE: Record<string, string> = {
   unlabeled: "未标注",
   llm_labeled: "待确认",
-  auto_ok: "待确认",
+  auto_ok: "机器通过",
   auto_fixed: "待确认",
-  needs_human: "待确认",
+  needs_human: "待抽样",
   human_wrong: "已驳回",
   human_ok: "已确认",
   no_target: "已确认",
@@ -36,8 +36,8 @@ export const FRAME_STATUS_SIMPLE: Record<string, string> = {
 
 export type ReviewFilter = "pending" | "sample" | "rejected" | "confirmed" | "all";
 
+/** 需要人工逐张确认的状态（不含可直接训练的 auto_ok） */
 const PENDING_REVIEW = new Set([
-  "auto_ok",
   "llm_labeled",
   "needs_human",
   "auto_fixed",
@@ -46,12 +46,23 @@ const PENDING_REVIEW = new Set([
 const REJECTED_REVIEW = new Set(["human_wrong"]);
 const CONFIRMED_REVIEW = new Set(["human_ok", "no_target"]);
 
+/** 「全部」含机器通过帧，避免与「待确认」语义撞车 */
+const ALL_REVIEW = new Set([
+  "auto_ok",
+  "llm_labeled",
+  "needs_human",
+  "auto_fixed",
+  "human_wrong",
+  "human_ok",
+  "no_target",
+]);
+
 export function reviewStatuses(filter: ReviewFilter): string[] {
   if (filter === "pending") return [...PENDING_REVIEW];
   if (filter === "sample") return ["needs_human"];
   if (filter === "rejected") return [...REJECTED_REVIEW];
   if (filter === "confirmed") return [...CONFIRMED_REVIEW];
-  return [...PENDING_REVIEW, ...REJECTED_REVIEW, ...CONFIRMED_REVIEW];
+  return [...ALL_REVIEW];
 }
 
 export function countSampleReview(stats: Record<string, number>): number {
@@ -77,13 +88,9 @@ export function countTrainable(stats: Record<string, number>): number {
   );
 }
 
+/** 待人工确认数；与 blocking 对齐，不再把 auto_ok 算进来 */
 export function countPendingReview(stats: Record<string, number>): number {
-  return (
-    (stats.auto_ok ?? 0) +
-    (stats.llm_labeled ?? 0) +
-    (stats.needs_human ?? 0) +
-    (stats.auto_fixed ?? 0)
-  );
+  return countBlockingReview(stats);
 }
 
 export function countRejected(stats: Record<string, number>): number {
@@ -92,6 +99,11 @@ export function countRejected(stats: Record<string, number>): number {
 
 export function countConfirmed(stats: Record<string, number>): number {
   return (stats.human_ok ?? 0) + (stats.no_target ?? 0);
+}
+
+/** 抽样之外仍需人工确认的数量（LLM/自动修复等） */
+export function countNonSamplePendingReview(stats: Record<string, number>): number {
+  return (stats.llm_labeled ?? 0) + (stats.auto_fixed ?? 0);
 }
 
 export function filterFramesForReview<T extends { status: string }>(
@@ -117,11 +129,25 @@ export function normalizeReviewFilter(param: string | null): ReviewFilter {
 
 export const REVIEW_FILTERS: { value: ReviewFilter; label: string; hint: string }[] = [
   { value: "sample", label: "抽样复查", hint: "公开数据风险抽样，确认完才能训练" },
-  { value: "pending", label: "待确认", hint: "机器已打标，等你逐张确认" },
+  { value: "pending", label: "待确认", hint: "预标注结果需逐张确认（不含已机器通过）" },
   { value: "rejected", label: "已驳回", hint: "点了 N 驳回的图，可手改框或 YOLO 修正" },
   { value: "confirmed", label: "已确认", hint: "人工确认完成，可参与训练" },
-  { value: "all", label: "全部", hint: "所有已标注图片" },
+  { value: "all", label: "全部", hint: "所有已标注图片（含机器通过）" },
 ];
+
+/** 按当前队列决定展示哪些筛选 Tab，避免抽样场景下「待确认≈全部」 */
+export function visibleReviewFilters(stats: Record<string, number>): ReviewFilter[] {
+  const sampleCount = countSampleReview(stats);
+  const nonSamplePending = countNonSamplePendingReview(stats);
+  return REVIEW_FILTERS
+    .filter((item) => {
+      if (item.value === "sample") return sampleCount > 0;
+      // 抽样进行中且没有其它待人工项时，隐藏「待确认」，避免与抽样/全部冲突
+      if (item.value === "pending") return sampleCount === 0 || nonSamplePending > 0;
+      return true;
+    })
+    .map((item) => item.value);
+}
 
 /** 项目概览：5 项汇总 */
 export function summarizeFrameStats(stats: Record<string, number>) {
@@ -137,7 +163,7 @@ export function summarizeFrameStats(stats: Record<string, number>) {
       key: "review",
       label: "待确认",
       value: countPendingReview(stats),
-      hint: "等你逐张确认或修正",
+      hint: "需人工确认或修正（不含机器通过）",
     },
     {
       key: "confirmed",

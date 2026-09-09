@@ -6,9 +6,71 @@ from pathlib import Path
 
 import cv2
 
-from server.core.image_io import read_image_bgr, write_image_bgr
+from server.core.image_io import read_image_bgr, resize_max_edge, write_image_bgr
 from server.core.yolo_io import parse_labels, yolo_to_xywh
 from server.db.models import Category
+
+
+def preview_cache_fresh(cache_path: Path, *sources: Path) -> bool:
+    """缓存存在且不早于任一源文件时视为可复用。"""
+    if not cache_path.is_file():
+        return False
+    cache_mtime = cache_path.stat().st_mtime
+    for source in sources:
+        if source.is_file() and source.stat().st_mtime > cache_mtime:
+            return False
+    return True
+
+
+def clear_frame_preview_cache(cache_root: Path, frame_id: str) -> None:
+    """标注变更后清理该帧全部预览缓存。"""
+    if not cache_root.is_dir():
+        return
+    for path in cache_root.glob(f"{frame_id}*"):
+        if path.is_file():
+            path.unlink(missing_ok=True)
+
+
+def frame_preview_cache_path(
+    cache_root: Path,
+    frame_id: str,
+    *,
+    annotated: bool,
+    max_edge: int | None,
+) -> Path:
+    kind = "ann" if annotated else "raw"
+    if max_edge and max_edge > 0:
+        return cache_root / f"{frame_id}_{kind}_e{max_edge}.jpg"
+    return cache_root / f"{frame_id}_{kind}.jpg"
+
+
+def ensure_frame_preview(
+    categories: list[Category],
+    image_path: Path,
+    label_path: Path | None,
+    cache_path: Path,
+    *,
+    annotated: bool,
+    max_edge: int | None = None,
+    quality: int = 82,
+) -> Path:
+    """生成或复用预览图；命中缓存则跳过 OpenCV 重绘。"""
+    sources = [image_path]
+    if annotated and label_path is not None:
+        sources.append(label_path)
+    if preview_cache_fresh(cache_path, *sources):
+        return cache_path
+
+    if annotated and label_path is not None:
+        img = draw_labeled_image(categories, image_path, label_path, max_edge=max_edge)
+    else:
+        img = read_image_bgr(image_path)
+        if img is None:
+            raise ValueError(f"Cannot read {image_path}")
+        if max_edge and max_edge > 0:
+            img = resize_max_edge(img, max_edge)
+    write_image_bgr(cache_path, img, quality=quality)
+    return cache_path
 
 
 def _color_for_class(categories: list[Category], cls_id: int) -> tuple[int, int, int]:
@@ -24,7 +86,7 @@ def _color_for_class(categories: list[Category], cls_id: int) -> tuple[int, int,
 
 
 def _line_thickness(image_height: int, image_width: int) -> int:
-    return max(3, min(image_height, image_width) // 180)
+    return max(2, min(image_height, image_width) // 180)
 
 
 def _draw_box(
@@ -43,7 +105,7 @@ def _draw_box(
     if not label:
         return
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = max(0.55, min(img.shape[0], img.shape[1]) / 900)
+    scale = max(0.45, min(img.shape[0], img.shape[1]) / 900)
     text_thickness = max(1, thickness - 1)
     (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, text_thickness)
     text_y = max(text_h + 6, y - 4)
@@ -61,10 +123,14 @@ def draw_labeled_image(
     categories: list[Category],
     image_path: Path,
     label_path: Path,
+    *,
+    max_edge: int | None = None,
 ) -> cv2.Mat:
     img = read_image_bgr(image_path)
     if img is None:
         raise ValueError(f"Cannot read {image_path}")
+    if max_edge and max_edge > 0:
+        img = resize_max_edge(img, max_edge)
     ih, iw = img.shape[:2]
     if label_path.exists():
         labels = parse_labels(label_path.read_text(encoding="utf-8"))

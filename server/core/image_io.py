@@ -45,6 +45,19 @@ def write_image_bgr(path: Path | str, image, *, quality: int = 92) -> None:
         raise ValueError(f"无法写入图片: {image_path}")
 
 
+def resize_max_edge(image, max_edge: int):
+    """按最长边缩小；已不大于 max_edge 时原样返回。"""
+    if max_edge <= 0:
+        return image
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest <= max_edge:
+        return image
+    scale = max_edge / float(longest)
+    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+
+
 def open_video_capture(video_path: Path | str) -> cv2.VideoCapture:
     """打开视频；在 Windows 中文路径下必要时回退到临时 ASCII 路径。"""
     path = Path(video_path)

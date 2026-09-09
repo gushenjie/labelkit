@@ -2,11 +2,28 @@
   position: relative;
   isolation: isolate;
   max-width: none;
+  margin: 0;
+  padding: 20px 25px 28px 28px;
   background:
     radial-gradient(circle at 52% -12%, rgb(207 244 236 / 72%), transparent 34rem),
     radial-gradient(circle at 92% 28%, rgb(16 168 143 / 8%), transparent 24rem),
     linear-gradient(180deg, #effaf7 0%, #f8fbfa 42%, #fff 100%);
   overflow: hidden auto;
+}
+
+.app-shell:has(.team-page) .app-breadcrumbs__trail h1 {
+  margin: 0;
+  color: #17343a;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -.35px;
+  line-height: 28px;
+}
+
+.app-shell:has(.team-page) .app-breadcrumbs p {
+  color: #60777a;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .app-shell:has(.team-page) .app-main::before,
@@ -34,8 +51,9 @@
 
 .team-page {
   display: grid;
-  width: min(100%, 1240px);
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
   gap: 18px;
   color: #17343a;
 }
@@ -208,6 +226,21 @@
   padding: 0 2px;
 }
 
+.team-directory__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.team-directory__actions .btn-primary {
+  min-height: 38px;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
 .team-directory__header h2 {
   margin: 0;
 }
@@ -227,15 +260,17 @@
 }
 
 .team-toolbar {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) 150px 150px;
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: end;
 }
 
 .team-search {
   display: flex;
-  min-width: 0;
+  width: 360px;
+  min-width: 260px;
+  flex: 0 0 360px;
   min-height: 40px;
   align-items: center;
   gap: 10px;
@@ -270,6 +305,8 @@
 
 .team-filter {
   display: grid;
+  width: 150px;
+  flex: 0 0 150px;
   gap: 6px;
   min-width: 0;
 }
@@ -309,10 +346,22 @@
 .team-table-head,
 .team-row {
   display: grid;
-  grid-template-columns: minmax(190px, 1.25fr) minmax(130px, 0.9fr) minmax(90px, 0.6fr) minmax(86px, 0.55fr) minmax(120px, 0.8fr) auto;
+  /* 表头与数据行是两套独立 grid，禁止用 auto，否则末列宽度不一致导致整行错位 */
+  grid-template-columns:
+    minmax(200px, 1.35fr)
+    minmax(110px, 0.85fr)
+    110px
+    96px
+    minmax(120px, 0.9fr)
+    188px;
   gap: 14px;
   align-items: center;
   padding: 0 18px;
+}
+
+.team-table-head > *,
+.team-row > * {
+  min-width: 0;
 }
 
 .team-table-head {
@@ -464,8 +513,11 @@
 
 .team-actions {
   display: flex;
-  gap: 6px;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
 }
 
 .team-actions button,
@@ -697,7 +749,13 @@
 
   .team-table-head,
   .team-row {
-    grid-template-columns: minmax(170px, 1.2fr) minmax(110px, 0.8fr) minmax(80px, 0.55fr) minmax(80px, 0.5fr) minmax(110px, 0.7fr) auto;
+    grid-template-columns:
+      minmax(170px, 1.25fr)
+      minmax(100px, 0.8fr)
+      100px
+      88px
+      minmax(110px, 0.75fr)
+      172px;
     gap: 10px;
     padding-inline: 14px;
   }
@@ -793,11 +851,18 @@
   }
 
   .team-toolbar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex-wrap: wrap;
   }
 
   .team-search {
-    grid-column: 1 / -1;
+    width: auto;
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .team-filter {
+    width: auto;
+    flex: 1 1 calc(50% - 5px);
   }
 
   .team-directory {
@@ -807,15 +872,19 @@
 }
 
 @media (max-width: 520px) {
-  .team-page .page-header {
+  .team-directory__header {
     flex-direction: column;
-    gap: 14px;
+    align-items: stretch;
   }
 
-  .team-page .page-header__copy,
-  .team-page .page-header__action,
-  .team-page .page-header .btn-primary {
+  .team-directory__actions {
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
+  .team-directory__actions .btn-primary {
     width: 100%;
+    justify-content: center;
   }
 
   .team-metrics {

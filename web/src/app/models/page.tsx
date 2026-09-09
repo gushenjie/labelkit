@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { Icon } from "@/components/Icon";
 import { api, type ModelCatalog, type ModelCatalogItem } from "@/lib/api";
@@ -8,10 +8,9 @@ import { api, type ModelCatalog, type ModelCatalogItem } from "@/lib/api";
 const FALLBACK_CATALOG: ModelCatalog = {
   total: 6,
   stats: [
-    { label: "模型总数", value: "6", change: "", icon: "cube" },
-    { label: "评估总次数", value: "2,863,421", change: "8.4%", icon: "layers" },
-    { label: "运行中模型", value: "89", change: "5%", icon: "users" },
-    { label: "部署总次数", value: "1,42,678", change: "15%", icon: "clock" },
+    { label: "项目模型", value: "0", change: "工作区训练产物", icon: "cube" },
+    { label: "可在线测试", value: "0", change: "可发起在线推理", icon: "layers" },
+    { label: "近 7 日新增", value: "0", change: "最近训练完成", icon: "clock" },
   ],
   models: [
     { id: "yolov8", name: "YOLOv8", version: "v8.2", category: "计算机视觉", description: "先进的实时目标检测模型，兼顾速度与识别精度。", icon: "yolo", framework: "PyTorch", task: "目标检测", status: "运行中", metrics: [{ label: "mAP@0.5", value: "92.4%", change: "2.3%", direction: "up" }, { label: "准确率", value: "95.1%", change: "1.8%", direction: "up" }], updated_at: "2024年5月28日" },
@@ -40,12 +39,36 @@ function SelectFilter({ label, value, values, onChange }: { label: string; value
   return <label className="catalog-select"><span>{label}</span><select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}><option value="All">全部</option>{values.map((item) => <option key={item}>{item}</option>)}</select><Icon name="chevron-down" size={15} /></label>;
 }
 
+function ModelCardArt({ model }: { model: ModelCatalogItem }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const imageUrl = model.project_id && model.preview_frame_id
+    ? api.frameImageUrl(model.project_id, model.preview_frame_id)
+    : null;
+
+  return (
+    <div className="model-card__art">
+      {imageUrl && !imageFailed ? (
+        <img
+          className="model-card__art-image"
+          src={imageUrl}
+          alt={`${model.project_name ?? model.name} 的素材代表图`}
+          onError={() => setImageFailed(true)}
+        />
+      ) : (
+        <CatalogIcon name={model.icon} />
+      )}
+    </div>
+  );
+}
+
 function ModelCard({ model }: { model: ModelCatalogItem }) {
   const isTestable = Boolean(model.project_id && model.model_id);
+  const title = model.project_name ?? model.name;
+  const dateLabel = model.source === "训练模型" ? "训练于：" : model.source === "官方预训练" ? "注册于：" : "更新于：";
   return <article className="model-card">
-    <div className="model-card__top"><div className="model-card__art"><CatalogIcon name={model.icon} /></div><div className="model-card__intro"><div className="model-card__title"><h2>{model.name}</h2><span>{model.version}</span></div><div className="model-card__labels"><mark>{model.category}</mark><span className={model.source === "训练模型" || model.source === "上传模型" ? "model-card__source model-card__source--trained" : "model-card__source"}>{model.source ?? "内置模型"}</span></div><p>{model.description}</p></div></div>
+    <div className="model-card__top"><ModelCardArt model={model} /><div className="model-card__intro"><div className="model-card__title"><h2>{title}</h2><span>{model.version}</span></div><div className="model-card__labels"><mark>{model.category}</mark>{model.source ? <mark>{model.source}</mark> : null}</div><p>{model.description}</p>{model.metadata?.length ? <div className="model-card__metadata">{model.metadata.map((item) => <span key={item}>{item}</span>)}</div> : null}</div></div>
     <div className="model-card__metrics">{model.metrics.map((metric) => <div key={metric.label}><span>{metric.label}</span><strong>{metric.value}</strong>{metric.change && <em>{metric.direction === "down" ? "↓" : "↑"} {metric.change}</em>}</div>)}</div>
-    <footer><span><Icon name="clock" size={15} />更新于：{model.updated_at}</span>{isTestable ? <Link className="model-card__deploy" href={`/models/trial?projectId=${encodeURIComponent(model.project_id!)}&modelId=${encodeURIComponent(model.model_id!)}&name=${encodeURIComponent(model.name)}&version=${encodeURIComponent(model.version)}`}>在线测试<Icon name="chevron-right" size={15} /></Link> : <span className="model-card__deploy model-card__deploy--disabled" title="内置示例模型暂未配置可推理的模型文件">内置示例</span>}<button type="button" className="model-card__more" aria-label={`${model.name} 更多操作`}><Icon name="more" size={18} /></button></footer>
+    <footer><span className="model-card__updated"><Icon name="clock" size={15} />{dateLabel}{model.updated_at}</span>{isTestable ? <Link className="model-card__deploy" href={`/models/trial?projectId=${encodeURIComponent(model.project_id!)}&modelId=${encodeURIComponent(model.model_id!)}&name=${encodeURIComponent(title)}&version=${encodeURIComponent(model.version)}`}>在线测试<Icon name="chevron-right" size={15} /></Link> : <span className="model-card__deploy model-card__deploy--disabled" title="内置示例模型暂未配置可推理的模型文件">内置示例</span>}</footer>
   </article>;
 }
 
@@ -72,9 +95,31 @@ export default function GlobalModelsPage() {
   const start = models.length ? (currentPage - 1) * pageSize + 1 : 0;
   const end = Math.min(currentPage * pageSize, models.length);
 
+  const statIcon = (name: string): "cube" | "layers" | "clock" | "folder" => {
+    if (name === "layers" || name === "clock" || name === "folder") return name;
+    return "cube";
+  };
+  const statHint = (stat: { label: string; change: string }) => {
+    if (stat.change) return stat.change;
+    if (stat.label.includes("在线")) return "可发起在线推理";
+    if (stat.label.includes("新增")) return "最近训练完成";
+    return "工作区训练产物";
+  };
+
   return <div className="model-catalog-page">
-    <section className="catalog-stats" aria-label="模型统计">{catalog.stats.map((stat) => <article key={stat.label}><div className="catalog-stat__icon"><CatalogIcon name={stat.icon} compact /></div><div><strong>{stat.value}</strong><span>{stat.label}</span>{stat.change && <small>↑ {stat.change} <em>较过去 30 天</em></small>}</div></article>)}</section>
-    <section className="catalog-toolbar" aria-label="模型筛选"><label className="catalog-search"><Icon name="search" size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按名称、类型或描述搜索模型" /></label><SelectFilter label="模型类型" value={modelType} values={unique("category")} onChange={setModelType} /><SelectFilter label="框架" value={framework} values={unique("framework")} onChange={setFramework} /><SelectFilter label="任务" value={task} values={unique("task")} onChange={setTask} /><SelectFilter label="状态" value={status} values={unique("status")} onChange={setStatus} /><button type="button" className="catalog-more-filters"><Icon name="sliders" size={17} />更多筛选</button><div className="catalog-view-toggle"><button type="button" aria-label="网格视图" aria-pressed={view === "grid"} onClick={() => setView("grid")}><Icon name="grid" size={19} /></button><button type="button" aria-label="列表视图" aria-pressed={view === "list"} onClick={() => setView("list")}><Icon name="list" size={20} /></button></div></section>
+    <section className="catalog-stats" aria-label="模型统计">
+      {catalog.stats.map((stat, index) => (
+        <article className="catalog-stat-card" key={stat.label} style={{ "--catalog-index": index } as CSSProperties}>
+          <span className="catalog-stat-card__icon"><Icon name={statIcon(stat.icon)} size={30} /></span>
+          <div>
+            <strong>{stat.value}</strong>
+            <span>{stat.label}</span>
+            <small>{statHint(stat)}</small>
+          </div>
+        </article>
+      ))}
+    </section>
+    <section className="catalog-toolbar" aria-label="模型筛选"><label className="catalog-search"><Icon name="search" size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按名称、类型或描述搜索模型" /></label><SelectFilter label="模型类型" value={modelType} values={unique("category")} onChange={setModelType} /><SelectFilter label="框架" value={framework} values={unique("framework")} onChange={setFramework} /><SelectFilter label="任务" value={task} values={unique("task")} onChange={setTask} /><SelectFilter label="状态" value={status} values={unique("status")} onChange={setStatus} /><div className="catalog-view-toggle"><button type="button" aria-label="网格视图" aria-pressed={view === "grid"} onClick={() => setView("grid")}><Icon name="grid" size={19} /></button><button type="button" aria-label="列表视图" aria-pressed={view === "list"} onClick={() => setView("list")}><Icon name="list" size={20} /></button></div></section>
     <section className={`model-card-grid model-card-grid--${view}`} aria-label="模型列表">{visibleModels.map((model) => <ModelCard key={model.id} model={model} />)}{models.length === 0 && <p className="catalog-empty">没有符合当前筛选条件的模型。</p>}</section>
     <footer className="catalog-pagination"><p>第 {start}–{end} 条，共 {models.length} 个模型</p><div><span className="catalog-pagination__size">每页 6 条</span><button type="button" disabled={currentPage === 1} aria-label="上一页" onClick={() => setPage((value) => Math.max(1, value - 1))}><Icon name="chevron-left" size={15} /></button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button type="button" key={number} aria-current={number === currentPage ? "page" : undefined} onClick={() => setPage(number)}>{number}</button>)}<button type="button" disabled={currentPage === pageCount} aria-label="下一页" onClick={() => setPage((value) => Math.min(pageCount, value + 1))}><Icon name="chevron-right" size={15} /></button></div></footer>
   </div>;

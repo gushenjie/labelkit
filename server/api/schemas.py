@@ -121,6 +121,7 @@ class ProjectOut(BaseModel):
     task_type: ProjectTaskType
     label_prompt: str
     review_prompt: str
+    created_by: str = "工作区管理员"
     created_at: datetime
     updated_at: datetime
     categories: list[CategoryOut] = Field(default_factory=list)
@@ -252,6 +253,13 @@ class FrameFeedback(BaseModel):
     note: str = ""
 
 
+class BatchFrameFeedback(BaseModel):
+    """将指定来源状态下的帧批量改为目标状态（默认人工确认）。"""
+
+    from_statuses: list[FrameStatus] = Field(min_length=1)
+    status: FrameStatus = FrameStatus.HUMAN_OK
+
+
 class AnnotationsUpdate(BaseModel):
     annotations: list[dict[str, Any]]
     status: FrameStatus = FrameStatus.HUMAN_OK
@@ -263,6 +271,32 @@ class TrainParams(BaseModel):
     batch: int = Field(default=8, ge=1, le=1024)
     device: str = "auto"
     base_model: str = ""
+    workers: int = Field(default=0, ge=0, le=64)
+    patience: int | None = Field(default=None, ge=0, le=10_000)
+    lr0: float | None = Field(default=None, gt=0, le=1.0)
+    optimizer: str | None = None
+    seed: int | None = Field(default=None, ge=0)
+    close_mosaic: int | None = Field(default=None, ge=0, le=10_000)
+    weight_decay: float | None = Field(default=None, ge=0.0, le=1.0)
+    warmup_epochs: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class VlmProfileOut(BaseModel):
+    id: str
+    name: str
+    model: str
+    base_url: str
+    cost_per_image: float
+    enabled: bool = True
+
+
+class VlmProfileUpdate(BaseModel):
+    id: str | None = None
+    name: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1, max_length=256)
+    base_url: str = Field(min_length=1, max_length=512)
+    cost_per_image: float = Field(default=0.02, ge=0)
+    enabled: bool = True
 
 
 class SettingsOut(BaseModel):
@@ -271,6 +305,8 @@ class SettingsOut(BaseModel):
     vlm_base_url: str
     vlm_max_concurrency: int
     vlm_cost_per_image: float
+    vlm_profiles: list[VlmProfileOut] = Field(default_factory=list)
+    default_vlm_id: str = ""
 
 
 class SettingsUpdate(BaseModel):
@@ -279,6 +315,8 @@ class SettingsUpdate(BaseModel):
     vlm_base_url: str | None = None
     vlm_max_concurrency: int | None = None
     vlm_cost_per_image: float | None = None
+    vlm_profiles: list[VlmProfileUpdate] | None = None
+    default_vlm_id: str | None = None
 
 
 class ModelVersionOut(BaseModel):
@@ -292,6 +330,42 @@ class ModelVersionOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class BaseModelCandidateOut(BaseModel):
+    """训练页可选基座：本项目或工作区其他项目的真实权重。"""
+
+    id: str
+    project_id: str
+    project_name: str
+    version: int
+    name: str
+    filepath: str
+    task_type: str
+    origin: str
+    created_at: datetime
+
+
+class BuiltinWeightOut(BaseModel):
+    key: str
+    name: str
+    hint: str
+    filename: str
+    task: str
+    cached: bool = False
+
+
+class RegisterBuiltinModelsRequest(BaseModel):
+    keys: list[str] | None = None
+
+
+class RegisterBuiltinModelsOut(BaseModel):
+    ok: bool = True
+    created: list[ModelVersionOut]
+    skipped_keys: list[str]
+    downloaded: list[str]
+    failed: list[str] = []
+    task_type: str
 
 
 class LabelEstimate(BaseModel):

@@ -34,6 +34,9 @@
   --lk-shadow-panel: 0 1px 2px rgb(16 24 40 / 4%), 0 6px 20px rgb(16 24 40 / 3.5%);
   --lk-shadow-hover: 0 8px 24px rgb(16 24 40 / 8%);
   --lk-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --lk-metric-card-height: 120px;
+  --lk-metric-icon-size: 56px;
+  --lk-metric-glyph-size: 30px;
   --lk-z-header: 40;
   --lk-z-dropdown: 120;
   --lk-shell-sidebar: 216px;
@@ -54,6 +57,29 @@
     "Microsoft YaHei",
     "Noto Sans CJK SC",
     sans-serif;
+  --lk-font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --lk-type-page-title-size: 26px;
+  --lk-type-page-title-line: 40px;
+  --lk-type-compact-title-size: 18px;
+  --lk-type-compact-title-line: 24px;
+  --lk-type-section-title-size: 14px;
+  --lk-type-section-title-line: 20px;
+  --lk-type-metric-size: 20px;
+  --lk-type-metric-line: 26px;
+  --lk-type-body-size: 14px;
+  --lk-type-body-line: 20px;
+  --lk-type-body-sm-size: 13px;
+  --lk-type-body-sm-line: 20px;
+  --lk-type-label-size: 12px;
+  --lk-type-label-line: 16px;
+  --lk-type-caption-size: 11px;
+  --lk-type-caption-line: 16px;
+  --lk-type-micro-size: 10px;
+  --lk-type-micro-line: 14px;
+  --lk-font-weight-regular: 400;
+  --lk-font-weight-medium: 500;
+  --lk-font-weight-semibold: 600;
+  --lk-font-weight-bold: 700;
 }
 
 * {
@@ -119,6 +145,8 @@ body {
     var(--lk-canvas);
   color: var(--lk-ink);
   font-family: var(--lk-font-sans);
+  font-size: var(--lk-type-body-size);
+  line-height: var(--lk-type-body-line);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -150,6 +178,73 @@ summary:focus-visible {
   background: var(--lk-brand-100);
   color: var(--lk-brand-700);
 }
+
+.lk-type-page-title {
+  font-size: var(--lk-type-page-title-size);
+  font-weight: var(--lk-font-weight-bold);
+  line-height: var(--lk-type-page-title-line);
+}
+
+.lk-type-compact-title {
+  font-size: var(--lk-type-compact-title-size);
+  font-weight: var(--lk-font-weight-bold);
+  line-height: var(--lk-type-compact-title-line);
+}
+
+.lk-type-section-title {
+  font-size: var(--lk-type-section-title-size);
+  font-weight: var(--lk-font-weight-semibold);
+  line-height: var(--lk-type-section-title-line);
+}
+
+.lk-type-metric {
+  font-size: var(--lk-type-metric-size);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--lk-font-weight-bold);
+  line-height: var(--lk-type-metric-line);
+}
+
+.lk-type-body {
+  font-size: var(--lk-type-body-size);
+  font-weight: var(--lk-font-weight-regular);
+  line-height: var(--lk-type-body-line);
+}
+
+.lk-type-body-sm {
+  font-size: var(--lk-type-body-sm-size);
+  font-weight: var(--lk-font-weight-regular);
+  line-height: var(--lk-type-body-sm-line);
+}
+
+.lk-type-label {
+  font-size: var(--lk-type-label-size);
+  font-weight: var(--lk-font-weight-medium);
+  line-height: var(--lk-type-label-line);
+}
+
+.lk-type-caption {
+  font-size: var(--lk-type-caption-size);
+  font-weight: var(--lk-font-weight-regular);
+  line-height: var(--lk-type-caption-line);
+}
+
+.lk-type-micro {
+  font-size: var(--lk-type-micro-size);
+  font-weight: var(--lk-font-weight-medium);
+  line-height: var(--lk-type-micro-line);
+}
+
+/* Tailwind-compatible semantic sizing aliases. Weight stays composable via
+   font-normal / font-medium / font-semibold / font-bold. */
+.text-page-title { font-size: var(--lk-type-page-title-size); line-height: var(--lk-type-page-title-line); }
+.text-compact-title { font-size: var(--lk-type-compact-title-size); line-height: var(--lk-type-compact-title-line); }
+.text-section-title { font-size: var(--lk-type-section-title-size); line-height: var(--lk-type-section-title-line); }
+.text-metric { font-size: var(--lk-type-metric-size); font-variant-numeric: tabular-nums; line-height: var(--lk-type-metric-line); }
+.text-body { font-size: var(--lk-type-body-size); line-height: var(--lk-type-body-line); }
+.text-body-sm { font-size: var(--lk-type-body-sm-size); line-height: var(--lk-type-body-sm-line); }
+.text-label { font-size: var(--lk-type-label-size); line-height: var(--lk-type-label-line); }
+.text-caption { font-size: var(--lk-type-caption-size); line-height: var(--lk-type-caption-line); }
+.text-micro { font-size: var(--lk-type-micro-size); line-height: var(--lk-type-micro-line); }
 
 .skip-link {
   position: fixed;
@@ -421,20 +516,18 @@ summary:focus-visible {
   height: 34px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1px solid var(--lk-border-strong);
+  border: 0;
   border-radius: var(--lk-radius-sm);
-  background: var(--lk-surface);
+  background: transparent;
   color: var(--lk-muted);
   text-decoration: none;
   transition:
-    border-color 150ms var(--lk-ease),
     background-color 150ms var(--lk-ease),
     color 150ms var(--lk-ease);
 }
 
 .app-commandbar__back:hover {
-  border-color: #8dcdc2;
-  background: #f9fefd;
+  background: #f3faf8;
   color: var(--lk-brand-700);
 }
 
@@ -606,8 +699,9 @@ summary:focus-visible {
   gap: 7px;
   border-radius: var(--lk-radius-sm);
   padding: 8px 15px;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--lk-type-body-size);
+  font-weight: var(--lk-font-weight-semibold);
+  line-height: var(--lk-type-body-line);
   text-decoration: none;
   transition:
     background 160ms var(--lk-ease),
@@ -661,7 +755,9 @@ summary:focus-visible {
   background: var(--lk-surface);
   padding: 8px 11px;
   color: var(--lk-ink);
-  font-size: 14px;
+  font-size: var(--lk-type-body-size);
+  font-weight: var(--lk-font-weight-regular);
+  line-height: var(--lk-type-body-line);
   outline: none;
   transition:
     border-color 150ms var(--lk-ease),

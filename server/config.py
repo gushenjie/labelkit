@@ -60,10 +60,10 @@ class Settings(BaseSettings):
         r")(?::\d+)?$"
     )
     dashscope_api_key: str = ""
-    vlm_model: str = "qwen-vl-max"
+    vlm_model: str = "qwen3-vl-plus"
     vlm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     vlm_max_concurrency: int = 3
-    vlm_cost_per_image: float = 0.02
+    vlm_cost_per_image: float = 0.03
     upload_chunk_bytes: int = 1024 * 1024
     max_upload_bytes: int = 20 * 1024 * 1024 * 1024
     login_username: str = "admin"

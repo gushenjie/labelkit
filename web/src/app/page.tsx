@@ -8,7 +8,7 @@ import { Icon } from "@/components/Icon";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/ToastProvider";
 import { api, type Project, type ProjectDashboard, type ProjectOverview } from "@/lib/api";
-import { countBlockingReview, countConfirmed, countTrainable } from "@/lib/status";
+import { countBlockingReview } from "@/lib/status";
 import { computeContinueAction, computeStepBadges, WORKFLOW_STEPS, type WorkflowStep } from "@/lib/workflow";
 import "./project-management.css";
 
@@ -60,14 +60,6 @@ function projectState(meta: ProjectOverview) {
   if (meta.model_count > 0) return { key: "deployment", label: "模型可用", tone: "blue" } as const;
   if (blocking > 0) return { key: "attention", label: "需要复查", tone: "amber" } as const;
   return { key: "active", label: "进行中", tone: "green" } as const;
-}
-
-function progressFor(meta: ProjectOverview) {
-  const total = meta.stats.total ?? 0;
-  if (!total) return 0;
-  if (meta.model_count > 0) return 100;
-  const ready = Math.max(countTrainable(meta.stats), countConfirmed(meta.stats));
-  return Math.max(4, Math.min(96, Math.round((ready / total) * 100)));
 }
 
 function HomeSkeleton() {
@@ -184,8 +176,8 @@ export default function HomePage() {
   return (
     <div className="pm-page">
       <section className="pm-stat-grid" aria-label="项目概览">
-        {metrics.map((metric) => (
-          <article className="pm-stat-card" key={metric.label}>
+        {metrics.map((metric, index) => (
+          <article className="pm-stat-card" key={metric.label} style={{ "--pm-index": index } as React.CSSProperties}>
             <span className="pm-stat-card__icon"><Icon name={metric.icon} size={30} /></span>
             <div><strong>{metric.value}</strong><span>{metric.label}</span><small>{metric.trend}</small></div>
           </article>
@@ -207,14 +199,14 @@ export default function HomePage() {
         <section className="pm-empty"><Icon name="folder" size={34} /><strong>{dashboard.projects.length ? "没有匹配的项目" : "还没有项目"}</strong><p>{dashboard.projects.length ? "调整筛选条件后再试试。" : "创建第一个项目，开始导入素材并进行智能标注。"}</p><button className="btn-primary" type="button" onClick={dashboard.projects.length ? () => { setQuery(""); setStatus("all"); setStage("all"); setCreatedBy("all"); setTaskType("all"); setSortBy("recent"); } : openCreateModal}>{dashboard.projects.length ? "清除筛选" : "新建项目"}</button></section>
       ) : (
         <section className={`pm-list pm-list--${view} lk-scrollbar`} aria-label="项目列表">
-          {filteredItems.map((meta) => {
+          {filteredItems.map((meta, index) => {
             const state = projectState(meta);
             const action = computeContinueAction(meta.project.id, meta.stats, [], meta.model_count);
             const badges = computeStepBadges(meta.stats, meta.model_count);
-            const progress = progressFor(meta);
-            const displaySteps = [...STEPS, { slug: "deployment" as const, label: "部署应用" }];
+            const displaySteps = STEPS;
+            const currentSlug = action.step;
             return (
-              <article className="pm-project-card" key={meta.project.id}>
+              <article className="pm-project-card" key={meta.project.id} style={{ "--pm-index": Math.min(index, 8) } as React.CSSProperties}>
                 <div className="pm-project-card__identity">
                   <Link href={`/projects/${meta.project.id}`} className="pm-project-card__media">
                     <img
@@ -227,25 +219,27 @@ export default function HomePage() {
                   </Link>
                   <div className="pm-project-card__copy">
                     <div className="pm-project-card__title-line"><Link href={`/projects/${meta.project.id}`}>{meta.project.name}</Link><span className="pm-tag">{meta.project.task_type === "detect" ? "目标检测" : "图像分类"}</span><span className="pm-version">v{meta.latest_model_version ?? Math.max(1, meta.model_count)}</span></div>
-                    <div className="pm-project-card__meta"><span>ID：{meta.project.id.slice(0, 11).toUpperCase()}</span><span>创建：{formatDate(meta.project.created_at)}</span></div>
-                    <div className="pm-project-card__meta"><span>负责人：{meta.created_by}</span></div>
-                    <div className="pm-project-card__chips"><span><Icon name="database" size={13} />数据：{formatNumber(meta.project.frame_count)}</span><span><Icon name="check" size={13} />任务：{formatNumber(meta.task_count)}</span><span><Icon name="layers" size={13} />类别：{formatNumber(meta.project.categories.length)}</span></div>
+                    <div className="pm-project-card__meta"><span>{formatNumber(meta.project.frame_count)} 帧数据</span><span>{formatNumber(meta.task_count)} 个任务</span><span>负责人：{meta.created_by}</span></div>
+                    <div className="pm-project-card__submeta"><span>ID：{meta.project.id.slice(0, 11).toUpperCase()}</span><span>更新于 {formatDate(meta.project.updated_at)}</span></div>
                   </div>
                 </div>
 
                 <div className="pm-project-card__workflow">
-                  <ol className="pm-steps">
+                  <ol className="pm-steps" aria-label={`${meta.project.name}流程进度`}>
                     {displaySteps.map((step) => {
-                      const badge = step.slug !== "deployment" ? badges.find((item) => item.slug === step.slug) : undefined;
-                      const current = meta.model_count > 0 ? step.slug === "deployment" : step.slug === action.step;
-                      const done = step.slug !== "deployment" && Boolean(badge?.done && !current);
+                      const badge = badges.find((item) => item.slug === step.slug);
+                      const current = step.slug === currentSlug;
+                      const done = Boolean(badge?.done && !current);
                       return <li className={`${done ? "done" : ""} ${current ? "current" : ""}`} key={step.slug}><span>{done ? <Icon name="check" size={13} /> : current ? "●" : ""}</span><b>{step.label}</b><small>{done ? "已完成" : current ? "进行中" : "待开始"}</small></li>;
                     })}
                   </ol>
-                  <div className="pm-progress"><span>总体进度</span><i><b style={{ width: `${progress}%` }} /></i><strong>{progress}%</strong></div>
                 </div>
 
-                <aside className="pm-project-card__status"><span>状态</span><b className={`pm-status pm-status--${state.tone}`}>{state.label}</b><small>更新时间<br />{formatDate(meta.project.updated_at, true)}</small><Link href={action.href}>{action.label}</Link></aside>
+                <aside className="pm-project-card__actions">
+                  <b className={`pm-status pm-status--${state.tone}`}>{state.label}</b>
+                  <small className="pm-action-hint">{action.description}</small>
+                  <Link href={action.href}>{action.label}<Icon name="arrow-right" size={14} /></Link>
+                </aside>
                 <details className="pm-card-menu"><summary aria-label="更多项目操作"><Icon name="more" size={18} /></summary><div><Link href={`/projects/${meta.project.id}`}>打开项目</Link><button type="button" disabled={deleting === meta.project.id} onClick={(event) => handleDelete(event, meta.project)}>{deleting === meta.project.id ? "删除中…" : "删除项目"}</button></div></details>
               </article>
             );

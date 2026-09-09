@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type DragEvent } from "react";
+import { Icon } from "@/components/Icon";
 
 export type TrialBox = {
   class_id: number;
@@ -19,6 +20,7 @@ type Props = {
   categories: Category[];
   loading?: boolean;
   onUpload?: (file: File) => void;
+  onBrowse?: () => void;
   uploadDisabled?: boolean;
   showSummary?: boolean;
 };
@@ -42,6 +44,7 @@ export function ModelTrialPreview({
   categories,
   loading,
   onUpload,
+  onBrowse,
   uploadDisabled = false,
   showSummary = true,
 }: Props) {
@@ -137,8 +140,13 @@ export function ModelTrialPreview({
         ].filter(Boolean).join(" ")}
         {...dropZoneProps}
       >
-        <span aria-hidden>{dragging ? "↓" : "↑"}</span>
-        <p>{dragging ? "松开鼠标开始检测" : "拖拽图片到此处，或点击上方「选择图片」"}</p>
+        <span className="model-trial-preview__empty-icon" aria-hidden><Icon name={dragging ? "upload" : "image"} size={28} /></span>
+        <div className="model-trial-preview__empty-copy">
+          <strong>{dragging ? "松开后立即开始检测" : "上传一张测试图片"}</strong>
+          <p>{dragging ? "图片将使用当前模型进行识别" : "拖放图片到此处，或从本地文件中选择"}</p>
+        </div>
+        {onBrowse && <button type="button" onClick={onBrowse}><Icon name="upload" size={17} />选择本地图片</button>}
+        <small>支持 JPG、PNG、WEBP</small>
       </div>
     );
   }

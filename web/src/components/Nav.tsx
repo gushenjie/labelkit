@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Icon, type IconName } from "@/components/Icon";
 import { BrandMarkIcon } from "@/components/BrandMark";
@@ -62,6 +62,7 @@ function currentGlobalLabel(pathname: string) {
 
 export function Nav() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const projectMatch = pathname.match(/^\/projects\/([^/]+)/);
   const projectId = projectMatch?.[1] ?? "";
   const projectRoute = projectId ? pathname.split("/")[3] ?? "" : "";
@@ -142,13 +143,20 @@ export function Nav() {
   const isDatasetCenter = pathname === "/datasets";
   const isTaskCenter = pathname === "/tasks";
   const isModelCenter = pathname === "/models";
+  const isModelTrial = pathname === "/models/trial";
   const isAuditCenter = pathname === "/audit";
+  const isTeamCenter = pathname === "/team";
+  const isSettingsCenter = pathname === "/settings";
+  const isAdminCenter = isAuditCenter || isTeamCenter || isSettingsCenter;
+  const modelTrialName = searchParams.get("name") || "当前模型";
   const pageDescription = isProjectManagement
     ? "管理素材准备、AI 预标注、标注复核与模型产出的完整生产流程"
     : pathname.startsWith("/datasets")
       ? "管理您的数据集版本，训练与评估模型"
     : pathname.startsWith("/tasks")
       ? "查看所有项目的后台任务进度与历史"
+      : isModelTrial
+        ? ""
       : pathname.startsWith("/models")
         ? "统一管理、评估和部署工作区中的 AI 模型"
         : pathname.startsWith("/settings")
@@ -286,26 +294,34 @@ export function Nav() {
             </span>
             <strong>{BRAND.fullName}</strong>
           </Link>
-          {projectId && projectBackHref ? (
+          {(projectId && projectBackHref) || isModelTrial ? (
             <Link
-              href={projectBackHref}
+              href={isModelTrial ? "/models" : projectBackHref}
               className="app-commandbar__back"
-              aria-label={projectBackLabel}
-              title={projectBackLabel}
+              aria-label={isModelTrial ? "返回模型中心" : projectBackLabel}
+              title={isModelTrial ? "返回模型中心" : projectBackLabel}
             >
               <Icon name="chevron-left" size={18} />
             </Link>
           ) : null}
           <nav className="app-breadcrumbs" aria-label="当前位置">
             <div className="app-breadcrumbs__trail">
-              {isDatasetCenter ? (
+              {isModelTrial ? (
+                <>
+                  <Link href="/models">模型中心</Link>
+                  <Icon name="chevron-right" size={13} />
+                  <span className="app-breadcrumbs__object" title={modelTrialName}>{modelTrialName}</span>
+                  <Icon name="chevron-right" size={13} />
+                  <strong>在线测试</strong>
+                </>
+              ) : isDatasetCenter ? (
                 <h1>数据管理</h1>
               ) : isTaskCenter ? (
                 <h1>任务中心</h1>
               ) : isModelCenter ? (
                 <strong>模型中心</strong>
-              ) : isAuditCenter ? (
-                <h1>审计日志</h1>
+              ) : isAdminCenter ? (
+                <h1>{breadcrumbLabel}</h1>
               ) : projectId ? (
                 <>
                 <Link href="/">项目管理</Link>
@@ -338,8 +354,8 @@ export function Nav() {
               <button type="button" className="icon-button icon-button--ghost" aria-label="通知">
                 <Icon name="bell" size={21} />
               </button>
-              <button type="button" className="project-account" aria-label="当前用户：刘智">
-                <span>刘</span>
+              <button type="button" className="project-account" aria-label={`当前用户：${displayName || username || "用户"}`}>
+                <span>{(displayName || username || "用").slice(0, 1)}</span>
                 <Icon name="chevron-down" size={16} />
               </button>
             </>

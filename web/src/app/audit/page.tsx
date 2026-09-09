@@ -136,15 +136,7 @@ export default function AuditPage() {
         </div>
       </section>
 
-      <section className="audit-workspace" aria-label="审计事件台账">
-        <header className="audit-workspace__head">
-          <div>
-            <span className="audit-workspace__kicker">Event ledger</span>
-            <h2>事件台账</h2>
-          </div>
-          <span className="audit-workspace__range">{rangeStart}–{rangeEnd} / {total}</span>
-        </header>
-
+      <section className="audit-workspace" aria-label="审计事件列表">
         <div className="audit-toolbar" aria-label="审计日志筛选">
           <label className="audit-search">
             <Icon name="search" size={19} />

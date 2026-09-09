@@ -56,7 +56,14 @@ body {
 .app-sidebar--workspace .brand-lockup__copy { gap: 3px; }
 .app-sidebar--workspace .app-sidebar__edition { color: var(--lk-muted); }
 .app-sidebar--workspace .app-sidebar__scroll { padding: 18px 10px 14px; }
-.app-sidebar--workspace .app-sidebar__section-label { margin: 2px 10px 8px; color: var(--lk-muted); }
+.app-sidebar--workspace .app-sidebar__section-label {
+  margin: 2px 10px 8px;
+  color: var(--lk-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.25px;
+  text-transform: uppercase;
+}
 .app-sidebar--workspace .app-sidebar__section-label--admin { margin-top: 24px; }
 .app-sidebar--workspace .app-sidebar__nav { gap: 3px; }
 
@@ -130,6 +137,44 @@ body {
   backdrop-filter: none;
 }
 
+/*
+ * 一级菜单页内容边距统一对齐「数据管理」基线
+ * （工作空间 + 管理：团队成员 / 审计日志 / 全局设置）
+ */
+.app-shell:has(.pm-page),
+.app-shell:has(.dataset-center-page),
+.app-shell:has(.task-center-page),
+.app-shell:has(.model-catalog-page),
+.app-shell:has(.team-page),
+.app-shell:has(.audit-page),
+.app-shell:has(.settings-page--spatial) {
+  --lk-shell-sidebar: 232px;
+  --lk-workspace-pad-x: 28px;
+  --lk-workspace-pad-right: 25px;
+  grid-template-columns: var(--lk-shell-sidebar) minmax(0, 1fr);
+  gap: 0 10px;
+}
+
+.app-shell:has(.pm-page) .app-commandbar,
+.app-shell:has(.task-center-page) .app-commandbar,
+.app-shell:has(.model-catalog-page) .app-commandbar,
+.app-shell:has(.team-page) .app-commandbar,
+.app-shell:has(.audit-page) .app-commandbar,
+.app-shell:has(.settings-page--spatial) .app-commandbar {
+  padding-right: var(--lk-workspace-pad-right);
+  padding-left: var(--lk-workspace-pad-x);
+}
+
+.app-shell:has(.pm-page) .app-main,
+.app-main:has(.task-center-page),
+.app-shell:has(.model-catalog-page) .app-main,
+.app-shell:has(.team-page) .app-main,
+.app-shell:has(.audit-page) .app-main,
+.app-main:has(.settings-page--spatial) {
+  padding-right: var(--lk-workspace-pad-right);
+  padding-left: var(--lk-workspace-pad-x);
+}
+
 /* Remove page-specific ambient decoration that competes with data. */
 .app-shell:has(.team-page) .app-main::before,
 .app-shell:has(.team-page) .app-main::after,
@@ -180,10 +225,9 @@ body {
 .audit-overview__mark { width: 46px; height: 52px; }
 .audit-overview__identity strong { color: var(--lk-ink); font-size: 28px; }
 .audit-overview__metrics { margin: 12px 12px 12px 0; box-shadow: none !important; }
-.audit-workspace__head { min-height: 56px; }
-.audit-toolbar { margin: 0 12px 12px; padding: 15px 14px 15px 13px; }
+.audit-toolbar { margin: 12px 12px 12px; padding: 15px 14px 15px 13px; }
 
-.settings-page--spatial { max-width: 1320px; min-height: auto; }
+.settings-page--spatial { max-width: none; min-height: auto; }
 .settings-page__layout { grid-template-columns: 190px minmax(0, 1fr); gap: 14px; }
 .settings-page__rail { min-height: 460px; padding: 12px; }
 .settings-page__panel { overflow: hidden; }

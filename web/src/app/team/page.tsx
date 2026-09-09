@@ -3,7 +3,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/Icon";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { PageHeader } from "@/components/ui/PageHeader";
 import { useToast } from "@/components/ui/ToastProvider";
 import { api, type WorkspaceUser } from "@/lib/api";
 import { getAuthProfile } from "@/lib/auth";
@@ -212,11 +211,6 @@ export default function TeamPage() {
   if (!isAdmin) {
     return (
       <div className="operations-page team-page">
-        <PageHeader
-          title="团队与成员"
-          description="管理工作区成员账号、角色与登录状态"
-          eyebrow="Workspace members"
-        />
         <div className="team-readonly">
           当前账号没有成员管理权限。如需添加或调整成员，请使用管理员账号登录。
         </div>
@@ -226,18 +220,6 @@ export default function TeamPage() {
 
   return (
     <div className="operations-page team-page">
-      <PageHeader
-        title="团队与成员"
-        description="管理工作区成员账号、角色与登录状态"
-        eyebrow="Workspace members"
-        action={
-          <button type="button" className="btn-primary" onClick={openCreate}>
-            <Icon name="plus" size={16} />
-            添加成员
-          </button>
-        }
-      />
-
       <section className="team-overview" aria-label="成员概览">
         <div className="team-overview__lead">
           <span className="team-overview__icon" aria-hidden="true">
@@ -271,7 +253,13 @@ export default function TeamPage() {
             <h2>成员台账</h2>
             <p>检索成员并管理其角色与账号状态</p>
           </div>
-          <span className="team-result-count">{loading ? "正在同步" : `${members.length} 位成员`}</span>
+          <div className="team-directory__actions">
+            <span className="team-result-count">{loading ? "正在同步" : `${members.length} 位成员`}</span>
+            <button type="button" className="btn-primary" onClick={openCreate}>
+              <Icon name="plus" size={16} />
+              添加成员
+            </button>
+          </div>
         </header>
 
         <div className="team-toolbar" aria-label="成员筛选">

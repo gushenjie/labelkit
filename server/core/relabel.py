@@ -6,8 +6,6 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pathlib import Path
-
 from sqlalchemy.orm import Session
 
 from server.core.image_io import read_image_bgr
@@ -25,10 +23,11 @@ PENDING_STATUSES = {
 
 
 def _resolve_model_path(db: Session, project_id: str, model_id: str | None) -> Path:
+    """解析推理权重：可选用模型中心任一已上传/训练的 .pt（不限本项目）。"""
     if model_id:
         mv = db.get(ModelVersion, model_id)
-        if not mv or mv.project_id != project_id:
-            raise RuntimeError("模型不存在")
+        if not mv:
+            raise RuntimeError("模型不存在，请从模型中心选择可用权重")
         path = Path(mv.filepath)
     else:
         mv = (
@@ -39,7 +38,7 @@ def _resolve_model_path(db: Session, project_id: str, model_id: str | None) -> P
         )
         path = Path(mv.filepath) if mv else Path()
     if not path.exists():
-        raise RuntimeError("模型文件不存在，请先上传 .pt 或完成训练")
+        raise RuntimeError("模型文件不存在，请先在模型中心上传 .pt 或完成训练")
     return path
 
 

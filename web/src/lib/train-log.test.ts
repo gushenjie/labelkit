@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupTrainLogEntries, parseTrainLogLine, parseTrainLogLines } from "./train-log";
+import { formatTrainLog, groupTrainLogEntries, parseTrainLogLine, parseTrainLogLines } from "./train-log";
 
 describe("train-log parser", () => {
   it("parses YOLO detect progress lines", () => {
@@ -40,5 +40,11 @@ describe("train-log parser", () => {
       mode: "detect",
       rows: [{ epochCurrent: 1 }, { epochCurrent: 1, batchCurrent: 1 }],
     });
+  });
+
+  it("removes terminal control characters before displaying or copying logs", () => {
+    expect(formatTrainLog("\u001b[K 1/80 0G 2.072 6.01 2.205 30 640: 2%\n")).toEqual([
+      "1/80 0G 2.072 6.01 2.205 30 640: 2%",
+    ]);
   });
 });

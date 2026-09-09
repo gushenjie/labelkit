@@ -319,7 +319,7 @@ function LabelSnapshot({ task }: { task: Task }) {
                   title={f.filename}
                 >
                   <img
-                    src={api.frameImageUrl(task.project_id, f.id, true)}
+                    src={api.frameImageUrl(task.project_id, f.id, true, { maxEdge: 320 })}
                     alt={f.filename}
                     className="aspect-square w-full object-cover bg-black"
                   />

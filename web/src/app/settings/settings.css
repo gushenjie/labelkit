@@ -14,20 +14,35 @@
   -webkit-backdrop-filter: blur(20px);
 }
 
+.app-shell:has(.settings-page--spatial) .app-breadcrumbs__trail h1 {
+  margin: 0;
+  color: #17343a;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -.35px;
+  line-height: 28px;
+}
+
+.app-shell:has(.settings-page--spatial) .app-breadcrumbs p {
+  color: #60777a;
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .app-main:has(.settings-page--spatial) {
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 24px clamp(20px, 3.2vw, 52px) 34px;
+  padding: 24px 25px 34px 28px;
 }
 
 .settings-page--spatial {
   position: relative;
   isolation: isolate;
   width: 100%;
-  max-width: 1380px;
-  min-height: calc(100vh - var(--lk-shell-header) - 58px);
-  margin: 0 auto;
+  max-width: none;
+  min-height: 0;
+  margin: 0;
   padding: 0;
 }
 
@@ -58,9 +73,9 @@
 
 .settings-page__layout {
   display: grid;
-  grid-template-columns: 206px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 18px;
+  gap: 0;
 }
 
 .settings-page__rail {
@@ -107,13 +122,15 @@
 
 .settings-page__rail-heading strong {
   color: #17343a;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
 }
 
 .settings-page__rail-heading small {
   color: #60777a;
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .settings-page__anchors {
@@ -198,10 +215,10 @@
 
 .settings-page--spatial .settings-page__panel {
   display: flex;
-  max-height: calc(100vh - var(--lk-shell-header) - 48px);
+  max-height: none;
   flex-direction: column;
   margin: 0 !important;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid rgb(255 255 255 / 90%);
   border-radius: 20px;
   background: rgb(255 255 255 / 88%);
@@ -213,9 +230,8 @@
 
 .settings-page__sections {
   min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
   overscroll-behavior: contain;
-  scroll-behavior: smooth;
 }
 
 .settings-page--spatial .panel-section {
@@ -236,9 +252,10 @@
 .settings-page--spatial .panel-section__head h2 {
   margin: 0;
   color: #17343a;
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: -.2px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  letter-spacing: 0;
 }
 
 .settings-page--spatial .settings-section-intro {
@@ -406,23 +423,114 @@
   transform: translateY(-2px);
 }
 
+.settings-profile-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.settings-profile-list {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-profile-card {
+  border: 1px solid rgb(7 95 90 / 10%);
+  border-radius: 14px;
+  background: rgb(255 255 255 / 78%);
+  padding: 14px 16px 12px;
+  box-shadow: 0 8px 24px rgb(7 95 90 / 4%);
+}
+
+.settings-profile-card--default {
+  border-color: rgb(16 168 143 / 35%);
+  box-shadow: 0 10px 28px rgb(16 168 143 / 10%);
+}
+
+.settings-profile-card--disabled {
+  opacity: 0.72;
+}
+
+.settings-profile-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-profile-card__head strong {
+  display: block;
+  color: #075f5a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.settings-profile-card__head span {
+  display: block;
+  margin-top: 2px;
+  color: #60777a;
+  font-size: 12px;
+}
+
+.settings-profile-card__badges {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-profile-card__badges em {
+  border-radius: 999px;
+  background: rgb(16 168 143 / 12%);
+  color: #078d82;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  padding: 3px 8px;
+}
+
+.settings-profile-card__off {
+  background: rgb(23 52 58 / 8%) !important;
+  color: #60777a !important;
+}
+
+.settings-field--toggle {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.settings-field--toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #10a88f;
+}
+
+.settings-profile-card__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgb(7 95 90 / 8%);
+}
+
+.settings-profile-card__delete {
+  color: #b42318;
+}
+
 @media (max-width: 980px) {
   .app-main:has(.settings-page--spatial) {
     padding-inline: 20px;
   }
 
   .settings-page__layout {
-    grid-template-columns: 168px minmax(0, 1fr);
-    gap: 14px;
-  }
-
-  .settings-page__rail {
-    min-height: 430px;
-    padding: 12px;
-  }
-
-  .settings-page__anchor::before {
-    left: -13px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
   }
 }
 
@@ -433,44 +541,6 @@
 
   .settings-page__layout {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .settings-page__rail {
-    position: static;
-    min-height: 0;
-    border-radius: 16px;
-    padding: 10px;
-  }
-
-  .settings-page__rail-heading,
-  .settings-page__rail-status {
-    display: none;
-  }
-
-  .settings-page__anchors {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    margin: 0;
-  }
-
-  .settings-page__anchor {
-    justify-content: center;
-    gap: 6px;
-    padding-inline: 8px;
-  }
-
-  .settings-page__anchor::before {
-    top: auto;
-    right: 12px;
-    bottom: -11px;
-    left: 12px;
-    width: auto;
-    height: 3px;
-    border-radius: 3px 3px 0 0;
-    transform: scaleX(.4);
-  }
-
-  .settings-page__anchor--active::before {
-    transform: scaleX(1);
   }
 
   .settings-page--spatial .settings-page__panel {

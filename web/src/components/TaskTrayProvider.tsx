@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, type Task } from "@/lib/api";
 import { getNextActionForTask, taskTypeLabel } from "@/lib/workflow";
 import { TASK_STATUS_ZH } from "@/lib/status";
+import { requestProjectModelsRefresh, requestProjectStatsRefresh } from "@/lib/project-live";
 import { useToast } from "@/components/ui/ToastProvider";
 
 export type TaskRow = Task & { projectName: string };
@@ -16,6 +17,9 @@ type TaskTrayContextValue = {
 };
 
 const TaskTrayContext = createContext<TaskTrayContextValue | null>(null);
+
+const ACTIVE_POLL_MS = 2500;
+const IDLE_POLL_MS = 20000;
 
 export function TaskTrayProvider({ children }: { children: React.ReactNode }) {
   const { toast } = useToast();
@@ -59,6 +63,10 @@ export function TaskTrayProvider({ children }: { children: React.ReactNode }) {
         if (t.task_type === "export" && t.result?.path) {
           api.openPath(String(t.result.path)).catch(() => {});
         }
+        requestProjectStatsRefresh(t.project_id);
+        if (t.task_type === "train" || t.task_type === "export") {
+          requestProjectModelsRefresh(t.project_id);
+        }
       }
       if (prev === "running" && t.status === "failed") {
         toast({
@@ -66,16 +74,33 @@ export function TaskTrayProvider({ children }: { children: React.ReactNode }) {
           message: `${taskTypeLabel(t.task_type)}失败：${t.error || "未知错误"}`,
           duration: 8000,
         });
+        requestProjectStatsRefresh(t.project_id);
       }
       prevStatusRef.current.set(key, t.status);
     }
   }, [toast]);
 
+  const hasActive = useMemo(
+    () => tasks.some((t) => t.status === "running" || t.status === "pending"),
+    [tasks],
+  );
+
   useEffect(() => {
-    refresh();
-    const timer = setInterval(refresh, 3000);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    void refresh();
+    const pollMs = hasActive ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void refresh();
+    }, pollMs);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refresh, hasActive]);
 
   const runningTasks = useMemo(
     () => tasks.filter((t) => t.status === "running" || t.status === "pending"),
@@ -96,9 +121,14 @@ export function TaskTrayProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function TaskTrayWidget() {
-  const { runningTasks, recentTasks } = useTaskTray();
+  const { runningTasks, recentTasks, refresh } = useTaskTray();
   const [panelOpen, setPanelOpen] = useState(false);
   const primaryRunning = runningTasks[0];
+
+  useEffect(() => {
+    if (!panelOpen) return;
+    void refresh();
+  }, [panelOpen, refresh]);
 
   return (
     <div className="task-tray">

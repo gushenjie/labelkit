@@ -185,7 +185,7 @@ export function computeContinueAction(
   };
 }
 
-/** 「进入项目」专用：始终落在项目内工作页，不跳到全局模型中心/任务中心 */
+/** 项目内主操作入口：始终落在项目工作页，不跳到全局模型中心/任务中心 */
 export function computeProjectEntryHref(
   projectId: string,
   stats: Record<string, number>,
@@ -272,4 +272,24 @@ export function computeStepBadges(
     { slug: "review", count: blocking > 0 ? blocking : undefined, done: reviewDone },
     { slug: "train", done: modelCount > 0 },
   ];
+}
+
+/** 前一步未具备进入条件时，后续生产步骤不可进入 */
+export function isWorkflowStepUnlocked(
+  step: WorkflowStep,
+  badges: ReadonlyArray<StepBadge>,
+  stats: Record<string, number> = {},
+): boolean {
+  const index = WORKFLOW_STEPS.findIndex((item) => item.slug === step);
+  if (index <= 0) return true;
+
+  // 标注复核：允许边预标注边复核——有素材且已有标注结果即可进入
+  if (step === "review") {
+    const total = stats.total ?? 0;
+    const unlabeled = stats.unlabeled ?? 0;
+    return total > 0 && unlabeled < total;
+  }
+
+  const previous = WORKFLOW_STEPS[index - 1];
+  return Boolean(badges.find((item) => item.slug === previous.slug)?.done);
 }

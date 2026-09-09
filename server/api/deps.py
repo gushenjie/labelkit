@@ -61,15 +61,11 @@ def require_admin(current_user: UserDTO = Depends(get_current_user)) -> UserDTO:
     return current_user
 
 
-def get_optional_actor(current_user: UserDTO = Depends(get_current_user)) -> str:
-    return current_user.display_name
-
-
 def get_optional_actor(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> str:
-    """从 Bearer token 解析用户名，失败时返回 system。"""
+    """从 Bearer token 解析展示名，失败时返回 system。"""
     token = _bearer_token(authorization)
     session = token_service.validate_token(token)
     if session is None:
@@ -77,4 +73,4 @@ def get_optional_actor(
     user = UserService(db).get_by_id(session.user_id)
     if user is None or user.status != UserStatus.ACTIVE:
         return "system"
-    return user.username
+    return (user.display_name or user.username).strip() or user.username

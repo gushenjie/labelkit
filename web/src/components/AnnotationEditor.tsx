@@ -20,6 +20,8 @@ type Props = {
   sidePanel?: HTMLElement | null;
   /** 复核操作按钮挂载点，传入后 Y/N/O 显示在侧栏而非画布上 */
   actionPanel?: HTMLElement | null;
+  /** 主图加载完成/失败回调，用于优先调度胶片条等次要请求 */
+  onImageReadyChange?: (ready: boolean) => void;
 };
 
 function annotationsToBoxes(annotations: Annotation[]): Box[] {
@@ -130,6 +132,7 @@ export function AnnotationEditor({
   compact = false,
   sidePanel = null,
   actionPanel = null,
+  onImageReadyChange,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -280,6 +283,7 @@ export function AnnotationEditor({
   useEffect(() => {
     let cancelled = false;
     setImageReady(false);
+    onImageReadyChange?.(false);
     setUserZoom(1);
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -299,11 +303,13 @@ export function AnnotationEditor({
         );
       }
       setImageReady(true);
+      onImageReadyChange?.(true);
     };
     img.onerror = () => {
       if (cancelled) return;
       imgRef.current = null;
       setImageReady(false);
+      onImageReadyChange?.(false);
     };
     img.src = imageUrl;
     return () => {
@@ -311,7 +317,7 @@ export function AnnotationEditor({
       img.onload = null;
       img.onerror = null;
     };
-  }, [imageUrl]);
+  }, [imageUrl, onImageReadyChange]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -833,7 +839,7 @@ export function AnnotationEditor({
 
   const shortcutsHint = (
     <p className={useActionPanel ? "annotation-editor__shortcuts annotation-editor__shortcuts--side" : compact ? "annotation-editor__shortcuts" : "mt-2 text-xs text-slate-500"}>
-      快捷键：Y 确认 · N 驳回 · V 查看 · A 标注 · ←→ 翻页 · Del 删框
+      快捷键：Y 确认 · N 驳回 · V 查看 · A 标注
     </p>
   );
 
@@ -856,10 +862,6 @@ export function AnnotationEditor({
           <span>驳回</span>
           <kbd className="px-1.5 py-0.5 bg-gray-100 border border-gray-200 text-gray-500 rounded text-[10px] font-mono">N</kbd>
         </button>
-      </div>
-      <div className="mt-1 text-[10px] text-[#17343A]/40 flex flex-wrap gap-2 justify-center">
-        <span><kbd className="font-mono bg-gray-100 border border-gray-200 px-1 rounded">←</kbd> <kbd className="font-mono bg-gray-100 border border-gray-200 px-1 rounded">→</kbd> 翻页</span>
-        <span><kbd className="font-mono bg-gray-100 border border-gray-200 px-1 rounded">Del</kbd> 删框</span>
       </div>
       {saveError && (
         <p className="mt-1 text-xs text-red-500">保存失败：{saveError}</p>
@@ -931,9 +933,11 @@ export function AnnotationEditor({
         </div>
         {useFloatingChrome && (
           <>
-            <div className="annotation-editor__float-corner annotation-editor__float-corner--tl">
-              {categoryButtons}
-            </div>
+            {editorMode === "annotate" && (
+              <div className="annotation-editor__float-corner annotation-editor__float-corner--tl">
+                {categoryButtons}
+              </div>
+            )}
             <div className="annotation-editor__float-corner annotation-editor__float-corner--tr">
               {modeButtons}
             </div>

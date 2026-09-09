@@ -20,6 +20,7 @@ export default function ModelTrialPage() {
   const [fileName, setFileName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
 
   useEffect(() => {
     if (!projectId) return;
@@ -35,10 +36,13 @@ export default function ModelTrialPage() {
     setFileName(file.name);
     setBoxes([]);
     setError("");
+    setElapsedMs(null);
     setLoading(true);
+    const startedAt = performance.now();
     try {
       const result = await api.predictModel(projectId, modelId, file);
       setBoxes(result.boxes);
+      setElapsedMs(Math.round(performance.now() - startedAt));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "模型推理失败，请重试。");
     } finally {
@@ -47,11 +51,131 @@ export default function ModelTrialPage() {
   };
 
   const ready = Boolean(projectId && modelId);
-  return <main className="model-trial-page">
-    <header className="model-trial-page__header"><div><Link href="/models" className="model-trial-page__back"><Icon name="chevron-left" size={16} />返回模型中心</Link><p>在线测试</p><h1>{name} <span>{version}</span></h1><small>上传一张待测图片，查看该训练版本的真实检测结果。</small></div><div className="model-trial-page__model"><Icon name="package" size={22} /><span>当前模型</span><strong>{name}</strong></div></header>
-    {!ready ? <section className="model-trial-page__notice"><strong>缺少模型上下文</strong><p>请从训练模型卡片点击“在线测试”进入此页面。</p><Link href="/models">返回模型中心</Link></section> : <section className="model-trial-workspace">
-      <aside className="model-trial-actions"><div className="model-trial-actions__step"><span>01</span><div><strong>选择测试图片</strong><p>支持拖拽上传或从本地选择。</p></div></div><input ref={inputRef} type="file" accept="image/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) void runPredict(file); event.currentTarget.value = ""; }} /><button type="button" className="model-trial-actions__upload" disabled={loading} onClick={() => inputRef.current?.click()}><Icon name="upload" size={18} />{loading ? "正在分析图片…" : "选择图片"}</button>{fileName && <p className="model-trial-actions__file"><Icon name="image" size={16} />{fileName}</p>}<div className="model-trial-actions__step"><span>02</span><div><strong>查看检测结果</strong><p>目标框、类别与置信度会直接标注在原图上。</p></div></div>{error && <p className="model-trial-actions__error">{error}</p>}</aside>
-      <section className="model-trial-stage"><div className="model-trial-stage__heading"><div><span>检测画布</span><strong>{loading ? "推理中" : imageUrl ? "检测结果" : "等待图片"}</strong></div>{boxes.length > 0 && <span className="model-trial-stage__count">识别到 {boxes.length} 个目标</span>}</div><ModelTrialPreview imageUrl={imageUrl} boxes={boxes} categories={categories} loading={loading} onUpload={(file) => void runPredict(file)} uploadDisabled={loading} /></section>
-    </section>}
-  </main>;
+  const resultState = !imageUrl ? "empty" : loading ? "loading" : error ? "error" : "complete";
+  const versionLabel = version && version !== name ? version : "";
+  const maxConfidence = boxes.length ? Math.max(...boxes.map((box) => box.conf)) : 0;
+  const visibleBoxes = boxes.slice(0, 6);
+
+  const categoryFor = (classId: number) => categories.find((item) => item.class_id === classId);
+
+  const chooseImage = () => inputRef.current?.click();
+
+  const fileInput = (
+    <input
+      ref={inputRef}
+      className="model-trial-file-input"
+      type="file"
+      accept="image/jpeg,image/png,image/webp"
+      onChange={(event) => {
+        const file = event.target.files?.[0];
+        if (file) void runPredict(file);
+        event.currentTarget.value = "";
+      }}
+    />
+  );
+
+  return (
+    <main className="model-trial-page">
+      <header className="model-trial-page__header">
+        <div className="model-trial-page__title-row">
+          <div className="model-trial-page__copy">
+            <span className="model-trial-page__eyebrow">ONLINE INFERENCE</span>
+            <h1>在线测试</h1>
+            <p>上传一张图片，查看目标框、类别与置信度。</p>
+          </div>
+          <div className="model-trial-page__current-model">
+            <span className="model-trial-page__model-icon"><Icon name="cube" size={21} /></span>
+            <div><small>当前模型</small><strong title={name}>{name}</strong></div>
+            {versionLabel && <span className="model-trial-page__version">{versionLabel}</span>}
+            <span className="model-trial-page__type">目标检测</span>
+          </div>
+        </div>
+      </header>
+
+      {!ready ? (
+        <section className="model-trial-page__notice">
+          <Icon name="package" size={28} />
+          <div><strong>缺少模型上下文</strong><p>请从训练模型卡片点击“在线测试”进入此页面。</p></div>
+          <Link href="/models">返回模型中心<Icon name="arrow-right" size={15} /></Link>
+        </section>
+      ) : (
+        <section className={`model-trial-workspace model-trial-workspace--${resultState}`}>
+          {fileInput}
+          <div className="model-trial-result-layout">
+            <section className="model-trial-image-panel">
+              <header className="model-trial-panel-header">
+                <div><span>测试图片</span><strong title={fileName}>{fileName || "尚未选择图片"}</strong></div>
+                {imageUrl && <button type="button" className="model-trial-change-button" disabled={loading} onClick={chooseImage}>
+                  <Icon name={loading ? "refresh" : "upload"} size={16} />{loading ? "检测中…" : "更换图片"}
+                </button>}
+              </header>
+              <div className={`model-trial-stage model-trial-stage--${resultState}`}>
+                <ModelTrialPreview
+                  imageUrl={imageUrl}
+                  boxes={boxes}
+                  categories={categories}
+                  loading={loading}
+                  onUpload={(file) => void runPredict(file)}
+                  onBrowse={!imageUrl ? chooseImage : undefined}
+                  uploadDisabled={loading}
+                  showSummary={false}
+                />
+                {!imageUrl && error && <p className="model-trial-stage__error" role="alert"><Icon name="audit" size={16} />{error}</p>}
+              </div>
+            </section>
+
+            <aside className="model-trial-result-panel" aria-live="polite">
+              <header className="model-trial-result-panel__header">
+                <div><span>检测结果</span><h2>{!imageUrl ? "等待测试" : loading ? "正在分析图片" : error ? "检测未完成" : boxes.length ? `识别到 ${boxes.length} 个目标` : "未检测到目标"}</h2></div>
+                <span className={`model-trial-state model-trial-state--${resultState}`}><i />{!imageUrl ? "待开始" : loading ? "进行中" : error ? "失败" : "已完成"}</span>
+              </header>
+
+              {!imageUrl ? (
+                <div className="model-trial-ready-state">
+                  <section>
+                    <strong>当前模型</strong>
+                    <dl><div><dt>版本</dt><dd>{versionLabel || "当前版本"}</dd></div><div><dt>任务</dt><dd>目标检测</dd></div></dl>
+                  </section>
+                  <section>
+                    <strong>可识别类别</strong>
+                    <div className="model-trial-ready-state__categories">
+                      {categories.length ? categories.map((category) => <span key={category.class_id}><i style={{ backgroundColor: category.color }} />{category.name}</span>) : <small>正在读取项目类别…</small>}
+                    </div>
+                  </section>
+                  <p><Icon name="image" size={17} /><span><strong>图片建议</strong>主体清晰、无遮挡且占据画面主要区域。</span></p>
+                </div>
+              ) : loading ? (
+                <div className="model-trial-loading-state"><span /><span /><span /><p>模型正在读取图片并生成目标框</p></div>
+              ) : error ? (
+                <div className="model-trial-error-state" role="alert">
+                  <span><Icon name="audit" size={22} /></span><strong>本次检测失败</strong><p>{error}</p>
+                  <button type="button" onClick={chooseImage}>选择其他图片</button>
+                </div>
+              ) : (
+                <>
+                  <div className="model-trial-metrics">
+                    <div><span>目标数量</span><strong>{boxes.length}</strong><small>个检测框</small></div>
+                    <div><span>最高置信度</span><strong>{boxes.length ? `${(maxConfidence * 100).toFixed(1)}%` : "—"}</strong><small>{elapsedMs === null ? "等待检测" : `本次耗时 ${elapsedMs}ms`}</small></div>
+                  </div>
+                  <section className="model-trial-detections">
+                    <div className="model-trial-detections__title"><strong>目标明细</strong>{boxes.length > 6 && <span>前 6 项</span>}</div>
+                    {visibleBoxes.length ? (
+                      <ol>
+                        {visibleBoxes.map((box, index) => {
+                          const category = categoryFor(box.class_id);
+                          return <li key={`${box.class_id}-${box.x}-${box.y}-${index}`}><i style={{ backgroundColor: category?.color || "#12A88F" }} /><span>{category?.name ?? `类别 ${box.class_id}`}</span><strong>{(box.conf * 100).toFixed(1)}%</strong></li>;
+                        })}
+                      </ol>
+                    ) : (
+                      <div className="model-trial-empty-result"><span><Icon name="search" size={21} /></span><strong>画面中未发现目标</strong><p>可更换角度更清晰、主体更完整的图片再次检测。</p></div>
+                    )}
+                  </section>
+                </>
+              )}
+            </aside>
+          </div>
+        </section>
+      )}
+    </main>
+  );
 }

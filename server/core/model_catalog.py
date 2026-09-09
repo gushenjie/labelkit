@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Mapping
 
 
@@ -36,9 +37,11 @@ class CatalogItem:
     metrics: tuple[CatalogMetric, CatalogMetric]
     updated_at: str
     source: str = "内置模型"
+    metadata: tuple[str, ...] = ()
     project_name: str | None = None
     project_id: str | None = None
     model_id: str | None = None
+    preview_frame_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,14 +58,14 @@ class TrainingModel:
     base_model: str
     updated_at: str
     source: str = "训练模型"
+    preview_frame_id: str | None = None
+    created_at: datetime | None = None
+    dataset_version: int | None = None
+    sample_count: int | None = None
+    class_count: int | None = None
+    device: str | None = None
+    duration_seconds: int | None = None
 
-
-CATALOG_STATS = (
-    CatalogStat("模型总数", "76", "11%", "cube"),
-    CatalogStat("评估总次数", "2,863,421", "8.4%", "layers"),
-    CatalogStat("运行中模型", "89", "5%", "users"),
-    CatalogStat("部署总次数", "1,42,678", "15%", "clock"),
-)
 
 CATALOG_MODELS = (
     CatalogItem("yolov8", "YOLOv8", "v8.2", "计算机视觉", "先进的实时目标检测模型，兼顾速度与识别精度。", "yolo", "PyTorch", "目标检测", "运行中", (CatalogMetric("mAP@0.5", "92.4%", "2.3%"), CatalogMetric("准确率", "95.1%", "1.8%")), "2024年5月28日"),
@@ -84,38 +87,59 @@ def _percent(metrics: Mapping[str, object], *keys: str) -> str:
 
 def _training_catalog_item(model: TrainingModel) -> CatalogItem:
     task = "目标检测" if model.task_type == "detect" else "图像分类"
-    category = "项目训练"
     base_model = model.base_model or "自定义基座模型"
+    metadata = []
+    if model.dataset_version is not None:
+        metadata.append(f"数据集 V{model.dataset_version}")
+    if model.sample_count:
+        metadata.append(f"{model.sample_count:,} 张")
+    if model.class_count:
+        metadata.append(f"{model.class_count} 类")
+    if model.duration_seconds:
+        minutes, seconds = divmod(model.duration_seconds, 60)
+        metadata.append(f"训练用时：{minutes}分{seconds:02d}秒" if minutes else f"训练用时：{seconds}秒")
     return CatalogItem(
         id=f"trained-{model.id}",
         name=model.name,
         version=f"v{model.version}",
-        category=category,
-        description=f"来自「{model.project_name}」的训练版本，基于 {base_model}。",
+        category=task,
+        description=f"基座模型：{base_model}",
         icon="yolo",
         framework="PyTorch",
         task=task,
         status="可部署",
         metrics=(
             CatalogMetric("mAP@0.5", _percent(model.metrics, "metrics/mAP50(B)", "mAP50", "map50"), "", "neutral"),
-            CatalogMetric("精确率", _percent(model.metrics, "metrics/precision(B)", "precision"), "", "neutral"),
+            CatalogMetric("mAP50-95", _percent(model.metrics, "metrics/mAP50-95(B)", "mAP50-95", "map50_95"), "", "neutral"),
         ),
         updated_at=model.updated_at,
         source=model.source,
+        metadata=tuple(metadata),
         project_name=model.project_name,
         project_id=model.project_id,
         model_id=model.id,
+        preview_frame_id=model.preview_frame_id,
     )
 
 
 def get_model_catalog(training_models: Iterable[TrainingModel] = ()) -> dict:
     """Return built-in models together with completed project training versions."""
 
+    training_models = tuple(training_models)
     trained_items = tuple(_training_catalog_item(model) for model in training_models)
     models = (*trained_items, *CATALOG_MODELS)
     total = len(models)
-    stats = list(CATALOG_STATS)
-    stats[0] = CatalogStat("模型总数", str(total), "", "cube")
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    recent_count = sum(
+        model.created_at is not None
+        and model.created_at.replace(tzinfo=model.created_at.tzinfo or timezone.utc) >= recent_cutoff
+        for model in training_models
+    )
+    stats = (
+        CatalogStat("项目模型", str(len(trained_items)), "工作区训练产物", "cube"),
+        CatalogStat("可在线测试", str(len(trained_items)), "可发起在线推理", "layers"),
+        CatalogStat("近 7 日新增", str(recent_count), "最近训练完成", "clock"),
+    )
 
     return {
         "stats": [asdict(item) for item in stats],

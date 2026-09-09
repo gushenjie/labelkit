@@ -2,13 +2,18 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { YoloLabelDialog } from "@/components/YoloLabelPanel";
+import { LlmLabelDialog } from "@/components/LlmLabelPanel";
 import { api, Frame, Task } from "@/lib/api";
 import { reviewPageUrl, reviewFilterForFrame } from "@/lib/review-nav";
 import { FRAME_STATUS_SIMPLE, countPendingReview } from "@/lib/status";
+import {
+  matchesProjectLiveEvent,
+  PROJECT_STATS_REFRESH_EVENT,
+  requestProjectStatsRefresh,
+} from "@/lib/project-live";
 import { TaskProgress } from "@/components/ui/TaskProgress";
-import { useToast } from "@/components/ui/ToastProvider";
 import { Icon } from "@/components/Icon";
 import { FrameLightbox } from "@/components/FrameLightbox";
 import { ProjectPageHeader } from "@/components/ProjectPageHeader";
@@ -21,15 +26,13 @@ type LabelMode = "llm" | "yolo";
 
 const TASK_LABEL: Record<string, string> = {
   label: "LLM 标注",
-  relabel: "YOLO 标注",
+  relabel: "模型标注",
 };
 
 export default function LabelPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const { toast } = useToast();
   const [mode, setMode] = useState<LabelMode>("yolo");
-  const [estimate, setEstimate] = useState({ frame_count: 0, cost_per_image: 0, estimated_cost: 0 });
   const [tasks, setTasks] = useState<Task[]>([]);
   const [frameStats, setFrameStats] = useState<Record<string, number>>({});
   const [running, setRunning] = useState(false);
@@ -40,6 +43,7 @@ export default function LabelPage() {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [actionError, setActionError] = useState("");
   const [yoloDialogOpen, setYoloDialogOpen] = useState(false);
+  const [llmDialogOpen, setLlmDialogOpen] = useState(false);
 
   const unlabeledCount = frameStats.unlabeled ?? 0;
   const pendingReviewCount = countPendingReview(frameStats);
@@ -56,7 +60,6 @@ export default function LabelPage() {
 
   const refresh = () => {
     if (!id) return;
-    api.labelEstimate(id).then(setEstimate);
     api.frameStats(id).then(setFrameStats);
     api.listTasks(id).then((t) => {
       const autoTasks = t.filter((x) => AUTO_TASK_TYPES.has(x.task_type));
@@ -74,20 +77,27 @@ export default function LabelPage() {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, running ? 2000 : 5000);
+    if (!running) return;
+    const t = setInterval(refresh, 2000);
     return () => clearInterval(t);
   }, [id, running]);
 
-  const startLabel = async () => {
+  useEffect(() => {
     if (!id) return;
-    setActionError("");
-    try {
-      await api.createTask(id, "label", { only_status: "unlabeled" });
+    const onRefresh = (event: Event) => {
+      if (!matchesProjectLiveEvent(event, id)) return;
       refresh();
-    } catch (e) {
-      setActionError(String(e));
-    }
-  };
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener(PROJECT_STATS_REFRESH_EVENT, onRefresh);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener(PROJECT_STATS_REFRESH_EVENT, onRefresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [id]);
 
   const activeTask = tasks.find((t) => t.status === "running");
   const processedCount =
@@ -177,7 +187,7 @@ export default function LabelPage() {
                 onClick={() => setMode("yolo")}
                 disabled={running}
               >
-                YOLO <span className="text-[10px] text-[#10A88F]">.pt</span>
+                模型中心
               </button>
               <button
                 className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${mode === "llm" ? 'bg-white text-[#075F5A] shadow-sm ring-1 ring-[#10A88F]/20' : 'text-[#17343A]/50 hover:text-[#075F5A]'}`}
@@ -231,44 +241,40 @@ export default function LabelPage() {
               )}
             </div>
           ) : mode === "llm" ? (
-            <div className="flex-1 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-6 flex flex-col shrink-0">
-              <div className="flex items-start gap-4 mb-6 pb-6 border-b border-[#f0f4f3]">
-                <div className="w-12 h-12 bg-[#F4FAF8] text-[#10A88F] rounded-xl flex items-center justify-center shrink-0 border border-white shadow-sm"><Icon name="sparkles" size={24} /></div>
-                <div className="flex-1">
-                  <span className="text-[10px] font-bold tracking-wider text-[#10A88F] uppercase block mb-1">Vision language model</span>
+            <div className="shrink-0 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-4 min-w-0">
+                <div className="w-12 h-12 bg-[#F4FAF8] text-[#10A88F] rounded-xl flex items-center justify-center shrink-0 border border-white shadow-sm">
+                  <Icon name="sparkles" size={22} />
+                </div>
+                <div className="min-w-0">
                   <h2 className="text-lg font-bold text-[#075F5A] mb-1">LLM 大模型预标注</h2>
-                  <p className="text-sm text-[#17343A]/60">根据项目类别和提示词理解画面，并生成初始标注。</p>
+                  <p className="text-sm text-[#17343A]/60">
+                    {unlabeledCount > 0
+                      ? `${unlabeledCount} 张未标注 · 从全局设置的大模型列表中选择后批量理解并打框`
+                      : "当前没有待预标注素材"}
+                  </p>
                 </div>
               </div>
-              <div className="flex gap-6 mb-6">
-                <div className="flex-1 bg-[#F4FAF8] border border-[#CFF4EC] rounded-xl p-4 flex flex-col justify-center">
-                  <span className="text-xs text-[#17343A]/60 mb-1 block">待处理</span>
-                  <strong className="text-xl font-bold text-[#075F5A]">{estimate.frame_count} <span className="text-sm font-normal">张</span></strong>
-                </div>
-                <div className="flex-1 bg-[#F4FAF8] border border-[#CFF4EC] rounded-xl p-4 flex flex-col justify-center">
-                  <span className="text-xs text-[#17343A]/60 mb-1 block">单张成本</span>
-                  <strong className="text-xl font-bold text-[#075F5A]">¥{estimate.cost_per_image}</strong>
-                </div>
-                <div className="flex-1 bg-[#F4FAF8] border border-[#CFF4EC] rounded-xl p-4 flex flex-col justify-center">
-                  <span className="text-xs text-[#17343A]/60 mb-1 block">预估费用</span>
-                  <strong className="text-xl font-bold text-[#10A88F]">¥{estimate.estimated_cost}</strong>
-                </div>
-              </div>
-              <button className="w-full py-3 bg-[#10A88F] text-white rounded-xl font-bold text-sm hover:bg-[#078D82] transition-colors shadow-sm shadow-[#10A88F]/20 disabled:opacity-50 disabled:shadow-none" disabled={running || estimate.frame_count === 0} onClick={startLabel}>
-                {running && activeTask?.task_type === "label" ? "LLM 预标注进行中…" : "开始 LLM 预标注"}
+              <button
+                type="button"
+                className="shrink-0 px-6 py-3 bg-[#10A88F] text-white rounded-xl text-sm font-bold hover:bg-[#078D82] shadow-sm shadow-[#10A88F]/20 disabled:opacity-50 disabled:shadow-none transition-colors"
+                disabled={running || unlabeledCount === 0}
+                onClick={() => setLlmDialogOpen(true)}
+              >
+                {running && activeTask?.task_type === "label" ? "LLM 标注进行中…" : "选择模型并标注"}
               </button>
             </div>
           ) : (
             <div className="shrink-0 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-center gap-4 min-w-0">
                 <div className="w-12 h-12 bg-[#F4FAF8] text-[#10A88F] rounded-xl flex items-center justify-center shrink-0 border border-white shadow-sm">
-                  <Icon name="cube" size={22} />
+                  <Icon name="package" size={22} />
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-lg font-bold text-[#075F5A] mb-1">YOLO 自动标注</h2>
+                  <h2 className="text-lg font-bold text-[#075F5A] mb-1">模型中心自动标注</h2>
                   <p className="text-sm text-[#17343A]/60">
                     {unlabeledCount > 0
-                      ? `${unlabeledCount} 张未标注 · 选择模型后批量打框，完成后进入人工复核`
+                      ? `${unlabeledCount} 张未标注 · 从模型中心选择权重（含上传的 .pt / 训练产物）批量打框`
                       : "当前没有待预标注素材"}
                   </p>
                 </div>
@@ -279,7 +285,7 @@ export default function LabelPage() {
                 disabled={running || unlabeledCount === 0}
                 onClick={() => setYoloDialogOpen(true)}
               >
-                {running && activeTask?.task_type === "relabel" ? "YOLO 标注进行中…" : "开始 YOLO 标注"}
+                {running && activeTask?.task_type === "relabel" ? "自动标注进行中…" : "选择模型并标注"}
               </button>
             </div>
           )}
@@ -312,7 +318,7 @@ export default function LabelPage() {
                       onDoubleClick={() => goReview(f)}
                       title={`${f.filename}（单击查看大图）`}
                     >
-                      <img src={api.frameImageUrl(id!, f.id, true)} alt={f.filename} className="w-full h-full object-cover" />
+                      <img src={api.frameImageUrl(id!, f.id, true, { maxEdge: 320 })} alt={f.filename} className="w-full h-full object-cover" />
                       <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/60 to-transparent p-2 pt-5 flex justify-center">
                         <span className="text-[10px] font-bold text-white bg-black/40 backdrop-blur-md px-2 py-0.5 rounded shadow-sm">{FRAME_STATUS_SIMPLE[f.status]}</span>
                       </div>
@@ -331,7 +337,22 @@ export default function LabelPage() {
         projectId={id!}
         frameStats={frameStats}
         fixedOnlyStatus="unlabeled"
-        onDone={refresh}
+        onDone={() => {
+          refresh();
+          if (id) requestProjectStatsRefresh(id);
+        }}
+      />
+
+      <LlmLabelDialog
+        open={llmDialogOpen}
+        onClose={() => setLlmDialogOpen(false)}
+        projectId={id!}
+        frameStats={frameStats}
+        fixedOnlyStatus="unlabeled"
+        onDone={() => {
+          refresh();
+          if (id) requestProjectStatsRefresh(id);
+        }}
       />
 
       <FrameLightbox

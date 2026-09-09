@@ -6,6 +6,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, DatasetVersionSummary, ModelVersion, Project, Task } from "@/lib/api";
 import { countConfirmed } from "@/lib/status";
+import {
+  matchesProjectLiveEvent,
+  PROJECT_MODELS_REFRESH_EVENT,
+  PROJECT_STATS_REFRESH_EVENT,
+  requestProjectStatsRefresh,
+} from "@/lib/project-live";
 import { ProjectPageHeader } from "@/components/ProjectPageHeader";
 import { WorkflowNextButton } from "@/components/WorkflowNextButton";
 import { WORKFLOW_STEPS } from "@/lib/workflow";
@@ -18,6 +24,33 @@ import { TrainLogPanel } from "@/components/TrainLogPanel";
 import { formatTrainLog } from "@/lib/train-log";
 
 const EXPORT_DIR_KEY = "labelkit-export-dir";
+
+const DETECT_OFFICIAL_MODELS = [
+  { value: "yolov8n.pt", label: "YOLOv8n（最快 / 精度较低）" },
+  { value: "yolov8s.pt", label: "YOLOv8s（默认平衡）" },
+  { value: "yolov8m.pt", label: "YOLOv8m（更准 / 更慢）" },
+  { value: "yolov8l.pt", label: "YOLOv8l（高精度）" },
+  { value: "yolo11n.pt", label: "YOLO11n" },
+  { value: "yolo11s.pt", label: "YOLO11s" },
+] as const;
+
+const CLASSIFY_OFFICIAL_MODELS = [
+  { value: "yolov8n-cls.pt", label: "YOLOv8n-cls（最快）" },
+  { value: "yolov8s-cls.pt", label: "YOLOv8s-cls（默认平衡）" },
+  { value: "yolov8m-cls.pt", label: "YOLOv8m-cls（更准）" },
+  { value: "yolo11n-cls.pt", label: "YOLO11n-cls" },
+  { value: "yolo11s-cls.pt", label: "YOLO11s-cls" },
+] as const;
+
+function defaultOfficialModel(taskType?: string | null): string {
+  return taskType === "classify" ? "yolov8s-cls.pt" : "yolov8s.pt";
+}
+
+function modelOriginLabel(origin: string): string {
+  if (origin === "builtin") return "官方预训练";
+  if (origin === "upload") return "上传";
+  return "训练产物";
+}
 
 function safeDirName(name: string): string {
   return name.replace(/[/\\:*?"<>|]/g, "_").trim() || "dataset";
@@ -38,6 +71,19 @@ export default function TrainPage() {
   const [mounted, setMounted] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
   const [models, setModels] = useState<ModelVersion[]>([]);
+  const [baseCandidates, setBaseCandidates] = useState<
+    Array<{
+      id: string;
+      project_id: string;
+      project_name: string;
+      version: number;
+      name: string;
+      filepath: string;
+      task_type: string;
+      origin: string;
+      created_at: string;
+    }>
+  >([]);
   const [datasetVersions, setDatasetVersions] = useState<DatasetVersionSummary[]>([]);
   const [datasetVersionId, setDatasetVersionId] = useState("");
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -45,6 +91,15 @@ export default function TrainPage() {
   const [imgsz, setImgsz] = useState(640);
   const [batch, setBatch] = useState(8);
   const [device, setDevice] = useState("auto");
+  const [baseModel, setBaseModel] = useState("");
+  const [workers, setWorkers] = useState(0);
+  const [patience, setPatience] = useState(50);
+  const [lr0, setLr0] = useState(0.01);
+  const [optimizer, setOptimizer] = useState("auto");
+  const [seed, setSeed] = useState(0);
+  const [closeMosaic, setCloseMosaic] = useState(10);
+  const [weightDecay, setWeightDecay] = useState(0.0005);
+  const [warmupEpochs, setWarmupEpochs] = useState(3);
   const [stats, setStats] = useState<Record<string, number>>({});
   const [starting, setStarting] = useState(false);
   const [exportDir, setExportDir] = useState("");
@@ -73,7 +128,10 @@ export default function TrainPage() {
 
   const refresh = () => {
     if (!id) return;
-    api.getProject(id).then(setProject);
+    api.getProject(id).then((p) => {
+      setProject(p);
+      api.listBaseModelCandidates(p.task_type).then(setBaseCandidates).catch(() => setBaseCandidates([]));
+    });
     api.listModels(id).then(setModels);
     api.getDatasetCatalog({ projectId: id, limit: 200 }).then((catalog) => setDatasetVersions(catalog.items));
     api.listTasks(id).then((t) => {
@@ -94,9 +152,51 @@ export default function TrainPage() {
     if (requestedVersion) setDatasetVersionId(requestedVersion);
     if (window.location.hash === "#dataset-export") setExportModalOpen(true);
     refresh();
-    const t = setInterval(refresh, 3000);
-    return () => clearInterval(t);
   }, [id]);
+
+  useEffect(() => {
+    if (!project) return;
+    setBaseModel((current) => {
+      if (current) return current;
+      return defaultOfficialModel(project.task_type);
+    });
+  }, [project]);
+
+  useEffect(() => {
+    if (!id) return;
+    const live =
+      exportRunning ||
+      tasks.some((t) => t.status === "running" || t.status === "pending");
+    if (!live) return;
+    const timer = window.setInterval(refresh, 2500);
+    return () => window.clearInterval(timer);
+  }, [id, exportRunning, tasks]);
+
+  useEffect(() => {
+    if (!id) return;
+    const onStats = (event: Event) => {
+      if (!matchesProjectLiveEvent(event, id)) return;
+      refresh();
+    };
+    const onModels = (event: Event) => {
+      if (!matchesProjectLiveEvent(event, id)) return;
+      api.listModels(id).then(setModels).catch(() => undefined);
+      if (project?.task_type) {
+        api.listBaseModelCandidates(project.task_type).then(setBaseCandidates).catch(() => undefined);
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener(PROJECT_STATS_REFRESH_EVENT, onStats);
+    window.addEventListener(PROJECT_MODELS_REFRESH_EVENT, onModels);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener(PROJECT_STATS_REFRESH_EVENT, onStats);
+      window.removeEventListener(PROJECT_MODELS_REFRESH_EVENT, onModels);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [id, project?.task_type]);
 
   useEffect(() => {
     if (!exportModalOpen) return;
@@ -146,10 +246,20 @@ export default function TrainPage() {
         imgsz,
         batch,
         device,
+        base_model: baseModel,
+        workers,
+        patience,
+        lr0,
+        optimizer,
+        seed,
+        weight_decay: weightDecay,
+        warmup_epochs: warmupEpochs,
+        ...(project?.task_type !== "classify" ? { close_mosaic: closeMosaic } : {}),
         val_ratio: valRatio / 100,
         ...(datasetVersionId ? { dataset_version_id: datasetVersionId } : {}),
       });
       refresh();
+      requestProjectStatsRefresh(id);
     } finally {
       setStarting(false);
     }
@@ -202,6 +312,7 @@ export default function TrainPage() {
       localStorage.setItem(EXPORT_DIR_KEY, dir);
       setExportModalOpen(false);
       refresh();
+      requestProjectStatsRefresh(id);
       toast({ type: "info", message: "导出任务已启动，可在任务中心查看进度" });
     } catch (e) {
       setExportError(String(e));
@@ -218,6 +329,16 @@ export default function TrainPage() {
   const confirmedCount = countConfirmed(stats);
   const selectedDataset = datasetVersions.find((item) => item.id === datasetVersionId) ?? null;
   const activeTrain = tasks.find((t) => t.status === "running");
+  const officialModels = project?.task_type === "classify" ? CLASSIFY_OFFICIAL_MODELS : DETECT_OFFICIAL_MODELS;
+  const currentProjectModels = baseCandidates.filter((item) => item.project_id === id);
+  const otherProjectModels = baseCandidates.filter((item) => item.project_id !== id);
+  const selectedOfficial = officialModels.find((item) => item.value === baseModel);
+  const selectedCandidate = baseCandidates.find((item) => item.filepath === baseModel) ?? null;
+  const baseModelLabel =
+    selectedOfficial?.label ??
+    (selectedCandidate
+      ? `${selectedCandidate.project_name} · v${selectedCandidate.version} · ${selectedCandidate.name}`
+      : baseModel || defaultOfficialModel(project?.task_type));
   const latestTrain = useMemo(
     () => [...tasks].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0] ?? null,
     [tasks],
@@ -236,7 +357,7 @@ export default function TrainPage() {
     }
     const load = () => api.getTask(id, monitorTaskId).then(setMonitorTask).catch(() => {});
     load();
-    const interval = window.setInterval(load, activeTrain ? 2000 : 5000);
+    const interval = window.setInterval(load, activeTrain ? 2000 : 10000);
     return () => window.clearInterval(interval);
   }, [id, monitorTaskId, activeTrain?.id]);
 
@@ -265,6 +386,30 @@ export default function TrainPage() {
       refresh();
     } finally {
       setStopping(false);
+    }
+  };
+
+  const copyTrainLog = async () => {
+    const text = trainLogLines.join("\n");
+    if (!text) return;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand("copy");
+        textarea.remove();
+        if (!copied) throw new Error("浏览器未授予剪贴板权限");
+      }
+      toast({ type: "success", message: `已复制 ${trainLogLines.length} 行训练日志` });
+    } catch {
+      toast({ type: "error", message: "复制失败，请检查浏览器剪贴板权限" });
     }
   };
 
@@ -324,7 +469,7 @@ export default function TrainPage() {
           <i aria-hidden="true" />
           <div>
             <strong>{activeTrain ? "训练运行中" : availableCount > 0 ? "训练已就绪" : "等待确认数据"}</strong>
-            <small>{activeTrain ? `${activeTrain.progress}/${activeTrain.total}` : "YOLO 迁移学习"}</small>
+            <small>{activeTrain ? `${activeTrain.progress}/${activeTrain.total}` : baseModelLabel.split("（")[0]}</small>
           </div>
         </div>
       </section>
@@ -344,7 +489,7 @@ export default function TrainPage() {
               ))}
             </select>
           </label>
-          <p className="text-sm text-muted">
+          <p className="text-body-sm text-muted">
             {selectedDataset ? "固定版本样本" : "可训练样本"}：<strong className="text-ink">{availableCount}</strong> 张
             {!selectedDataset && confirmedCount > 0 && confirmedCount !== trainable && (
               <span className="text-subtle">（其中人工确认 {confirmedCount} 张）</span>
@@ -353,7 +498,7 @@ export default function TrainPage() {
           {availableCount > 0 ? (
             <div className="mt-3 flex flex-wrap items-end gap-3">
               <div className="w-32">
-                <label className="mb-1 block text-xs text-muted">验证集比例</label>
+                <label className="mb-1 block text-label text-muted">验证集比例</label>
                 <div className="flex items-center gap-1">
                   <input
                     className="input"
@@ -364,10 +509,10 @@ export default function TrainPage() {
                     value={valRatio}
                     onChange={(e) => setValRatio(Number(e.target.value))}
                   />
-                  <span className="text-sm text-muted">%</span>
+                  <span className="text-body-sm text-muted">%</span>
                 </div>
               </div>
-              <p className="pb-2 text-xs text-subtle">
+              <p className="pb-2 text-caption text-subtle">
                 {selectedDataset ? "固定划分" : "预计划分"}：训练 <strong>{trainCount}</strong> 张 · 验证 <strong>{valCount}</strong> 张
               </p>
               {selectedDataset && (
@@ -378,7 +523,7 @@ export default function TrainPage() {
               )}
             </div>
           ) : (
-            <p className="mt-2 text-sm text-warning-600">
+            <p className="mt-2 text-body-sm text-warning-600">
               还没有可训练数据，请先在
               <Link href={`/projects/${id}/review`} className="mx-1 text-brand-600 hover:underline">③ 标注复核</Link>
               里确认标注
@@ -387,24 +532,66 @@ export default function TrainPage() {
         </PanelSection>
 
         <PanelSection title="训练参数">
-          <p className="text-xs text-subtle">
-            基于 {project?.task_type === "classify" ? "YOLOv8s-cls" : "YOLOv8s"} 预训练权重，在本项目数据上微调
+          <p className="text-caption text-subtle">
+            优先用本项目已训版本继续迭代；也可选工作区其他项目的同类型模型做迁移，或直接用官方内置基座。
           </p>
+          <div className="mb-3">
+            <label className="text-label text-muted">基础模型</label>
+            <select
+              className="input"
+              value={baseModel || defaultOfficialModel(project?.task_type)}
+              onChange={(e) => setBaseModel(e.target.value)}
+            >
+              <optgroup label="官方内置">
+                {officialModels.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="本项目模型">
+                {currentProjectModels.length > 0 ? (
+                  currentProjectModels.map((item) => (
+                    <option key={item.id} value={item.filepath}>
+                      {modelOriginLabel(item.origin)} · v{item.version} · {item.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value="" disabled>
+                    暂无本项目训练/上传权重
+                  </option>
+                )}
+              </optgroup>
+              <optgroup label="工作区其他模型">
+                {otherProjectModels.length > 0 ? (
+                  otherProjectModels.map((item) => (
+                    <option key={item.id} value={item.filepath}>
+                      {item.project_name} · v{item.version} · {item.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value="" disabled>
+                    暂无其他项目可用权重
+                  </option>
+                )}
+              </optgroup>
+            </select>
+          </div>
           <div className="train-control-panel__grid grid grid-cols-2 gap-3">
             <div>
-              <label className="text-xs text-muted">训练轮数</label>
+              <label className="text-label text-muted">训练轮数</label>
               <input className="input" type="number" min={1} value={epochs} onChange={(e) => setEpochs(Number(e.target.value))} />
             </div>
             <div>
-              <label className="text-xs text-muted">输入尺寸</label>
+              <label className="text-label text-muted">输入尺寸</label>
               <input className="input" type="number" min={320} step={32} value={imgsz} onChange={(e) => setImgsz(Number(e.target.value))} />
             </div>
             <div>
-              <label className="text-xs text-muted">批次大小</label>
+              <label className="text-label text-muted">批次大小</label>
               <input className="input" type="number" min={1} value={batch} onChange={(e) => setBatch(Number(e.target.value))} />
             </div>
             <div>
-              <label className="text-xs text-muted">计算设备</label>
+              <label className="text-label text-muted">计算设备</label>
               <select className="input" value={device} onChange={(e) => setDevice(e.target.value)}>
                 <option value="auto">自动选择（CUDA → MPS → CPU）</option>
                 <option value="mps">Apple GPU (MPS)</option>
@@ -414,10 +601,59 @@ export default function TrainPage() {
             </div>
           </div>
 
+          <details className="mt-4 border-t border-[#CFF4EC] pt-3">
+            <summary className="w-fit cursor-pointer text-xs font-bold text-[#075F5A]">高级参数</summary>
+            <p className="mt-2 mb-3 text-[11px] leading-relaxed text-[#17343A]/50">
+              早停、学习率与数据加载等常用 YOLO 训练项；不确定时保持默认即可。
+            </p>
+            <div className="train-control-panel__grid grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-label text-muted">早停耐心 (patience)</label>
+                <input className="input" type="number" min={0} value={patience} onChange={(e) => setPatience(Number(e.target.value))} />
+              </div>
+              <div>
+                <label className="text-label text-muted">初始学习率 (lr0)</label>
+                <input className="input" type="number" min={0.0001} max={1} step={0.001} value={lr0} onChange={(e) => setLr0(Number(e.target.value))} />
+              </div>
+              <div>
+                <label className="text-label text-muted">优化器</label>
+                <select className="input" value={optimizer} onChange={(e) => setOptimizer(e.target.value)}>
+                  <option value="auto">自动</option>
+                  <option value="SGD">SGD</option>
+                  <option value="Adam">Adam</option>
+                  <option value="AdamW">AdamW</option>
+                  <option value="RMSProp">RMSProp</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-label text-muted">数据加载线程 (workers)</label>
+                <input className="input" type="number" min={0} max={32} value={workers} onChange={(e) => setWorkers(Number(e.target.value))} />
+              </div>
+              <div>
+                <label className="text-label text-muted">随机种子 (seed)</label>
+                <input className="input" type="number" min={0} value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
+              </div>
+              <div>
+                <label className="text-label text-muted">权重衰减</label>
+                <input className="input" type="number" min={0} max={1} step={0.0001} value={weightDecay} onChange={(e) => setWeightDecay(Number(e.target.value))} />
+              </div>
+              <div>
+                <label className="text-label text-muted">预热轮数</label>
+                <input className="input" type="number" min={0} max={50} step={0.5} value={warmupEpochs} onChange={(e) => setWarmupEpochs(Number(e.target.value))} />
+              </div>
+              {project?.task_type !== "classify" && (
+                <div>
+                  <label className="text-label text-muted">关闭 Mosaic（末 N 轮）</label>
+                  <input className="input" type="number" min={0} value={closeMosaic} onChange={(e) => setCloseMosaic(Number(e.target.value))} />
+                </div>
+              )}
+            </div>
+          </details>
+
           <div className="train-control-panel__actions">
             <button
               className="btn-primary"
-              disabled={availableCount === 0 || starting || !!activeTrain}
+              disabled={availableCount === 0 || starting || !!activeTrain || !baseModel}
               onClick={startTrain}
             >
               <Icon name="play" size={15} />
@@ -493,9 +729,21 @@ export default function TrainPage() {
               <div className="train-monitor__log-wrap">
                 <div className="train-monitor__head">
                   <h3>训练日志</h3>
-                  {displayedTrain && (
-                    <span className="train-monitor__status">{trainLogLines.length} 行</span>
-                  )}
+                  <div className="train-monitor__head-actions">
+                    {displayedTrain && (
+                      <span className="train-monitor__status">{trainLogLines.length} 行</span>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-secondary train-monitor__copy-button"
+                      disabled={!trainLogLines.length}
+                      onClick={copyTrainLog}
+                      title="复制当前显示的训练日志"
+                    >
+                      <Icon name="copy" size={14} />
+                      一键复制
+                    </button>
+                  </div>
                 </div>
                 <TrainLogPanel
                   lines={trainLogLines}
@@ -544,7 +792,7 @@ export default function TrainPage() {
             <div className="materials-public-import-dialog__body lk-scrollbar space-y-3">
               <div className="flex flex-wrap gap-2">
                 <input
-                  className="input min-w-0 flex-1 font-mono text-sm"
+                  className="input min-w-0 flex-1 font-mono text-body-sm"
                   placeholder="/Users/你的用户名/Desktop/火焰检测-dataset"
                   value={exportDir}
                   onChange={(e) => setExportDir(e.target.value)}
@@ -553,9 +801,9 @@ export default function TrainPage() {
                   {picking ? "选择中…" : "选择文件夹"}
                 </button>
               </div>
-              {exportError && <p className="text-sm text-danger-600">{exportError}</p>}
+              {exportError && <p className="text-body-sm text-danger-600">{exportError}</p>}
               {exportDone && (
-                <div className="rounded-lg border border-brand-100 bg-brand-50 px-3 py-2 text-sm text-brand-700">
+                <div className="rounded-lg border border-brand-100 bg-brand-50 px-3 py-2 text-body-sm text-brand-700">
                   导出完成 · 训练 {exportDone.train} 张 / 验证 {exportDone.val} 张
                   <button type="button" className="ml-3 text-brand-600 hover:underline" onClick={() => openExportDir(exportDone.path)}>
                     打开文件夹

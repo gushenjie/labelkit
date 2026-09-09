@@ -24,13 +24,15 @@ from server.db.models import Category, Frame, FrameStatus, Project, ProjectTaskT
 VLM_PROMPT_VERSION = "detect-classify-v2"
 
 
-def vlm_cache_identity(content_prompt_hash: str) -> str:
+def vlm_cache_identity(content_prompt_hash: str, *, vlm_model: str | None = None, vlm_base_url: str | None = None) -> str:
+    model = (vlm_model or settings.vlm_model).strip()
+    base_url = (vlm_base_url or settings.vlm_base_url).rstrip("/")
     return hashlib.sha256(
         "|".join(
             [
                 content_prompt_hash,
-                settings.vlm_model,
-                settings.vlm_base_url.rstrip("/"),
+                model,
+                base_url,
                 VLM_PROMPT_VERSION,
             ]
         ).encode("utf-8")
@@ -121,13 +123,24 @@ def build_classify_prompt(project: Project, categories: list[Category]) -> str:
     return "\n".join([l for l in lines if l is not None])
 
 
-def call_vlm(image_path: Path, prompt: str, cache_key: str | None = None, project_id: str | None = None) -> dict:
+def call_vlm(
+    image_path: Path,
+    prompt: str,
+    cache_key: str | None = None,
+    project_id: str | None = None,
+    *,
+    vlm_model: str | None = None,
+    vlm_base_url: str | None = None,
+) -> dict:
     api_key = settings.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", "")
     if not api_key:
         raise RuntimeError("DASHSCOPE_API_KEY not configured")
 
+    model = (vlm_model or settings.vlm_model).strip()
+    base_url = (vlm_base_url or settings.vlm_base_url).rstrip("/")
+
     if cache_key and project_id:
-        cache_identity = vlm_cache_identity(cache_key)
+        cache_identity = vlm_cache_identity(cache_key, vlm_model=model, vlm_base_url=base_url)
         cache_file = cache_dir(project_id) / "vlm" / f"{cache_identity}.json"
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         if cache_file.exists():
@@ -142,11 +155,11 @@ def call_vlm(image_path: Path, prompt: str, cache_key: str | None = None, projec
     _, buf = cv2.imencode(".jpg", resized, [cv2.IMWRITE_JPEG_QUALITY, 85])
     b64 = base64.standard_b64encode(buf.tobytes()).decode("ascii")
 
-    client = OpenAI(api_key=api_key, base_url=settings.vlm_base_url)
+    client = OpenAI(api_key=api_key, base_url=base_url)
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
-                model=settings.vlm_model,
+                model=model,
                 max_tokens=800,
                 messages=[{
                     "role": "user",
@@ -167,7 +180,14 @@ def call_vlm(image_path: Path, prompt: str, cache_key: str | None = None, projec
     return {}
 
 
-def propose_detect(project: Project, categories: list[Category], image_path: Path) -> tuple[list[ProposedBox], str]:
+def propose_detect(
+    project: Project,
+    categories: list[Category],
+    image_path: Path,
+    *,
+    vlm_model: str | None = None,
+    vlm_base_url: str | None = None,
+) -> tuple[list[ProposedBox], str]:
     img = read_image_bgr(image_path)
     if img is None:
         raise ValueError(f"Cannot read {image_path}")
@@ -178,7 +198,14 @@ def propose_detect(project: Project, categories: list[Category], image_path: Pat
     h = hashlib.sha256()
     h.update(image_path.read_bytes())
     h.update(prompt.encode())
-    result = call_vlm(image_path, prompt, h.hexdigest(), project.id)
+    result = call_vlm(
+        image_path,
+        prompt,
+        h.hexdigest(),
+        project.id,
+        vlm_model=vlm_model,
+        vlm_base_url=vlm_base_url,
+    )
 
     name_to_id = {c.name: c.class_id for c in categories}
     out: list[ProposedBox] = []
@@ -206,12 +233,26 @@ def propose_detect(project: Project, categories: list[Category], image_path: Pat
     return out, note
 
 
-def propose_classify(project: Project, categories: list[Category], image_path: Path) -> tuple[int | None, float, str]:
+def propose_classify(
+    project: Project,
+    categories: list[Category],
+    image_path: Path,
+    *,
+    vlm_model: str | None = None,
+    vlm_base_url: str | None = None,
+) -> tuple[int | None, float, str]:
     prompt = build_classify_prompt(project, categories)
     h = hashlib.sha256()
     h.update(image_path.read_bytes())
     h.update(prompt.encode())
-    result = call_vlm(image_path, prompt, h.hexdigest(), project.id)
+    result = call_vlm(
+        image_path,
+        prompt,
+        h.hexdigest(),
+        project.id,
+        vlm_model=vlm_model,
+        vlm_base_url=vlm_base_url,
+    )
     cls_name = result.get("class", "none")
     if cls_name == "none":
         return None, float(result.get("confidence", 1.0)), result.get("note", "无目标")
