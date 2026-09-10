@@ -13,6 +13,7 @@ from server.core.labeling import boxes_to_yolo_labels, propose_yolo
 from server.core.paths import label_path_for_frame
 from server.core.yolo_io import YoloLabel, write_labels
 from server.db.models import Annotation, Frame, FrameStatus, ModelVersion, Project, Task
+from server.repositories.material_repository import active_frame_filter
 
 PENDING_STATUSES = {
     FrameStatus.LLM_LABELED,
@@ -43,7 +44,7 @@ def _resolve_model_path(db: Session, project_id: str, model_id: str | None) -> P
 
 
 def _resolve_frames(db: Session, project: Project, only_status: str) -> list[Frame]:
-    q = db.query(Frame).filter(Frame.project_id == project.id)
+    q = db.query(Frame).filter(Frame.project_id == project.id, active_frame_filter())
     if only_status == "pending":
         q = q.filter(Frame.status.in_(PENDING_STATUSES))
     elif only_status == "human_wrong":

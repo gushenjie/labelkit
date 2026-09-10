@@ -420,7 +420,8 @@ class PreviewSession:
 
         last_frame_sequence = 0
         consecutive_errors = 0
-        target_interval = 1.0 / self.target_inference_fps
+        unlimited = self.target_inference_fps <= 0
+        target_interval = 0.0 if unlimited else 1.0 / self.target_inference_fps
 
         while not self._stop_event.is_set():
             with self._frame_condition:
@@ -466,7 +467,7 @@ class PreviewSession:
                 if consecutive_errors >= self.runtime.inference_error_limit:
                     self._fail("INFERENCE_FAILED", "模型连续推理失败，预览已停止", exc)
                     return
-                self._stop_event.wait(min(target_interval, 0.5))
+                self._stop_event.wait(0.5 if unlimited else min(target_interval, 0.5))
                 continue
 
             consecutive_errors = 0
@@ -489,9 +490,10 @@ class PreviewSession:
                 self._latest_jpeg_sequence += 1
                 self._jpeg_condition.notify_all()
 
-            remaining = target_interval - inference_seconds
-            if remaining > 0:
-                self._stop_event.wait(remaining)
+            if not unlimited:
+                remaining = target_interval - inference_seconds
+                if remaining > 0:
+                    self._stop_event.wait(remaining)
 
     def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
         height, width = frame.shape[:2]
@@ -727,6 +729,23 @@ class PreviewSessionManager:
             session.stop()
         with self._lock:
             self._prune_terminal_locked(now)
+
+    def close_for_model(self, project_id: str, model_id: str) -> int:
+        """停止指定模型上的全部预览会话。"""
+        with self._lock:
+            sessions = [
+                session
+                for session in self._sessions.values()
+                if session.project_id == project_id and session.model_id == model_id
+            ]
+        for session in sessions:
+            session.stop()
+            logger.info(
+                "删除模型前已停止预览 | 会话ID: %s | 模型ID: %s",
+                session.session_id,
+                model_id,
+            )
+        return len(sessions)
 
     def close_all(self) -> None:
         """停止管理器及全部会话。"""

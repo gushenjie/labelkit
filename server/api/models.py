@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import re
+import uuid
 from hashlib import sha256
 from pathlib import Path
 
+import cv2
+import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func
@@ -27,8 +31,10 @@ from server.core.builtin_yolo import (
     list_builtin_weights,
     register_builtin_weights,
 )
+from server.core.image_io import write_image_bgr
 from server.core.model_catalog import TrainingModel, get_model_catalog
 from server.core.paths import models_dir
+from server.config import settings
 from server.db.database import get_db
 from server.db.models import DatasetVersion, Frame, ModelVersion, Project, Task
 
@@ -36,6 +42,46 @@ router = APIRouter(prefix="/api/projects/{project_id}/models", tags=["models"])
 global_router = APIRouter(prefix="/api/models", tags=["models"])
 logger = logging.getLogger(__name__)
 
+MODEL_COVER_MAX_BYTES = 5 * 1024 * 1024
+MODEL_COVER_MAX_EDGE = 1280
+MODEL_COVER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _model_cover_path(filepath: str | Path) -> Path:
+    path = Path(filepath)
+    return path.with_name(f"{path.stem}_cover.jpg")
+
+
+def _save_model_cover(dest: Path, filename: str, content: bytes) -> None:
+    extension = Path(filename).suffix.lower()
+    if extension not in MODEL_COVER_EXTENSIONS:
+        raise HTTPException(400, "封面仅支持 JPG、PNG 或 WebP 格式")
+    if not content:
+        raise HTTPException(400, "封面文件不能为空")
+    if len(content) > MODEL_COVER_MAX_BYTES:
+        raise HTTPException(400, "封面文件不能超过 5 MB")
+
+    encoded = np.frombuffer(content, dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        raise HTTPException(400, "封面不是可读取的图片")
+
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest > MODEL_COVER_MAX_EDGE:
+        scale = MODEL_COVER_MAX_EDGE / longest
+        image = cv2.resize(
+            image,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    temporary = dest.with_name(f"{dest.stem}-{uuid.uuid4().hex}.tmp.jpg")
+    try:
+        write_image_bgr(temporary, image, quality=88)
+        temporary.replace(dest)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 def _model_source_label(model: ModelVersion) -> str:
     origin = (model.metrics or {}).get("origin")
@@ -104,6 +150,7 @@ def model_catalog(db: Session = Depends(get_db)):
             updated_at=model.created_at.strftime("%Y年%m月%d日"),
             source=_model_source_label(model),
             preview_frame_id=preview_frame_id(model.id, project.id),
+            has_cover=bool((model.metrics or {}).get("has_cover")) and _model_cover_path(model.filepath).is_file(),
             created_at=model.created_at,
             dataset_version=dataset_version.version if dataset_version else None,
             sample_count=model.dataset_snapshot.get("total"),
@@ -187,10 +234,57 @@ def list_models(project_id: str, db: Session = Depends(get_db)):
 async def upload_model(
     project_id: str,
     file: UploadFile = File(...),
+    cover: UploadFile | None = File(None),
     name: str = Form(""),
     db: Session = Depends(get_db),
     actor: str = Depends(get_optional_actor),
 ):
+    log = logging.getLogger("labelkit.model_upload")
+    # 同步写文件，确保即使控制台拿不到日志也能定位
+    try:
+        debug_path = Path(settings.data_dir) / "model_upload_debug.log"
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"ENDPOINT enter project={project_id} file={getattr(file, 'filename', None)} "
+                f"cover={getattr(cover, 'filename', None)} name={name!r} actor={actor}\n"
+            )
+    except Exception:
+        pass
+    log.info(
+        "收到上传请求 | 项目: %s | 文件名: %s | 封面: %s | 展示名: %s | actor: %s",
+        project_id,
+        getattr(file, "filename", None),
+        getattr(cover, "filename", None),
+        name,
+        actor,
+    )
+    try:
+        result = await _upload_model_impl(project_id, file, name, db, actor, cover=cover)
+        log.info("上传成功 | 项目: %s | 模型ID: %s | 版本: %s", project_id, result.id, result.version)
+        return result
+    except HTTPException as error:
+        log.warning(
+            "上传被拒绝 | 项目: %s | 状态: %s | 详情: %s",
+            project_id,
+            error.status_code,
+            error.detail,
+        )
+        raise
+    except Exception as error:
+        log.exception("模型上传失败 | 项目: %s | 文件: %s", project_id, getattr(file, "filename", None))
+        raise HTTPException(500, f"模型上传失败：{error}") from error
+
+
+async def _upload_model_impl(
+    project_id: str,
+    file: UploadFile,
+    name: str,
+    db: Session,
+    actor: str,
+    cover: UploadFile | None = None,
+):
+    log = logging.getLogger("labelkit.model_upload")
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -205,24 +299,69 @@ async def upload_model(
 
     dest_name = f"upload_v{max_ver + 1}_{filename}"
     dest = models_dir(project_id) / dest_name
-    content = await file.read()
-    if len(content) < 1024:
+    cover_dest = _model_cover_path(dest)
+    log.info("开始写入权重 | 目标: %s | 当前最大版本: %s", dest, max_ver)
+    # 流式写入；若上次失败残留同名文件则覆盖
+    written = 0
+    try:
+        with dest.open("wb") as output:
+            while chunk := await file.read(settings.upload_chunk_bytes):
+                written += len(chunk)
+                if written > settings.max_upload_bytes:
+                    raise HTTPException(413, "上传文件超过大小限制")
+                output.write(chunk)
+                if written == len(chunk) or written % (8 * 1024 * 1024) < settings.upload_chunk_bytes:
+                    log.info("写入进度 | 已写入: %s 字节", written)
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
+    except Exception as error:
+        dest.unlink(missing_ok=True)
+        log.exception("模型上传写入失败 | 项目: %s | 文件: %s", project_id, filename)
+        raise HTTPException(500, f"模型文件保存失败：{error}") from error
+    finally:
+        await file.close()
+    log.info("写入完成 | 字节数: %s | 路径: %s", written, dest)
+    if written < 1024:
+        dest.unlink(missing_ok=True)
         raise HTTPException(400, "文件过小，不是有效的模型文件")
-    dest.write_bytes(content)
+
+    has_cover = False
+    if cover is not None and (cover.filename or "").strip():
+        try:
+            cover_bytes = await cover.read()
+            _save_model_cover(cover_dest, cover.filename or "cover.jpg", cover_bytes)
+            has_cover = True
+            log.info("封面已保存 | 路径: %s", cover_dest)
+        except HTTPException:
+            dest.unlink(missing_ok=True)
+            cover_dest.unlink(missing_ok=True)
+            raise
+        except Exception as error:
+            dest.unlink(missing_ok=True)
+            cover_dest.unlink(missing_ok=True)
+            log.exception("模型封面保存失败 | 项目: %s", project_id)
+            raise HTTPException(500, f"封面保存失败：{error}") from error
+        finally:
+            await cover.close()
 
     display_name = name.strip() or Path(filename).stem
+    metrics: dict = {"origin": "upload", "filename": filename}
+    if has_cover:
+        metrics["has_cover"] = True
     mv = ModelVersion(
         project_id=project_id,
         version=max_ver + 1,
         name=display_name,
         filepath=str(dest),
-        metrics={"origin": "upload", "filename": filename},
+        metrics=metrics,
         dataset_snapshot={},
         task_id=None,
     )
     db.add(mv)
     db.commit()
     db.refresh(mv)
+    log.info("数据库已登记 | 模型ID: %s | 名称: %s", mv.id, display_name)
     record_audit(
         db,
         actor=actor,
@@ -231,10 +370,21 @@ async def upload_model(
         resource_id=mv.id,
         project_id=project_id,
         summary=f"上传模型：{display_name}",
-        metadata={"version": mv.version, "filename": filename},
+        metadata={"version": mv.version, "filename": filename, "has_cover": has_cover},
     )
     return ModelVersionOut.model_validate(mv)
 
+
+@router.get("/{model_id}/cover")
+def get_model_cover(project_id: str, model_id: str, db: Session = Depends(get_db)):
+    model = db.get(ModelVersion, model_id)
+    if not model or model.project_id != project_id:
+        raise HTTPException(404, "模型不存在")
+    cover = _model_cover_path(model.filepath)
+    if not cover.is_file():
+        raise HTTPException(404, "模型封面不存在")
+    media_type = mimetypes.guess_type(cover.name)[0] or "image/jpeg"
+    return FileResponse(cover, media_type=media_type, filename=cover.name)
 
 @router.post("/register-builtin", response_model=RegisterBuiltinModelsOut)
 def register_builtin_models(
@@ -277,6 +427,63 @@ def register_builtin_models(
         failed=result.get("failed") or [],
         task_type=result["task_type"],
     )
+
+
+@router.delete("/{model_id}")
+def delete_model(
+    project_id: str,
+    model_id: str,
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_optional_actor),
+):
+    """从模型中心删除指定权重（含磁盘文件）。"""
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    model = db.get(ModelVersion, model_id)
+    if not model or model.project_id != project_id:
+        raise HTTPException(404, "模型不存在")
+
+    display_name = model.name
+    version = model.version
+    filepath = Path(model.filepath) if model.filepath else None
+
+    # 先停掉该权重上的预览会话，避免文件占用
+    try:
+        from server.api import model_previews
+
+        model_previews.preview_manager.close_for_model(project_id, model_id)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "关闭模型预览会话失败 | 项目: %s | 模型: %s", project_id, model_id
+        )
+
+    db.delete(model)
+    db.commit()
+
+    if filepath and filepath.is_file():
+        try:
+            filepath.unlink()
+        except OSError:
+            logging.getLogger(__name__).exception("删除模型文件失败 | 路径: %s", filepath)
+    cover_path = _model_cover_path(filepath) if filepath else None
+    if cover_path and cover_path.is_file():
+        try:
+            cover_path.unlink()
+        except OSError:
+            logging.getLogger(__name__).exception("删除模型封面失败 | 路径: %s", cover_path)
+
+    record_audit(
+        db,
+        actor=actor,
+        action="model.delete",
+        resource_type="model",
+        resource_id=model_id,
+        project_id=project_id,
+        summary=f"删除模型：{display_name} v{version}",
+        metadata={"version": version, "filepath": str(filepath) if filepath else None},
+    )
+    return {"ok": True, "id": model_id}
 
 
 @router.post("/predict")

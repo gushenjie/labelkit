@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from server.api import media
-from server.db.models import Base, Frame, Project
+from server.db.models import Base, Frame, MaterialBatch, MaterialOrigin, Project
 
 
 def _png_upload(filename: str, value: int) -> UploadFile:
@@ -51,8 +51,12 @@ def test_upload_images_supports_multiple_files(tmp_path, monkeypatch):
     )
 
     frames = session.query(Frame).order_by(Frame.created_at).all()
-    assert result == {"uploaded": 2}
+    assert result["uploaded"] == 2
+    assert result["material_batch_id"]
     assert len(frames) == 2
+    batch = session.get(MaterialBatch, result["material_batch_id"])
+    assert batch and batch.origin == MaterialOrigin.IMAGE_UPLOAD
+    assert all(frame.material_batch_id == batch.id for frame in frames)
     assert all(__import__("pathlib").Path(frame.filepath).exists() for frame in frames)
 
 
@@ -83,6 +87,7 @@ def test_upload_images_supports_zip_archive(tmp_path, monkeypatch):
     )
 
     frames = session.query(Frame).order_by(Frame.filename).all()
-    assert result == {"uploaded": 3}
+    assert result["uploaded"] == 3
+    assert result["material_batch_id"]
     assert [frame.filename for frame in frames] == ["images/a.png", "images/b.png", "nested/c.jpg"]
     assert all(__import__("pathlib").Path(frame.filepath).exists() for frame in frames)

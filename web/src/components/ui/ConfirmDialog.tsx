@@ -1,6 +1,7 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
+import { ModalSurface } from "./motion";
 
 type ConfirmOptions = {
   title: string;
@@ -19,24 +20,29 @@ const ConfirmContext = createContext<ConfirmContextValue | null>(null);
 export function ConfirmProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [options, setOptions] = useState<ConfirmOptions | null>(null);
-  const [resolver, setResolver] = useState<((v: boolean) => void) | null>(null);
+  const resolver = useRef<((v: boolean) => void) | null>(null);
+  const titleId = useId();
+  useEffect(() => () => { resolver.current?.(false); resolver.current = null; }, []);
 
   const confirm = useCallback((opts: ConfirmOptions) => {
+    resolver.current?.(false);
     setOptions(opts);
     setOpen(true);
     return new Promise<boolean>((resolve) => {
-      setResolver(() => resolve);
+      resolver.current = resolve;
     });
   }, []);
 
   const close = useCallback(
     (result: boolean) => {
+      const resolve = resolver.current;
+      if (!resolve) return;
+      resolver.current = null;
       setOpen(false);
-      resolver?.(result);
-      setResolver(null);
       setOptions(null);
+      resolve(result);
     },
-    [resolver],
+    [],
   );
 
   const value = useMemo(() => ({ confirm }), [confirm]);
@@ -44,16 +50,16 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
   return (
     <ConfirmContext.Provider value={value}>
       {children}
-      {open && options && (
-        <div className="modal-backdrop" onClick={() => close(false)} role="presentation">
+      <ModalSurface open={open} onClose={() => close(false)}>
+        {options && (
           <div
             className="confirm-dialog"
             role="alertdialog"
             aria-modal="true"
-            aria-labelledby="confirm-title"
+            aria-labelledby={titleId}
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="confirm-title" className="confirm-dialog__title">
+            <h2 id={titleId} className="confirm-dialog__title">
               {options.title}
             </h2>
             <p className="confirm-dialog__message">{options.message}</p>
@@ -70,8 +76,8 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </ModalSurface>
     </ConfirmContext.Provider>
   );
 }

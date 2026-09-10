@@ -27,16 +27,20 @@ from server.db.models import (
     DatasetVersion,
     Frame,
     FrameStatus,
+    MaterialBatch,
+    MaterialOrigin,
     ModelVersion,
     Project,
     PublicDatasetImport,
 )
+from server.repositories.material_repository import active_frame_filter
 
 
 def _dto(model: PublicDatasetImport) -> PublicImportDTO:
     return PublicImportDTO(
         id=model.id,
         project_id=model.project_id,
+        material_batch_id=model.material_batch_id,
         provider=model.provider,
         source_ref=model.source_ref,
         source_version=model.source_version,
@@ -105,9 +109,25 @@ class PublicDatasetRepository:
             candidate.license_url,
         )
         import_id = str(uuid.uuid4())
+        batch = MaterialBatch(
+            project_id=project_id,
+            origin=MaterialOrigin.PUBLIC_DATASET,
+            title=candidate.title or candidate.source_ref,
+            metadata_json={
+                "public_import_id": import_id,
+                "provider": candidate.provider,
+                "source_ref": candidate.source_ref,
+                "source_version": candidate.source_version,
+                "source_url": candidate.source_url,
+                "license_name": candidate.license_name,
+            },
+        )
+        self._db.add(batch)
+        self._db.flush()
         model = PublicDatasetImport(
             id=import_id,
             project_id=project_id,
+            material_batch_id=batch.id,
             provider=candidate.provider,
             source_ref=candidate.source_ref,
             source_version=candidate.source_version,
@@ -203,6 +223,7 @@ class PublicDatasetRepository:
                 moved.append((destination, item.source_path))
                 frame = Frame(
                     project_id=import_record.project_id,
+                    material_batch_id=import_record.material_batch_id,
                     public_import_id=import_record.id,
                     filename=item.filename,
                     storage_key=storage_key,
@@ -316,7 +337,7 @@ class PublicDatasetRepository:
     def count_frames_by_status(self, project_id: str, status: FrameStatus) -> int:
         return (
             self._db.query(Frame)
-            .filter(Frame.project_id == project_id, Frame.status == status)
+            .filter(Frame.project_id == project_id, Frame.status == status, active_frame_filter())
             .count()
         )
 

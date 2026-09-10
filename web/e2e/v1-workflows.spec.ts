@@ -45,7 +45,7 @@ async function createProject(page: Page, taskType: "detect" | "classify"): Promi
 
 async function uploadImageBatches(page: Page, projectId: string): Promise<void> {
   await page.goto(`/projects/${projectId}/materials`);
-  const input = page.locator('input[type="file"][accept="image/*"]');
+  const input = page.locator('input[type="file"][accept*="image/*"]');
   await input.setInputFiles(path.join(fixturesDir, "invalid.jpg"));
   await expect(page.getByText(/图片上传失败/)).toBeVisible();
 
@@ -190,7 +190,7 @@ test("Windows detection workflow: create, upload, extract, review, train, export
   const videoInput = page.locator('input[type="file"][accept="video/*"]');
   await videoInput.setInputFiles(path.join(fixturesDir, "acceptance.avi"));
   await expect(page.getByText(/已上传 1 个视频/)).toBeVisible();
-  await page.getByRole("button", { name: /开始提取 1 个视频/ }).click();
+  await page.getByRole("button", { name: "开始抽帧" }).click();
   await pollTask(page, project.id, "extract");
 
   const frames = await seedReviewLabels(page, project);

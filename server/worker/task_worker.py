@@ -31,6 +31,7 @@ from server.db.models import (
     TaskType,
     Video,
 )
+from server.repositories.material_repository import active_frame_filter, active_video_filter
 
 
 class TaskWorker:
@@ -273,7 +274,7 @@ class TaskWorker:
         max_frames = int(task.params.get("max_frames", 0))
         split = task.params.get("split", "train")
 
-        videos = db.query(Video).filter(Video.project_id == project.id)
+        videos = db.query(Video).filter(Video.project_id == project.id, active_video_filter())
         if video_ids:
             videos = videos.filter(Video.id.in_(video_ids))
         videos = videos.all()
@@ -304,6 +305,7 @@ class TaskWorker:
                 phash = compute_phash(p)
                 frame = Frame(
                     project_id=project.id,
+                    material_batch_id=video.material_batch_id,
                     video_id=video.id,
                     filename=p.name,
                     storage_key=p.stem,
@@ -357,6 +359,7 @@ class TaskWorker:
     ) -> tuple[int, int]:
         q = db.query(Frame).filter(
             Frame.project_id == project_id,
+            active_frame_filter(),
             Frame.status == FrameStatus.UNLABELED,
             ~Frame.annotations.any(),
         )
@@ -415,7 +418,7 @@ class TaskWorker:
         project = db.get(Project, task.project_id)
         threshold = int(task.params.get("threshold", 8))
         split = task.params.get("split")
-        frames = db.query(Frame).filter(Frame.project_id == project.id)
+        frames = db.query(Frame).filter(Frame.project_id == project.id, active_frame_filter())
         if split:
             frames = frames.filter(Frame.split == split)
         task.total = frames.count()

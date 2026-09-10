@@ -3,6 +3,11 @@
 @tailwind utilities;
 
 :root {
+  --lk-motion-feedback: 120ms;
+  --lk-motion-enter: 180ms;
+  --lk-motion-exit: 160ms;
+  --lk-motion-layout: 280ms;
+  --lk-motion-data: 320ms;
   --lk-brand-50: #ecfdf8;
   --lk-brand-100: #d1faed;
   --lk-brand-500: #12a88f;

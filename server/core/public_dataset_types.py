@@ -60,6 +60,7 @@ class PublicImportDTO:
     import_task_id: str | None
     dataset_version_id: str | None
     train_task_id: str | None
+    material_batch_id: str | None = None
 
 
 @dataclass(frozen=True)

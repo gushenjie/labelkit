@@ -65,3 +65,46 @@ def test_batch_feedback_confirms_matching_statuses_and_clears_review_note():
     assert by_id["b"].status == FrameStatus.HUMAN_OK
     assert by_id["c"].status == FrameStatus.HUMAN_WRONG
     assert by_id["d"].status == FrameStatus.HUMAN_OK
+
+
+def test_batch_feedback_can_be_scoped_to_one_public_import():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(Project(id="project", name="P"))
+    session.add_all(
+        [
+            Frame(
+                id="batch-a-frame",
+                project_id="project",
+                filename="a.jpg",
+                filepath="a.jpg",
+                status=FrameStatus.NEEDS_HUMAN,
+                public_import_id="import-a",
+            ),
+            Frame(
+                id="batch-b-frame",
+                project_id="project",
+                filename="b.jpg",
+                filepath="b.jpg",
+                status=FrameStatus.NEEDS_HUMAN,
+                public_import_id="import-b",
+            ),
+        ]
+    )
+    session.commit()
+
+    result = batch_frame_feedback(
+        "project",
+        BatchFrameFeedback(
+            from_statuses=[FrameStatus.NEEDS_HUMAN],
+            status=FrameStatus.HUMAN_OK,
+            public_import_id="import-a",
+        ),
+        db=session,
+        actor="tester",
+    )
+
+    assert result["updated"] == 1
+    assert session.get(Frame, "batch-a-frame").status == FrameStatus.HUMAN_OK
+    assert session.get(Frame, "batch-b-frame").status == FrameStatus.NEEDS_HUMAN

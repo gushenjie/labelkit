@@ -37,6 +37,7 @@ class ModelCatalogItemOut(BaseModel):
     project_id: str | None = None
     model_id: str | None = None
     preview_frame_id: str | None = None
+    has_cover: bool = False
 
 
 class ModelCatalogOut(BaseModel):

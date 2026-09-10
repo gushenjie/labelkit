@@ -22,6 +22,7 @@ const ACTION_LABEL: Record<string, string> = {
   "task.retry": "重试任务",
   "dataset.create": "创建数据集版本",
   "model.upload": "上传模型",
+  "model.delete": "删除模型",
 };
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50];

@@ -1,0 +1,26 @@
+.lk-changed-value { display: inline-block; font-variant-numeric: tabular-nums; }
+.lk-modal-content { outline: none; max-width: 100%; max-height: 100%; }
+.lk-modal-surface { animation: none; }
+.lk-modal-surface[data-presence="closing"] { pointer-events: none; }
+.lk-modal-content > [role="dialog"], .lk-modal-content > [role="alertdialog"] { max-height: calc(100dvh - 40px); }
+.task-center-page .task-card { animation: none; }
+.task-center-page--grid .task-card:hover { transform: none; box-shadow: 0 3px 9px rgb(35 79 84 / 6%); }
+.task-center-page .task-card__action:hover { transform: none; }
+.task-center-page .task-card__action:active { transform: translateY(1px); }
+.task-card[data-exiting] { animation: lk-result-exit var(--lk-motion-exit) ease-out forwards; pointer-events: none; }
+.task-center-page .task-card[data-exiting] { animation: lk-result-exit var(--lk-motion-exit) ease-out forwards; }
+.task-status { transition: background-color var(--lk-motion-data) var(--lk-ease), color var(--lk-motion-data) var(--lk-ease); }
+.task-center-page .task-card__progress > div i,
+.task-center-page .task-card__mobile-progress b,
+.task-progress__fill { transition: width var(--lk-motion-data) var(--lk-ease); }
+.task-refresh-error { display: flex; gap: 12px; align-items: center; color: var(--lk-muted); font-size: 12px; }
+.task-refresh-error button { color: var(--lk-brand-700); text-decoration: underline; }
+.task-cards:focus-visible { outline: 2px solid var(--lk-brand-500); outline-offset: -2px; }
+.segmented-control__item { transition: background-color var(--lk-motion-feedback) var(--lk-ease), color var(--lk-motion-feedback) var(--lk-ease); }
+.segmented-control__item { position: relative; }
+.segmented-control__item > i { position: absolute; bottom: 0; left: 8px; right: 8px; height: 2px; background: var(--lk-brand-600); border-radius: 2px; pointer-events: none; }
+.toast[data-presence] { animation: none; }
+.lk-value-placeholder { display: inline-block; width: 3em; height: 1em; border-radius: 4px; background: var(--lk-border); }
+.segmented-control__item:focus-visible { outline: 2px solid var(--lk-brand-500); outline-offset: 2px; }
+@keyframes lk-result-exit { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .task-center-page .task-card[data-exiting] { animation: none; } }

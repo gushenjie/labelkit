@@ -30,6 +30,7 @@ from server.api.schemas import (
 from server.core.audit import record_audit
 from server.db.database import get_db, project_dir
 from server.db.models import Annotation, Category, Frame, FrameStatus, ModelVersion, Project, Task, TaskStatus, Video
+from server.repositories.material_repository import active_frame_filter, active_video_filter
 from server.services.user_service import UserService
 from server.services.project_cover_service import PROJECT_COVER_MAX_BYTES, project_cover_service
 
@@ -62,8 +63,8 @@ def _disk_usage_mb(path: Path) -> float:
 
 
 def _project_out(db: Session, project: Project, *, include_disk_usage: bool = True) -> ProjectOut:
-    frame_count = db.query(Frame).filter(Frame.project_id == project.id).count()
-    video_count = db.query(Video).filter(Video.project_id == project.id).count()
+    frame_count = db.query(Frame).filter(Frame.project_id == project.id, active_frame_filter()).count()
+    video_count = db.query(Video).filter(Video.project_id == project.id, active_video_filter()).count()
     categories = db.query(Category).filter(Category.project_id == project.id).order_by(Category.sort_order, Category.class_id).all()
     return ProjectOut(
         id=project.id,

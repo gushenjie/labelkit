@@ -13,9 +13,10 @@ type Props = {
   onClose: () => void;
   onIndexChange: (index: number) => void;
   onReview?: (frame: Frame) => void;
+  reviewLabel?: string;
 };
 
-export function FrameLightbox({ open, frames, index, projectId, onClose, onIndexChange, onReview }: Props) {
+export function FrameLightbox({ open, frames, index, projectId, onClose, onIndexChange, onReview, reviewLabel = "进入标注复核" }: Props) {
   const frame = frames[index];
   const total = frames.length;
 
@@ -81,7 +82,7 @@ export function FrameLightbox({ open, frames, index, projectId, onClose, onIndex
                 className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800"
                 onClick={() => onReview(frame)}
               >
-                进入标注复核
+                {reviewLabel}
               </button>
             )}
             <button

@@ -22,6 +22,7 @@ from server.core.audit import record_audit
 from server.core.dataset_service import DatasetService, DatasetVersionRepository
 from server.db.database import get_db
 from server.db.models import DatasetVersion, Project
+from server.services.material_readiness_service import MaterialReadinessError, readiness_error_detail
 
 router = APIRouter(prefix="/api/projects/{project_id}/dataset-versions", tags=["datasets"])
 global_router = APIRouter(prefix="/api/datasets", tags=["datasets"])
@@ -87,6 +88,8 @@ def create_dataset_version(
         db.rollback()
         if version and version.snapshot_path.exists():
             shutil.rmtree(version.snapshot_path)
+        if isinstance(error, MaterialReadinessError):
+            raise HTTPException(409, readiness_error_detail(error)) from error
         if not isinstance(error, RuntimeError):
             raise
         raise HTTPException(400, str(error)) from error

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, usePathname } from "next/navigation";
+import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/Icon";
 import { api } from "@/lib/api";
@@ -22,6 +22,7 @@ const STATS_POLL_MS = 12000;
 export function ProjectContextBar({ compact = false }: ProjectContextBarProps) {
   const { id } = useParams<{ id: string }>();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [stats, setStats] = useState<Record<string, number>>({});
   const [modelCount, setModelCount] = useState(0);
 
@@ -106,11 +107,14 @@ export function ProjectContextBar({ compact = false }: ProjectContextBarProps) {
   const recommendedStepSlug = computeCurrentWorkflowStep(stats, modelCount);
   const viewingStepSlug = useMemo(() => {
     if (!id) return null;
+    if (pathname.startsWith(`/projects/${id}/review`) && searchParams.get("filter") === "manual") {
+      return "label";
+    }
     return WORKFLOW_STEPS.find((step) => {
       const prefix = `/projects/${id}/${step.slug}`;
       return pathname === prefix || pathname.startsWith(`${prefix}/`);
     })?.slug ?? null;
-  }, [id, pathname]);
+  }, [id, pathname, searchParams]);
   const displayStepSlug = viewingStepSlug ?? recommendedStepSlug;
   const displayStepIndex = WORKFLOW_STEPS.findIndex((step) => step.slug === displayStepSlug);
   const displayStep = WORKFLOW_STEPS[displayStepIndex] ?? WORKFLOW_STEPS[0];
@@ -134,7 +138,7 @@ export function ProjectContextBar({ compact = false }: ProjectContextBarProps) {
       <nav className="flex flex-1" aria-label="项目生产流程">
         {WORKFLOW_STEPS.map((step, index) => {
           const href = `/projects/${id}/${step.slug}`;
-          const viewing = pathname === href || pathname.startsWith(`${href}/`);
+          const viewing = step.slug === viewingStepSlug;
           const current = step.slug === displayStepSlug;
           const backlog = step.slug === recommendedStepSlug && recommendedStepSlug !== displayStepSlug;
           const badge = stepBadges.find((item) => item.slug === step.slug);

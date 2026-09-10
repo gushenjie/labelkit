@@ -34,7 +34,7 @@ export const FRAME_STATUS_SIMPLE: Record<string, string> = {
   no_target: "已确认",
 };
 
-export type ReviewFilter = "pending" | "sample" | "rejected" | "confirmed" | "all";
+export type ReviewFilter = "manual" | "pending" | "sample" | "rejected" | "confirmed" | "all";
 
 /** 需要人工逐张确认的状态（不含可直接训练的 auto_ok） */
 const PENDING_REVIEW = new Set([
@@ -58,6 +58,7 @@ const ALL_REVIEW = new Set([
 ]);
 
 export function reviewStatuses(filter: ReviewFilter): string[] {
+  if (filter === "manual") return ["unlabeled"];
   if (filter === "pending") return [...PENDING_REVIEW];
   if (filter === "sample") return ["needs_human"];
   if (filter === "rejected") return [...REJECTED_REVIEW];
@@ -110,6 +111,7 @@ export function filterFramesForReview<T extends { status: string }>(
   frames: T[],
   filter: ReviewFilter
 ): T[] {
+  if (filter === "manual") return frames.filter((f) => f.status === "unlabeled");
   const labeled = frames.filter((f) => f.status !== "unlabeled");
   if (filter === "all") return labeled;
   if (filter === "sample") return labeled.filter((f) => f.status === "needs_human");
@@ -120,6 +122,7 @@ export function filterFramesForReview<T extends { status: string }>(
 
 /** URL / 旧参数兼容 */
 export function normalizeReviewFilter(param: string | null): ReviewFilter {
+  if (param === "manual" || param === "unlabeled") return "manual";
   if (param === "confirmed" || param === "human_ok") return "confirmed";
   if (param === "rejected" || param === "human_wrong") return "rejected";
   if (param === "sample" || param === "needs_human") return "sample";
@@ -128,6 +131,7 @@ export function normalizeReviewFilter(param: string | null): ReviewFilter {
 }
 
 export const REVIEW_FILTERS: { value: ReviewFilter; label: string; hint: string }[] = [
+  { value: "manual", label: "人工标注", hint: "从零绘制标注，保存后直接记为人工确认" },
   { value: "sample", label: "抽样复查", hint: "公开数据风险抽样，确认完才能训练" },
   { value: "pending", label: "待确认", hint: "预标注结果需逐张确认（不含已机器通过）" },
   { value: "rejected", label: "已驳回", hint: "点了 N 驳回的图，可手改框或 YOLO 修正" },
@@ -141,6 +145,7 @@ export function visibleReviewFilters(stats: Record<string, number>): ReviewFilte
   const nonSamplePending = countNonSamplePendingReview(stats);
   return REVIEW_FILTERS
     .filter((item) => {
+      if (item.value === "manual") return (stats.unlabeled ?? 0) > 0;
       if (item.value === "sample") return sampleCount > 0;
       // 抽样进行中且没有其它待人工项时，隐藏「待确认」，避免与抽样/全部冲突
       if (item.value === "pending") return sampleCount === 0 || nonSamplePending > 0;

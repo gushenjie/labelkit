@@ -30,6 +30,7 @@ from server.core.train_resume import (
     training_run_dir,
 )
 from server.db.models import Category, Frame, FrameStatus, ModelVersion, Project, ProjectTaskType, Task
+from server.repositories.material_repository import active_frame_filter
 
 
 TRAINABLE = {FrameStatus.AUTO_OK, FrameStatus.AUTO_FIXED, FrameStatus.HUMAN_OK, FrameStatus.NO_TARGET}
@@ -63,6 +64,7 @@ def prepare_dataset(
 ) -> dict:
     frames = db.query(Frame).filter(
         Frame.project_id == project.id,
+        active_frame_filter(),
         Frame.status.in_(TRAINABLE),
     ).all()
     split_map = assign_splits_by_ratio(frames, val_ratio)
@@ -109,6 +111,7 @@ def prepare_classify_dataset(
 ) -> dict:
     frames = db.query(Frame).filter(
         Frame.project_id == project.id,
+        active_frame_filter(),
         Frame.status.in_(TRAINABLE),
     ).all()
     split_map = assign_splits_by_ratio(frames, val_ratio)

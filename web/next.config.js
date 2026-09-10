@@ -13,6 +13,11 @@ const apiOrigin = (process.env.NEXT_PUBLIC_API_URL || `http://${connectHost}:${a
 const nextConfig = {
   reactStrictMode: true,
   distDir: process.env.NEXT_DIST_DIR || ".next",
+  // 模型权重常 >10MB；默认代理体会截断导致上传失败
+  experimental: {
+    middlewareClientMaxBodySize: "512mb",
+    proxyClientMaxBodySize: "512mb",
+  },
   async rewrites() {
     // 未显式配置 API 地址时，由 Next 开发服务器代理 /api，消除跨域
     if (process.env.NEXT_PUBLIC_API_URL) return [];

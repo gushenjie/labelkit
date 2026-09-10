@@ -29,17 +29,13 @@
   display: block;
   overflow: hidden;
   border-radius: 4px;
-  background:
-    linear-gradient(
-      100deg,
-      var(--list-skeleton-base) 18%,
-      var(--list-skeleton-highlight) 38%,
-      var(--list-skeleton-base) 58%
-    );
-  background-size: 240% 100%;
-  animation: list-skeleton-scan 1.55s ease-in-out infinite;
-  animation-delay: calc(var(--list-skeleton-index, 0) * 55ms);
+  background: var(--list-skeleton-base);
 }
+
+/* One synchronized opacity pass avoids repainting a moving gradient per field. */
+.item { animation: list-skeleton-breathe 1800ms ease-in-out infinite; }
+@keyframes list-skeleton-breathe { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .item { animation: none; opacity: 1; } }
 
 .list .item {
   min-height: 84px;

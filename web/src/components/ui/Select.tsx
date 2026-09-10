@@ -3,6 +3,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "@/components/Icon";
 import styles from "./Select.module.css";
+import { Presence } from "./motion";
 
 export type SelectOption = {
   value: string;
@@ -144,8 +145,7 @@ export function Select({
         <span className={`${styles.value} ${selectedOption ? "" : styles.placeholder}`.trim()}>{selectedOption?.label ?? placeholder}</span>
         <Icon className={styles.chevron} name="chevron-down" size={15} />
       </button>
-      {open ? (
-        <div id={listboxId} className={styles.menu} role="listbox" aria-label={ariaLabel}>
+        <Presence open={open} id={listboxId} className={styles.menu} role="listbox" aria-label={ariaLabel}>
           {options.map((option, index) => {
             const selected = option.value === value;
             const active = index === activeIndex;
@@ -168,8 +168,7 @@ export function Select({
               </button>
             );
           })}
-        </div>
-      ) : null}
+        </Presence>
     </div>
   );
 }

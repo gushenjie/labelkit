@@ -37,6 +37,7 @@ from server.core.public_dataset_types import PublicDatasetCandidateDTO, PublicIm
 from server.core.public_dataset_workflow import (
     PublicReviewGateError,
     approve_project_public_review_gate,
+    evaluate_review,
     prepare_review_after_labeling,
     resolve_suggested_mapping,
     trim_oversized_review_sample,
@@ -44,6 +45,12 @@ from server.core.public_dataset_workflow import (
 from server.db.database import get_db
 from server.db.models import ProjectExecutionLease, ProjectTaskType, Task, TaskType
 from server.repositories.public_dataset_repository import PublicDatasetRepository
+from server.repositories.material_repository import MaterialRepository
+from server.services.material_readiness_service import (
+    MaterialReadinessError,
+    MaterialReadinessService,
+    readiness_error_detail,
+)
 from server.worker.task_worker import TaskWorker
 
 
@@ -78,6 +85,7 @@ def _import_out(repository: PublicDatasetRepository, record: PublicImportDTO) ->
     return PublicDatasetImportOut(
         id=record.id,
         project_id=record.project_id,
+        material_batch_id=record.material_batch_id,
         provider=record.provider,
         source_ref=record.source_ref,
         source_version=record.source_version,
@@ -370,10 +378,16 @@ def approve_project_public_datasets_and_train(project_id: str, db: Session = Dep
         raise HTTPException(404, "Project not found")
     try:
         review_records = approve_project_public_review_gate(repository, project_id)
+        for record in review_records:
+            repository.update(record.id, state="published")
+        MaterialReadinessService(MaterialRepository(db)).assert_current_pool_ready(project_id)
     except PublicReviewGateError as error:
         if error.code == "expanded":
             db.commit()
         raise HTTPException(409, str(error)) from error
+    except MaterialReadinessError as error:
+        db.rollback()
+        raise HTTPException(409, readiness_error_detail(error)) from error
     except RuntimeError as error:
         db.rollback()
         raise HTTPException(400, str(error)) from error
@@ -409,6 +423,42 @@ def approve_public_dataset_and_train(
             raise HTTPException(400, str(error)) from error
         raise HTTPException(409, f"已生成 {len(prepared.review_frame_ids)} 张风险复查样本，请完成复查后再次启动训练")
     return approve_project_public_datasets_and_train(project_id, db)
+
+
+@router.post(
+    "/api/projects/{project_id}/public-dataset-imports/{import_id}/approve-review",
+    response_model=PublicDatasetImportOut,
+)
+def approve_public_dataset_review(
+    project_id: str,
+    import_id: str,
+    db: Session = Depends(get_db),
+):
+    """Approve one import batch without creating a dataset version or training task."""
+    repository = PublicDatasetRepository(db)
+    record = repository.get(project_id, import_id)
+    if not record:
+        raise HTTPException(404, "Public dataset import not found")
+    if record.state == "needs_label":
+        raise HTTPException(409, "该批次尚未完成自动标注")
+    if record.state == "full_review_required":
+        raise HTTPException(409, "该批次需要全量复核或放弃导入")
+    try:
+        outcome, affected = evaluate_review(repository, import_id)
+        if outcome == "expanded":
+            db.commit()
+            raise HTTPException(409, f"抽检发现修改，已扩大复查范围 {len(affected)} 张")
+        if outcome == "full_review_required":
+            db.commit()
+            raise HTTPException(409, "该批次需要全量复核或放弃导入")
+        approved = repository.update(import_id, state="published")
+        db.commit()
+    except HTTPException:
+        raise
+    except RuntimeError as error:
+        db.rollback()
+        raise HTTPException(409, str(error)) from error
+    return _import_out(repository, approved)
 
 
 @router.post("/api/projects/{project_id}/public-dataset-imports/{import_id}/discard")

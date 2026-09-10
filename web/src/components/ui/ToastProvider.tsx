@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Presence } from "./motion";
+import { useExitItems } from "./useExitItems";
 
 export type ToastAction = {
   label: string;
@@ -29,8 +31,15 @@ let toastSeq = 0;
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const displayed = useExitItems(toasts);
+  const active = useRef(new Set<string>());
+  const timers = useRef(new Map<string, number>());
+  useEffect(() => () => { timers.current.forEach(timer => window.clearTimeout(timer)); }, []);
 
   const dismiss = useCallback((id: string) => {
+    if (!active.current.delete(id)) return;
+    window.clearTimeout(timers.current.get(id));
+    timers.current.delete(id);
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
@@ -38,9 +47,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     (item: Omit<ToastItem, "id">) => {
       const id = `toast-${++toastSeq}`;
       const duration = item.duration ?? (item.type === "error" ? 6000 : 4500);
+      active.current.add(id);
       setToasts((prev) => [...prev.slice(-4), { ...item, id }]);
       if (duration > 0) {
-        window.setTimeout(() => dismiss(id), duration);
+        timers.current.set(id, window.setTimeout(() => dismiss(id), duration));
       }
       return id;
     },
@@ -53,8 +63,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     <ToastContext.Provider value={value}>
       {children}
       <div className="toast-stack" aria-live="polite" aria-relevant="additions">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast toast--${t.type}`} role="status">
+        {displayed.map(({ item: t, exiting }) => (
+          <Presence open={!exiting} key={t.id} className={`toast toast--${t.type}`} role="status">
             <p className="toast__message">{t.message}</p>
             <div className="toast__actions">
               {t.action && (
@@ -67,8 +77,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                     type="button"
                     className="toast__action"
                     onClick={() => {
-                      t.action?.onClick?.();
+                      if (!active.current.has(t.id)) return;
                       dismiss(t.id);
+                      t.action?.onClick?.();
                     }}
                   >
                     {t.action.label}
@@ -79,7 +90,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 ×
               </button>
             </div>
-          </div>
+          </Presence>
         ))}
       </div>
     </ToastContext.Provider>

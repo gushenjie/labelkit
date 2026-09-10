@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
 import { ModelTrialPreview, type TrialBox } from "@/components/ModelTrialPreview";
@@ -12,10 +12,14 @@ export default function ModelTrialPage() {
   const searchParams = useSearchParams();
   const projectId = searchParams.get("projectId") ?? "";
   const modelId = searchParams.get("modelId") ?? "";
-  const name = searchParams.get("name") ?? "训练模型";
-  const version = searchParams.get("version") ?? "";
+  const queryProjectName = searchParams.get("projectName") ?? "";
+  const queryModelName = searchParams.get("modelName") ?? "";
+  const fallbackName = searchParams.get("name") ?? "训练模型";
   const inputRef = useRef<HTMLInputElement>(null);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [projectName, setProjectName] = useState(queryProjectName);
+  const [modelName, setModelName] = useState(queryModelName);
+  const [taskTypeLabel, setTaskTypeLabel] = useState("目标检测");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [boxes, setBoxes] = useState<TrialBox[]>([]);
   const [fileName, setFileName] = useState("");
@@ -26,8 +30,27 @@ export default function ModelTrialPage() {
 
   useEffect(() => {
     if (!projectId) return;
-    api.getProject(projectId).then((project) => setCategories(project.categories)).catch(() => setError("未能读取项目类别，请返回模型中心后重试。"));
-  }, [projectId]);
+    let cancelled = false;
+    Promise.all([
+      api.getProject(projectId),
+      modelId ? api.listModels(projectId) : Promise.resolve([]),
+    ])
+      .then(([project, models]) => {
+        if (cancelled) return;
+        setCategories(project.categories);
+        setProjectName(project.name);
+        setTaskTypeLabel(project.task_type === "classify" ? "图像分类" : "目标检测");
+        const matched = models.find((item) => item.id === modelId);
+        if (matched?.name) setModelName(matched.name);
+        else if (queryModelName) setModelName(queryModelName);
+      })
+      .catch(() => {
+        if (!cancelled) setError("未能读取项目信息，请返回模型中心后重试。");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [modelId, projectId, queryModelName]);
 
   useEffect(() => () => { if (imageUrl) URL.revokeObjectURL(imageUrl); }, [imageUrl]);
 
@@ -54,7 +77,12 @@ export default function ModelTrialPage() {
 
   const ready = Boolean(projectId && modelId);
   const resultState = !imageUrl ? "empty" : loading ? "loading" : error ? "error" : "complete";
-  const versionLabel = version && version !== name ? version : "";
+  const displayTitle = useMemo(() => {
+    if (projectName && modelName) {
+      return projectName === modelName ? projectName : `${projectName} · ${modelName}`;
+    }
+    return projectName || modelName || fallbackName;
+  }, [fallbackName, modelName, projectName]);
   const maxConfidence = boxes.length ? Math.max(...boxes.map((box) => box.conf)) : 0;
   const visibleBoxes = boxes.slice(0, 6);
 
@@ -94,9 +122,11 @@ export default function ModelTrialPage() {
           </div>
           <div className="model-trial-page__current-model">
             <span className="model-trial-page__model-icon"><Icon name="cube" size={21} /></span>
-            <div><small>测试模型</small><strong title={name}>{name}</strong></div>
-            {versionLabel && <span className="model-trial-page__version">{versionLabel}</span>}
-            <span className="model-trial-page__type">目标检测</span>
+            <div>
+              <small>测试模型</small>
+              <strong title={displayTitle}>{displayTitle}</strong>
+            </div>
+            <span className="model-trial-page__type">{taskTypeLabel}</span>
           </div>
         </div>
       </header>

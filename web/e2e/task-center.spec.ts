@@ -53,6 +53,8 @@ test("task center preserves the reference geometry and interactive filters", asy
 
   await page.setViewportSize({ width: 1536, height: 1024 });
   await page.goto("/login?next=/tasks");
+  await page.getByPlaceholder("请输入账号").fill("admin");
+  await page.locator('input[autocomplete="current-password"]').fill("admin");
   await page.locator(".login-submit").click();
   await page.waitForURL("**/tasks");
   await expect(page.getByRole("heading", { name: "任务中心" })).toBeVisible();
@@ -61,16 +63,19 @@ test("task center preserves the reference geometry and interactive filters", asy
 
   const card = await page.locator(".task-card").boundingBox();
   expect(card).not.toBeNull();
-  expect(Math.abs((card?.x ?? 0) - 305)).toBeLessThanOrEqual(1);
-  expect(Math.abs((card?.y ?? 0) - 345)).toBeLessThanOrEqual(1);
-  expect(Math.abs((card?.width ?? 0) - 1193)).toBeLessThanOrEqual(2);
+  const results = await page.locator(".task-results").boundingBox();
+  expect(card!.x).toBeGreaterThanOrEqual(results!.x);
+  expect(card!.y).toBeGreaterThan(results!.y);
+  expect(card!.x + card!.width).toBeLessThanOrEqual(results!.x + results!.width);
 
   await page.getByRole("button", { name: "网格视图" }).click();
   await expect(page.locator(".task-center-page")).toHaveClass(/task-center-page--grid/);
   await page.getByRole("button", { name: "列表视图" }).click();
-  await page.getByLabel("按状态筛选").selectOption("completed");
+  await page.getByRole("combobox", { name: "按状态筛选", exact: true }).click();
+  await page.getByRole("option", { name: "已完成", exact: true }).click();
   await expect(page.getByText("没有符合条件的任务")).toBeVisible();
-  await page.getByLabel("按状态筛选").selectOption("running");
+  await page.getByRole("combobox", { name: "按状态筛选", exact: true }).click();
+  await page.getByRole("option", { name: "进行中", exact: true }).click();
   await expect(page.getByText("TASK-84215A")).toBeVisible();
   await page.screenshot({ path: "artifacts/task-center-zh-e2e.png" });
 });

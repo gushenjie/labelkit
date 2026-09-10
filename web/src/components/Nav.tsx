@@ -38,7 +38,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 const PROJECT_ROUTE_LABELS: Record<string, string> = {
   materials: "素材准备",
-  label: "AI 预标注",
+  label: "素材标注",
   review: "标注复核",
   train: "训练或导出",
   settings: "项目设置",
@@ -133,8 +133,16 @@ export function Nav() {
     };
   }, [projectId]);
 
+  const isManualAnnotation = projectRoute === "review" && searchParams.get("filter") === "manual";
+  const isPublicDatasetReview = projectRoute === "review"
+    && searchParams.get("filter") === "sample"
+    && Boolean(searchParams.get("publicImport"));
   const breadcrumbLabel = projectId
-    ? PROJECT_ROUTE_LABELS[projectRoute] ?? "项目概览"
+    ? isManualAnnotation
+      ? "人工标注"
+      : isPublicDatasetReview
+        ? "公开数据抽检"
+      : PROJECT_ROUTE_LABELS[projectRoute] ?? "项目概览"
     : currentGlobalLabel(pathname);
   const isProjectSubRoute = Boolean(projectId && projectRoute);
   const projectBackHref = isProjectSubRoute ? `/projects/${projectId}` : projectId ? "/" : "";
@@ -148,9 +156,17 @@ export function Nav() {
   const isTeamCenter = pathname === "/team";
   const isSettingsCenter = pathname === "/settings";
   const isAdminCenter = isAuditCenter || isTeamCenter || isSettingsCenter;
-  const modelTrialName = searchParams.get("name") || "当前模型";
+  const modelTrialProjectName = searchParams.get("projectName") || "";
+  const modelTrialModelName = searchParams.get("modelName") || "";
+  const modelTrialName = (
+    modelTrialProjectName && modelTrialModelName
+      ? (modelTrialProjectName === modelTrialModelName
+        ? modelTrialProjectName
+        : `${modelTrialProjectName} · ${modelTrialModelName}`)
+      : searchParams.get("name")
+  ) || "当前模型";
   const pageDescription = isProjectManagement
-    ? "管理素材准备、AI 预标注、标注复核与模型产出的完整生产流程"
+    ? "管理素材准备、素材标注、标注复核与模型产出的完整生产流程"
     : pathname.startsWith("/datasets")
       ? "管理您的数据集版本，训练与评估模型"
     : pathname.startsWith("/tasks")
@@ -376,16 +392,14 @@ export function Nav() {
                 新建项目
               </Link>
             ) : isModelCenter ? (
-              <>
-                <button type="button" className="icon-button icon-button--ghost" aria-label="通知">
-                  <Icon name="bell" size={22} />
-                  <span className="notification-dot" />
-                </button>
-                <Link href="/?create=1" className="btn-primary app-commandbar__create">
-                  <Icon name="plus" size={16} />
-                  新建项目
-                </Link>
-              </>
+              <button
+                type="button"
+                className="btn-primary app-commandbar__create"
+                onClick={() => window.dispatchEvent(new Event("open-upload-model"))}
+              >
+                <Icon name="upload" size={16} />
+                上传模型
+              </button>
             ) : (
             <button
               type="button"

@@ -16,10 +16,11 @@ class ModelPreviewCreateIn(BaseModel):
 
     rtsp_url: str = Field(alias="rtspUrl", min_length=8, max_length=2048)
     confidence_threshold: float = Field(0.25, alias="confidenceThreshold", ge=0.01, le=1.0)
+    # 0 = 不限速，按最新帧尽快推理；>0 时为节流目标 FPS
     inference_fps: float = Field(
         settings.preview_default_inference_fps,
         alias="inferenceFps",
-        ge=1.0,
+        ge=0.0,
         le=settings.preview_max_inference_fps,
     )
 

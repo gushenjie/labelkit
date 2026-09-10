@@ -22,6 +22,7 @@ type Props = {
   actionPanel?: HTMLElement | null;
   /** 主图加载完成/失败回调，用于优先调度胶片条等次要请求 */
   onImageReadyChange?: (ready: boolean) => void;
+  workflowMode?: "review" | "manual";
 };
 
 function annotationsToBoxes(annotations: Annotation[]): Box[] {
@@ -37,6 +38,12 @@ function annotationsToBoxes(annotations: Annotation[]): Box[] {
 }
 
 type EditorMode = "view" | "annotate";
+
+/** 人工标注默认绘制；复核 compact 默认先查看 */
+function defaultEditorMode(workflowMode: "review" | "manual", compact: boolean): EditorMode {
+  if (workflowMode === "manual") return "annotate";
+  return compact ? "view" : "annotate";
+}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -133,6 +140,7 @@ export function AnnotationEditor({
   sidePanel = null,
   actionPanel = null,
   onImageReadyChange,
+  workflowMode = "review",
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -143,7 +151,9 @@ export function AnnotationEditor({
   const [selectedClass, setSelectedClass] = useState(0);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [userZoom, setUserZoom] = useState(1);
-  const [editorMode, setEditorMode] = useState<EditorMode>(compact ? "view" : "annotate");
+  const [editorMode, setEditorMode] = useState<EditorMode>(() =>
+    defaultEditorMode(workflowMode, compact),
+  );
   const [pan, setPan] = useState<{
     startX: number;
     startY: number;
@@ -228,10 +238,14 @@ export function AnnotationEditor({
     zoomToBox(boxes[index]);
   }, [boxes, zoomToBox]);
 
-  // 切换图片时重置本地状态
+  // 切图或工作流变化时套用默认模式（与 clearDirty 解耦，避免误打回 V 查看）
+  useEffect(() => {
+    setEditorMode(defaultEditorMode(workflowMode, compact));
+  }, [frameId, workflowMode, compact]);
+
+  // 切换图片时重置缩放/框选等本地状态
   useEffect(() => {
     setUserZoom(1);
-    setEditorMode(compact ? "view" : "annotate");
     setPan(null);
     if (taskType === "detect") {
       setBoxes(annotationsToBoxes(annotations));
@@ -240,6 +254,8 @@ export function AnnotationEditor({
       setClassLabel(annotations[0]?.class_id ?? null);
     }
     clearDirty();
+    // annotations 由下方 dirty 同步 effect 负责；此处只响应切图
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 frameId/taskType 变化时重置
   }, [frameId, taskType, clearDirty]);
 
   // 轮询刷新后同步服务端标注（编辑中不覆盖）
@@ -602,6 +618,13 @@ export function AnnotationEditor({
 
   const save = async (status: string) => {
     if (saving) return;
+    if (workflowMode === "manual" && status === "human_ok") {
+      const hasManualLabel = taskType === "classify" ? classLabel !== null : boxes.length > 0;
+      if (!hasManualLabel) {
+        setSaveError(taskType === "classify" ? "请先选择类别，或标记为无目标" : "请先绘制标注框，或标记为无目标");
+        return;
+      }
+    }
     setSaving(true);
     setSaveError("");
     try {
@@ -630,7 +653,7 @@ export function AnnotationEditor({
       }
       if (e.key === "n" || e.key === "N") {
         e.preventDefault();
-        void save("human_wrong");
+        void save(workflowMode === "manual" ? "no_target" : "human_wrong");
         return;
       }
       if (e.key === "Delete" || e.key === "Backspace") {
@@ -670,7 +693,7 @@ export function AnnotationEditor({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [boxes, categories, deleteSelected, focusBox, save, selectedIdx]);
+  }, [boxes, categories, deleteSelected, focusBox, save, selectedIdx, workflowMode]);
 
   const useSidePanel = compact && !!sidePanel;
   const useActionPanel = compact && !!actionPanel;
@@ -697,8 +720,8 @@ export function AnnotationEditor({
 
   const modeButtons = (
     <div className="flex bg-black/40 backdrop-blur-md p-1 rounded-lg border border-white/10 shadow-sm" role="group" aria-label="编辑模式">
-      <button type="button" className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${editorMode === "view" ? "bg-[#10A88F] text-white shadow-sm" : "text-white/70 hover:text-white"}`} onClick={() => setEditorMode("view")}>V 查看</button>
-      <button type="button" className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${editorMode === "annotate" ? "bg-[#10A88F] text-white shadow-sm" : "text-white/70 hover:text-white"}`} onClick={() => setEditorMode("annotate")}>A 标注</button>
+      <button type="button" aria-pressed={editorMode === "view"} className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${editorMode === "view" ? "bg-[#10A88F] text-white shadow-sm" : "text-white/70 hover:text-white"}`} onClick={() => setEditorMode("view")}>V 查看</button>
+      <button type="button" aria-pressed={editorMode === "annotate"} className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${editorMode === "annotate" ? "bg-[#10A88F] text-white shadow-sm" : "text-white/70 hover:text-white"}`} onClick={() => setEditorMode("annotate")}>A 标注</button>
     </div>
   );
 
@@ -807,6 +830,7 @@ export function AnnotationEditor({
   ) : null;
 
   if (taskType === "classify") {
+    const manualMode = workflowMode === "manual";
     return (
       <div>
         <img src={imageUrl} alt="frame" className="mb-4 max-h-96 rounded-lg" />
@@ -823,8 +847,8 @@ export function AnnotationEditor({
         </div>
         {saveError && <p className="mt-3 text-sm text-red-600">保存失败，修改已保留：{saveError}</p>}
         <div className="mt-4 flex gap-2">
-          <button className="btn-primary" disabled={saving} onClick={() => void save("human_ok")}>{saving ? "保存中…" : "Y 确认"}</button>
-          <button className="btn-secondary" disabled={saving} onClick={() => void save("human_wrong")}>N 驳回</button>
+          <button className="btn-primary" disabled={saving || (manualMode && classLabel === null)} onClick={() => void save("human_ok")}>{saving ? "保存中…" : manualMode ? "保存标注" : "Y 确认"}</button>
+          <button className="btn-secondary" disabled={saving} onClick={() => void save(manualMode ? "no_target" : "human_wrong")}>{manualMode ? "N 无目标" : "N 驳回"}</button>
         </div>
       </div>
     );
@@ -832,14 +856,14 @@ export function AnnotationEditor({
 
   const actionButtons = (
     <>
-      <button className="btn-primary" disabled={saving} onClick={() => void save("human_ok")}>{saving ? "保存中…" : "Y 确认"}</button>
-      <button className="btn-secondary" disabled={saving} onClick={() => void save("human_wrong")}>N 驳回</button>
+      <button className="btn-primary" disabled={saving || (workflowMode === "manual" && boxes.length === 0)} onClick={() => void save("human_ok")}>{saving ? "保存中…" : workflowMode === "manual" ? "保存标注" : "Y 确认"}</button>
+      <button className="btn-secondary" disabled={saving} onClick={() => void save(workflowMode === "manual" ? "no_target" : "human_wrong")}>{workflowMode === "manual" ? "N 无目标" : "N 驳回"}</button>
     </>
   );
 
   const shortcutsHint = (
     <p className={useActionPanel ? "annotation-editor__shortcuts annotation-editor__shortcuts--side" : compact ? "annotation-editor__shortcuts" : "mt-2 text-xs text-slate-500"}>
-      快捷键：Y 确认 · N 驳回 · V 查看 · A 标注
+      快捷键：{workflowMode === "manual" ? "Y 保存 · N 无目标" : "Y 确认 · N 驳回"} · V 查看 · A 标注
     </p>
   );
 
@@ -847,19 +871,19 @@ export function AnnotationEditor({
     <div className="flex flex-col gap-2">
       <button 
         className="flex items-center justify-between w-full px-4 py-3 bg-[#10A88F] text-white rounded-xl font-bold text-sm hover:bg-[#078D82] transition-colors shadow-sm shadow-[#10A88F]/20 disabled:opacity-50 disabled:shadow-none" 
-        disabled={saving} 
+        disabled={saving || (workflowMode === "manual" && boxes.length === 0)}
         onClick={() => void save("human_ok")}
       >
-        <span>{saving ? "保存中…" : "确认"}</span>
+        <span>{saving ? "保存中…" : workflowMode === "manual" ? "保存标注" : "确认"}</span>
         <kbd className="px-2 py-0.5 bg-white/20 rounded text-[10px] font-mono shadow-sm">Y</kbd>
       </button>
       <div className="flex gap-2">
         <button 
           className="flex-1 flex items-center justify-between px-4 py-2.5 bg-white border border-[#e4e7ec] text-[#d92d20] rounded-xl font-bold text-sm hover:bg-red-50 transition-colors shadow-sm disabled:opacity-50" 
-          disabled={saving} 
-          onClick={() => void save("human_wrong")}
+          disabled={saving}
+          onClick={() => void save(workflowMode === "manual" ? "no_target" : "human_wrong")}
         >
-          <span>驳回</span>
+          <span>{workflowMode === "manual" ? "无目标" : "驳回"}</span>
           <kbd className="px-1.5 py-0.5 bg-gray-100 border border-gray-200 text-gray-500 rounded text-[10px] font-mono">N</kbd>
         </button>
       </div>
@@ -881,8 +905,8 @@ export function AnnotationEditor({
         {!useSidePanel && (
           <>
             <div className="annotation-editor__mode" role="group" aria-label="编辑模式">
-              <button type="button" className={`btn text-xs ${editorMode === "view" ? "btn-primary" : "btn-secondary"}`} onClick={() => setEditorMode("view")}>V 查看</button>
-              <button type="button" className={`btn text-xs ${editorMode === "annotate" ? "btn-primary" : "btn-secondary"}`} onClick={() => setEditorMode("annotate")}>A 标注</button>
+              <button type="button" aria-pressed={editorMode === "view"} className={`btn text-xs ${editorMode === "view" ? "btn-primary" : "btn-secondary"}`} onClick={() => setEditorMode("view")}>V 查看</button>
+              <button type="button" aria-pressed={editorMode === "annotate"} className={`btn text-xs ${editorMode === "annotate" ? "btn-primary" : "btn-secondary"}`} onClick={() => setEditorMode("annotate")}>A 标注</button>
             </div>
             <button
               className="btn-secondary text-xs"

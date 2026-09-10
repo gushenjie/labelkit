@@ -59,7 +59,9 @@ def test_model_catalog_exposes_a_training_preview_frame():
             base_model="yolov8s.pt",
             updated_at="2026年9月04日",
             preview_frame_id="frame-1",
+            has_cover=True,
         )
     ])
 
     assert catalog["models"][0]["preview_frame_id"] == "frame-1"
+    assert catalog["models"][0]["has_cover"] is True

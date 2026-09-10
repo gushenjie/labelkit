@@ -37,7 +37,7 @@ test("dataset center creates and reuses an immutable version", async ({ page }, 
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).toHaveURL(/\/datasets$/);
   await page.goto(`/projects/${project.id}/materials`);
-  await page.locator('input[type="file"][accept="image/*"]').setInputFiles([
+  await page.locator('input[type="file"][accept*="image/*"]').setInputFiles([
     path.join(fixturesDir, "sample-00.png"),
     path.join(fixturesDir, "sample-01.png"),
     path.join(fixturesDir, "sample-02.png"),

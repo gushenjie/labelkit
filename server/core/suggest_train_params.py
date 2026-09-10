@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from server.config import settings
 from server.core.builtin_yolo import list_builtin_weights
 from server.db.models import Category, DatasetVersion, Frame, FrameStatus, ModelVersion, Project
+from server.repositories.material_repository import active_frame_filter
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +274,11 @@ def _build_context(
     if sample_count <= 0:
         trainable = (
             db.query(func.count(Frame.id))
-            .filter(Frame.project_id == project.id, Frame.status.in_(TRAINABLE_STATUSES))
+            .filter(
+                Frame.project_id == project.id,
+                Frame.status.in_(TRAINABLE_STATUSES),
+                active_frame_filter(),
+            )
             .scalar()
         )
         sample_count = int(trainable or 0)

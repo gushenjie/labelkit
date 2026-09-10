@@ -14,6 +14,7 @@ import "./workspace-sidebar.css";
 import "./audit.css";
 import "./project-overview-clone.css";
 import "./product-cohesion.css";
+import "./interaction.css";
 import { ClientShell } from "@/components/ClientShell";
 import { brandPageTitle } from "@/lib/app-config";
 

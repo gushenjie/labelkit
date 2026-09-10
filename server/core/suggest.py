@@ -9,12 +9,13 @@ from sqlalchemy.orm import Session
 
 from server.core.labeling import call_vlm
 from server.db.models import Category, Frame, Project, Video
+from server.repositories.material_repository import active_frame_filter, active_video_filter
 
 
 def suggest_frame_count(db: Session, project_id: str) -> dict:
     project = db.get(Project, project_id)
-    frames = db.query(Frame).filter(Frame.project_id == project_id).limit(5).all()
-    videos = db.query(Video).filter(Video.project_id == project_id).all()
+    frames = db.query(Frame).filter(Frame.project_id == project_id, active_frame_filter()).limit(5).all()
+    videos = db.query(Video).filter(Video.project_id == project_id, active_video_filter()).all()
     total_duration = sum(v.duration_sec or 0 for v in videos)
 
     if not frames and not videos:

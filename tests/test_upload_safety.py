@@ -38,7 +38,8 @@ def test_same_name_uploads_use_different_physical_files(tmp_path, monkeypatch):
     )
 
     frames = session.query(Frame).order_by(Frame.created_at).all()
-    assert result == {"uploaded": 2}
+    assert result["uploaded"] == 2
+    assert result["material_batch_id"]
     assert [frame.filename for frame in frames] == ["same.png", "same.png"]
     assert frames[0].storage_key != frames[1].storage_key
     assert frames[0].filepath != frames[1].filepath

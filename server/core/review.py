@@ -15,6 +15,7 @@ from server.config import settings
 from server.core.image_io import read_image_bgr
 from server.core.visualize import save_review_image
 from server.db.models import Category, Frame, FrameStatus, Project, ProjectTaskType, Task
+from server.repositories.material_repository import active_frame_filter
 
 
 REVIEW_PROMPT = """你是标注质量审查员。图片上已画了检测框和类别名。
@@ -122,6 +123,7 @@ def run_review_task(db: Session, task: Task, *, cancelled: Callable[[], bool] | 
     statuses = {FrameStatus.LLM_LABELED, FrameStatus.AUTO_FIXED, FrameStatus.NEEDS_HUMAN}
     frames = db.query(Frame).filter(
         Frame.project_id == project.id,
+        active_frame_filter(),
         Frame.status.in_(statuses),
     ).order_by(Frame.uncertainty.desc()).all()
 

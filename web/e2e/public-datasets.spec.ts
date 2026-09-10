@@ -4,7 +4,14 @@ const apiUrl = process.env.LABELKIT_E2E_API_URL!;
 
 for (const provider of ["kaggle", "roboflow"] as const) {
   test(`${provider} controlled public dataset flow reaches review gate`, async ({ page }) => {
+    const login = await page.request.post(`${apiUrl}/api/auth/login`, {
+      data: { username: "admin", password: "admin" },
+    });
+    expect(login.ok(), await login.text()).toBeTruthy();
+    const { token } = await login.json() as { token: string };
+    await page.addInitScript((value) => localStorage.setItem("labelkit.auth.token", value), token);
     const created = await page.request.post(`${apiUrl}/api/projects`, {
+      headers: { Authorization: `Bearer ${token}` },
       data: {
         name: `public-${provider}-${Date.now()}`,
         task_type: "detect",
@@ -35,9 +42,11 @@ for (const provider of ["kaggle", "roboflow"] as const) {
       requires_manual_license_confirmation: false,
     };
     let state = "fetched";
+    let importCreated = false;
     const importPayload = () => ({
       id: "public-import-1",
       project_id: project.id,
+      material_batch_id: "batch-public-1",
       provider,
       source_ref: "demo/birds",
       source_version: "3",
@@ -64,30 +73,36 @@ for (const provider of ["kaggle", "roboflow"] as const) {
       estimated_vlm_cost: 0,
     });
 
-    await page.route(`${apiUrl}/api/public-datasets/providers`, (route) => route.fulfill({
+    await page.route(`**/api/public-datasets/providers`, (route) => route.fulfill({
       json: [
         { provider: "kaggle", available: true, discovery: true, url_import: false },
         { provider: "roboflow", available: true, discovery: true, url_import: true },
       ],
     }));
-    await page.route(`${apiUrl}/api/projects/${project.id}/public-datasets/discover`, (route) => route.fulfill({ json: { candidates: [candidate], errors: {} } }));
-    await page.route(`${apiUrl}/api/projects/${project.id}/public-datasets/fetch`, (route) => route.fulfill({ json: importPayload() }));
-    await page.route(`${apiUrl}/api/projects/${project.id}/public-dataset-imports/public-import-1`, (route) => route.fulfill({ json: importPayload() }));
-    await page.route(`${apiUrl}/api/projects/${project.id}/public-dataset-imports/public-import-1/publish`, (route) => {
+    await page.route(`**/api/projects/${project.id}/public-datasets/discover`, (route) => route.fulfill({ json: { candidates: [candidate], errors: {} } }));
+    await page.route(`**/api/projects/${project.id}/public-dataset-imports`, (route) => route.fulfill({
+      json: importCreated ? [importPayload()] : [],
+    }));
+    await page.route(`**/api/projects/${project.id}/public-datasets/fetch`, (route) => {
+      importCreated = true;
+      return route.fulfill({ json: importPayload() });
+    });
+    await page.route(`**/api/projects/${project.id}/public-dataset-imports/public-import-1`, (route) => route.fulfill({ json: importPayload() }));
+    await page.route(`**/api/projects/${project.id}/public-dataset-imports/public-import-1/publish`, (route) => {
       state = "review";
       return route.fulfill({ json: { id: "import-task", project_id: project.id, task_type: "public_import", status: "pending", progress: 0, total: 0, params: {}, result: {}, log: "", error: "", cancel_requested: false, heartbeat_at: null, retry_of_task_id: null, created_at: new Date().toISOString() } });
     });
 
-    await page.goto(`/projects/${project.id}/materials`);
-    await page.getByRole("tab", { name: /公开数据/ }).click();
+    await page.goto(`/projects/${project.id}/materials/public`);
     const prompt = provider === "roboflow" ? sourceUrl : "bird detection";
     await page.getByLabel("识别需求").fill(prompt);
     await page.getByRole("button", { name: "查找公开数据" }).click();
     await page.getByRole("button", { name: new RegExp(`${provider} birds`) }).click();
-    await page.getByText(/我已核对许可/).click();
-    await page.getByRole("button", { name: "下载并安全分析" }).click();
-    await expect(page.getByText("确认类别映射与质量门禁")).toBeVisible();
-    await page.getByRole("button", { name: "确认映射并发布到项目" }).click();
-    await expect(page.getByText("需要完成风险抽样复查")).toBeVisible();
+    await page.getByRole("button", { name: "下载并分析" }).click();
+    await page.getByRole("button", { name: "开始下载" }).click();
+    await expect(page.getByRole("heading", { name: "确认标签导入" })).toBeVisible();
+    await page.getByRole("button", { name: "导入到项目" }).click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/review`));
+    await expect(page.getByRole("heading", { name: "标注复核" })).toBeVisible();
   });
 }

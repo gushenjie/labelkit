@@ -22,7 +22,8 @@ from server.core.image_io import extract_video_thumbnail, open_video_capture, re
 from server.core.paths import frames_dir, videos_dir
 from server.core.public_dataset_archive import safe_extract
 from server.db.database import get_db
-from server.db.models import Frame, FrameStatus, Project, Video
+from server.db.models import Frame, FrameStatus, MaterialBatch, MaterialOrigin, Project, Video
+from server.repositories.material_repository import active_frame_filter, active_video_filter
 from server.worker.task_worker import TaskWorker
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["media"])
@@ -84,6 +85,8 @@ def _build_video_out(video: Video, *, extracted_count: int = 0) -> VideoOut:
         split=video.split,
         extracted_count=extracted_count,
         file_bytes=_video_file_bytes(video),
+        material_batch_id=video.material_batch_id,
+        ingest_origin="video",
         created_at=video.created_at,
     )
 
@@ -112,6 +115,7 @@ def _add_frame_from_image(
     dest: Path,
     split: str,
     batch_id: str,
+    material_batch_id: str,
     db: Session,
 ) -> None:
     image = read_image_bgr(dest)
@@ -123,6 +127,7 @@ def _add_frame_from_image(
         filename=original_name,
         storage_key=dest.stem,
         source_group_id=batch_id,
+        material_batch_id=material_batch_id,
         filepath=str(dest),
         split=split,
         phash=phash,
@@ -140,6 +145,7 @@ def _ingest_image_path(
     project_id: str,
     split: str,
     batch_id: str,
+    material_batch_id: str,
     db: Session,
     created_paths: list[Path],
 ) -> None:
@@ -156,6 +162,7 @@ def _ingest_image_path(
         dest=dest,
         split=split,
         batch_id=batch_id,
+        material_batch_id=material_batch_id,
         db=db,
     )
 
@@ -167,6 +174,7 @@ async def _ingest_image_upload(
     project_id: str,
     split: str,
     batch_id: str,
+    material_batch_id: str,
     db: Session,
     created_paths: list[Path],
     index: int,
@@ -186,6 +194,7 @@ async def _ingest_image_upload(
         dest=dest,
         split=split,
         batch_id=batch_id,
+        material_batch_id=material_batch_id,
         db=db,
     )
     return 1
@@ -198,6 +207,7 @@ async def _ingest_zip_upload(
     project_id: str,
     split: str,
     batch_id: str,
+    material_batch_id: str,
     db: Session,
     created_paths: list[Path],
 ) -> int:
@@ -227,6 +237,7 @@ async def _ingest_zip_upload(
                 project_id=project_id,
                 split=split,
                 batch_id=batch_id,
+                material_batch_id=material_batch_id,
                 db=db,
                 created_paths=created_paths,
             )
@@ -235,10 +246,10 @@ async def _ingest_zip_upload(
 
 @router.get("/videos", response_model=list[VideoOut])
 def list_videos(project_id: str, db: Session = Depends(get_db)):
-    videos = db.query(Video).filter(Video.project_id == project_id).order_by(Video.created_at.desc()).all()
+    videos = db.query(Video).filter(Video.project_id == project_id, active_video_filter()).order_by(Video.created_at.desc()).all()
     counts = dict(
         db.query(Frame.video_id, func.count(Frame.id))
-        .filter(Frame.project_id == project_id, Frame.video_id.isnot(None))
+        .filter(Frame.project_id == project_id, Frame.video_id.isnot(None), active_frame_filter())
         .group_by(Frame.video_id)
         .all()
     )
@@ -307,8 +318,17 @@ async def upload_video(
         dest.unlink(missing_ok=True)
         raise HTTPException(400, "视频中没有可读取的帧")
 
+    batch = MaterialBatch(
+        project_id=project_id,
+        origin=MaterialOrigin.VIDEO,
+        title=original_name,
+        metadata_json={"split": split, "file_bytes": written},
+    )
+    db.add(batch)
+    db.flush()
     video = Video(
         project_id=project_id,
+        material_batch_id=batch.id,
         filename=original_name,
         storage_key=storage_key,
         filepath=str(dest),
@@ -319,7 +339,15 @@ async def upload_video(
         split=split,
     )
     db.add(video)
-    db.commit()
+    try:
+        db.flush()
+        batch.metadata_json = {**batch.metadata_json, "video_id": video.id}
+        db.commit()
+    except Exception:
+        db.rollback()
+        dest.unlink(missing_ok=True)
+        _thumbnail_path(video).unlink(missing_ok=True)
+        raise
     db.refresh(video)
     try:
         extract_video_thumbnail(dest, _thumbnail_path(video))
@@ -386,7 +414,16 @@ async def upload_images(
 
     dest_dir = frames_dir(project_id, split)
     created = 0
-    batch_id = uuid.uuid4().hex
+    source_group_id = uuid.uuid4().hex
+    upload_names = [_safe_original_name(item.filename, f"upload_{index}") for index, item in enumerate(files)]
+    batch = MaterialBatch(
+        project_id=project_id,
+        origin=MaterialOrigin.IMAGE_UPLOAD,
+        title=upload_names[0] if len(upload_names) == 1 else f"图片上传（{len(upload_names)} 个文件）",
+        metadata_json={"split": split, "file_count": len(upload_names), "filenames": upload_names[:20]},
+    )
+    db.add(batch)
+    db.flush()
     created_paths: list[Path] = []
     try:
         for index, file in enumerate(files):
@@ -398,7 +435,8 @@ async def upload_images(
                     dest_dir,
                     project_id=project_id,
                     split=split,
-                    batch_id=batch_id,
+                    batch_id=source_group_id,
+                    material_batch_id=batch.id,
                     db=db,
                     created_paths=created_paths,
                 )
@@ -408,7 +446,8 @@ async def upload_images(
                     dest_dir,
                     project_id=project_id,
                     split=split,
-                    batch_id=batch_id,
+                    batch_id=source_group_id,
+                    material_batch_id=batch.id,
                     db=db,
                     created_paths=created_paths,
                     index=created,
@@ -432,4 +471,4 @@ async def upload_images(
         summary=f"上传图片 {created} 张",
         metadata={"split": split, "uploaded": created},
     )
-    return {"uploaded": created}
+    return {"uploaded": created, "material_batch_id": batch.id}

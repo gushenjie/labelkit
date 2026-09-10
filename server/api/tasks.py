@@ -17,10 +17,18 @@ from server.db.database import get_db
 from server.db.models import (
     Project,
     ProjectExecutionLease,
+    MaterialBatch,
+    MaterialOrigin,
     PublicDatasetImport,
     Task,
     TaskStatus,
     TaskType,
+)
+from server.repositories.material_repository import MaterialRepository
+from server.services.material_readiness_service import (
+    MaterialReadinessError,
+    MaterialReadinessService,
+    readiness_error_detail,
 )
 from server.worker.task_worker import TaskWorker
 
@@ -130,10 +138,36 @@ def create_task(
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    params = dict(body.params)
+    if body.task_type in {TaskType.TRAIN, TaskType.EXPORT, TaskType.DATASET_SNAPSHOT} and not params.get(
+        "dataset_version_id"
+    ):
+        try:
+            MaterialReadinessService(MaterialRepository(db)).assert_current_pool_ready(project_id)
+        except MaterialReadinessError as error:
+            raise HTTPException(409, readiness_error_detail(error)) from error
+
+    batch = None
+    if body.task_type in {TaskType.IMPORT, TaskType.DERIVE_CLASSIFY} and not params.get("material_batch_id"):
+        origin = (
+            MaterialOrigin.DATASET_IMPORT
+            if body.task_type == TaskType.IMPORT
+            else MaterialOrigin.DERIVED
+        )
+        title = str(params.get("title") or ("已有数据集导入" if origin == MaterialOrigin.DATASET_IMPORT else "派生素材"))
+        batch = MaterialBatch(
+            project_id=project_id,
+            origin=origin,
+            title=title,
+            metadata_json={"task_type": body.task_type.value},
+        )
+        db.add(batch)
+        db.flush()
+        params["material_batch_id"] = batch.id
     task = Task(
         project_id=project_id,
         task_type=body.task_type,
-        params=body.params,
+        params=params,
     )
     if body.task_type == TaskType.EXTRACT:
         running_extract = (
@@ -149,6 +183,8 @@ def create_task(
             raise HTTPException(409, "已有提取任务正在执行，请等待完成后再试")
     db.add(task)
     db.flush()
+    if batch is not None:
+        batch.metadata_json = {**batch.metadata_json, "task_id": task.id}
     db.add(ProjectExecutionLease(project_id=project_id, task_id=task.id))
     try:
         db.commit()

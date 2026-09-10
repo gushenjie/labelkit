@@ -180,6 +180,8 @@ class VideoOut(BaseModel):
     split: str
     extracted_count: int = 0
     file_bytes: int | None = None
+    material_batch_id: str | None = None
+    ingest_origin: str = "video"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -208,6 +210,8 @@ class FrameOut(BaseModel):
     source: str
     uncertainty: float
     video_id: str | None
+    material_batch_id: str | None = None
+    ingest_origin: str = "legacy"
     has_labels: bool = False
     annotations: list[AnnotationOut] = Field(default_factory=list)
     created_at: datetime
@@ -268,6 +272,7 @@ class BatchFrameFeedback(BaseModel):
 
     from_statuses: list[FrameStatus] = Field(min_length=1)
     status: FrameStatus = FrameStatus.HUMAN_OK
+    public_import_id: str | None = None
 
 
 class AnnotationsUpdate(BaseModel):
@@ -583,3 +588,65 @@ class PublicDatasetImportOut(BaseModel):
     dataset_version_id: str | None
     train_task_id: str | None
     estimated_vlm_cost: float = 0.0
+    material_batch_id: str | None = None
+
+
+class MaterialInventorySummaryOut(BaseModel):
+    active_batch_count: int
+    archived_batch_count: int
+    usable_frame_count: int
+    pending_batch_count: int
+    intake_blocking_batch_count: int = 0
+    review_batch_count: int = 0
+    review_sample_count: int = 0
+    first_review_import_id: str | None = None
+    counts_by_origin: dict[str, int] = Field(default_factory=dict)
+
+    model_config = {"from_attributes": True}
+
+
+class MaterialBatchOut(BaseModel):
+    id: str
+    project_id: str
+    origin: str
+    title: str
+    status: str
+    frame_count: int
+    usable_frame_count: int
+    pending_frame_count: int
+    frame_status_counts: dict[str, int] = Field(default_factory=dict)
+    preview_frame_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    archived_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    next_action: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class MaterialInventoryOut(BaseModel):
+    summary: MaterialInventorySummaryOut
+    items: list[MaterialBatchOut] = Field(default_factory=list)
+
+
+class MaterialFrameItemOut(BaseModel):
+    id: str
+    filename: str
+    status: str
+    split: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MaterialFramePageOut(BaseModel):
+    items: list[MaterialFrameItemOut] = Field(default_factory=list)
+    total: int
+    offset: int
+    limit: int
+
+
+class MaterialBatchMutationOut(BaseModel):
+    id: str
+    archived_at: datetime | None

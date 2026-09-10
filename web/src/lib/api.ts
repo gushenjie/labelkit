@@ -14,7 +14,11 @@ const REQUEST_TIMEOUT_MS = 20000;
 const DISCOVER_TIMEOUT_MS = 90000;
 const PUBLIC_FETCH_TIMEOUT_MS = 90000;
 
-type RequestOptions = RequestInit & { timeoutMs?: number };
+type RequestOptions = RequestInit & {
+  timeoutMs?: number;
+  /** 覆盖默认 API 基址（大文件直连后端可绕开 Next 代理体积限制） */
+  apiBase?: string;
+};
 
 /** 给 img/src 等无法带 Authorization 的资源 URL 追加 token */
 function withAuthQuery(url: string): string {
@@ -26,7 +30,12 @@ function withAuthQuery(url: string): string {
 
 async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   const token = getAuthToken();
-  const { timeoutMs = REQUEST_TIMEOUT_MS, signal: externalSignal, ...fetchOptions } = options ?? {};
+  const {
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    signal: externalSignal,
+    apiBase,
+    ...fetchOptions
+  } = options ?? {};
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const abortFromExternal = () => controller.abort();
@@ -37,7 +46,7 @@ async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   }
 
   try {
-    const res = await fetch(`${getApiBase()}${path}`, {
+    const res = await fetch(`${apiBase ?? getApiBase()}${path}`, {
       ...fetchOptions,
       signal: controller.signal,
       headers: {
@@ -60,16 +69,28 @@ async function request<T>(path: string, options?: RequestOptions): Promise<T> {
         ? detail
         : detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string"
           ? detail.message
-          : "";
+          : Array.isArray(detail)
+            ? detail
+                .map((item) => {
+                  if (!item || typeof item !== "object") return "";
+                  const loc = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(".") : "";
+                  const msg = typeof item.msg === "string" ? item.msg : "";
+                  return [loc, msg].filter(Boolean).join(": ");
+                })
+                .filter(Boolean)
+                .join("；")
+            : "";
       throw new Error(detailMessage || err.error || res.statusText);
     }
     return res.json();
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error(
-        timeoutMs > REQUEST_TIMEOUT_MS
-          ? "公开数据检索超时，可能是外网数据源响应较慢，请稍后重试"
-          : "请求超时，请检查后端服务是否已启动",
+        timeoutMs >= 60_000
+          ? "上传或处理超时，大文件请稍后重试"
+          : timeoutMs > REQUEST_TIMEOUT_MS
+            ? "公开数据检索超时，可能是外网数据源响应较慢，请稍后重试"
+            : "请求超时，请检查后端服务是否已启动",
       );
     }
     throw error;
@@ -172,6 +193,8 @@ export type Frame = {
   source: string;
   uncertainty: number;
   video_id: string | null;
+  material_batch_id?: string | null;
+  ingest_origin?: string;
   has_labels: boolean;
   annotations: Annotation[];
 };
@@ -252,6 +275,8 @@ export type Video = {
   split: string;
   extracted_count?: number;
   file_bytes?: number | null;
+  material_batch_id?: string | null;
+  ingest_origin?: string;
 };
 
 export type ModelVersion = {
@@ -350,6 +375,7 @@ export type ModelCatalogItem = {
   project_id?: string | null;
   model_id?: string | null;
   preview_frame_id?: string | null;
+  has_cover?: boolean;
 };
 export type ModelCatalog = { stats: ModelCatalogStat[]; models: ModelCatalogItem[]; total: number };
 
@@ -397,6 +423,7 @@ export type PublicDatasetCandidate = {
 export type PublicDatasetImport = {
   id: string;
   project_id: string;
+  material_batch_id: string | null;
   provider: string;
   source_ref: string;
   source_version: string;
@@ -421,6 +448,46 @@ export type PublicDatasetImport = {
   dataset_version_id: string | null;
   train_task_id: string | null;
   estimated_vlm_cost: number;
+};
+
+export type MaterialBatch = {
+  id: string;
+  project_id: string;
+  origin: "video" | "image_upload" | "public_dataset" | "dataset_import" | "derived" | "legacy";
+  title: string;
+  status: "processing" | "action_required" | "ready" | "failed" | "archived";
+  frame_count: number;
+  usable_frame_count: number;
+  pending_frame_count: number;
+  frame_status_counts: Record<string, number>;
+  preview_frame_ids: string[];
+  metadata: Record<string, unknown>;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+  next_action: string | null;
+};
+
+export type MaterialInventory = {
+  summary: {
+    active_batch_count: number;
+    archived_batch_count: number;
+    usable_frame_count: number;
+    pending_batch_count: number;
+    intake_blocking_batch_count: number;
+    review_batch_count: number;
+    review_sample_count: number;
+    first_review_import_id: string | null;
+    counts_by_origin: Record<string, number>;
+  };
+  items: MaterialBatch[];
+};
+
+export type MaterialFramePage = {
+  items: Array<{ id: string; filename: string; status: string; split: string; created_at: string }>;
+  total: number;
+  offset: number;
+  limit: number;
 };
 
 export const api = {
@@ -532,6 +599,8 @@ export const api = {
     new Promise<Video>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${getApiBase()}/api/projects/${projectId}/videos/upload`);
+      const token = getAuthToken();
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
       };
@@ -561,11 +630,51 @@ export const api = {
     const fd = new FormData();
     files.forEach((f) => fd.append("files", f));
     fd.append("split", split);
-    return request<{ uploaded: number }>(`/api/projects/${projectId}/images/upload`, {
+    return request<{ uploaded: number; material_batch_id: string }>(`/api/projects/${projectId}/images/upload`, {
       method: "POST",
       body: fd,
     });
   },
+  uploadImagesWithProgress: (
+    projectId: string,
+    files: File[],
+    onProgress: (pct: number) => void,
+    split = "train",
+  ) =>
+    new Promise<{ uploaded: number; material_batch_id: string }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${getApiBase()}/api/projects/${projectId}/images/upload`);
+      xhr.timeout = 10 * 60 * 1000;
+      const token = getAuthToken();
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      xhr.upload.onload = () => onProgress(100);
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject(new Error("解析上传结果失败"));
+          }
+          return;
+        }
+        try {
+          const error = JSON.parse(xhr.responseText);
+          const detail = typeof error.detail === "string" ? error.detail : error.error;
+          reject(new Error(detail || xhr.statusText || "上传失败"));
+        } catch {
+          reject(new Error(xhr.statusText || "上传失败"));
+        }
+      };
+      xhr.onerror = () => reject(new Error("网络中断，上传失败"));
+      xhr.ontimeout = () => reject(new Error("上传或解压处理超时，请重试"));
+      const fd = new FormData();
+      files.forEach((file) => fd.append("files", file));
+      fd.append("split", split);
+      xhr.send(fd);
+    }),
 
   listFrames: (projectId: string, status?: string, sort = "uncertainty", limit = 0) =>
     request<Frame[]>(
@@ -576,9 +685,11 @@ export const api = {
     statuses: string[],
     cursor?: string | null,
     sort = "uncertainty",
+    options?: { publicImportId?: string },
   ) => {
     const query = new URLSearchParams({ statuses: statuses.join(","), sort, limit: "100" });
     if (cursor) query.set("cursor", cursor);
+    if (options?.publicImportId) query.set("public_import_id", options.publicImportId);
     return request<FramePage>(`/api/projects/${projectId}/frames/page?${query.toString()}`);
   },
 
@@ -631,6 +742,10 @@ export const api = {
     request<Task>(`/api/projects/${projectId}/public-dataset-imports/${importId}/approve-and-train`, {
       method: "POST",
     }),
+  approvePublicDatasetReview: (projectId: string, importId: string) =>
+    request<PublicDatasetImport>(`/api/projects/${projectId}/public-dataset-imports/${importId}/approve-review`, {
+      method: "POST",
+    }),
   approveProjectPublicDatasetsAndTrain: (projectId: string) =>
     request<Task>(`/api/projects/${projectId}/public-datasets/approve-and-train`, {
       method: "POST",
@@ -642,6 +757,32 @@ export const api = {
     ),
   frameStats: (projectId: string) =>
     request<Record<string, number>>(`/api/projects/${projectId}/frames/stats`),
+  listMaterialBatches: (
+    projectId: string,
+    filters: { includeArchived?: boolean; origin?: string; status?: string; query?: string } = {},
+  ) => {
+    const query = new URLSearchParams();
+    if (filters.includeArchived) query.set("include_archived", "true");
+    if (filters.origin) query.set("origin", filters.origin);
+    if (filters.status) query.set("status", filters.status);
+    if (filters.query) query.set("query", filters.query);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return request<MaterialInventory>(`/api/projects/${projectId}/material-batches${suffix}`);
+  },
+  listMaterialBatchFrames: (projectId: string, batchId: string, offset = 0, limit = 40) =>
+    request<MaterialFramePage>(
+      `/api/projects/${projectId}/material-batches/${batchId}/frames?offset=${offset}&limit=${limit}`,
+    ),
+  archiveMaterialBatch: (projectId: string, batchId: string) =>
+    request<{ id: string; archived_at: string | null }>(
+      `/api/projects/${projectId}/material-batches/${batchId}/archive`,
+      { method: "POST" },
+    ),
+  restoreMaterialBatch: (projectId: string, batchId: string) =>
+    request<{ id: string; archived_at: string | null }>(
+      `/api/projects/${projectId}/material-batches/${batchId}/restore`,
+      { method: "POST" },
+    ),
   frameImageUrl: (
     projectId: string,
     frameId: string,
@@ -656,15 +797,26 @@ export const api = {
       `${getApiBase()}/api/projects/${projectId}/frames/${frameId}/image?${params.toString()}`,
     );
   },
+  modelCoverUrl: (projectId: string, modelId: string) =>
+    withAuthQuery(`${getApiBase()}/api/projects/${projectId}/models/${modelId}/cover`),
   frameFeedback: (projectId: string, frameId: string, status: string, note = "") =>
     request(`/api/projects/${projectId}/frames/${frameId}/feedback`, {
       method: "POST",
       body: JSON.stringify({ status, note }),
     }),
-  batchFrameFeedback: (projectId: string, fromStatuses: string[], status = "human_ok") =>
+  batchFrameFeedback: (
+    projectId: string,
+    fromStatuses: string[],
+    status = "human_ok",
+    options?: { publicImportId?: string },
+  ) =>
     request<{ ok: boolean; updated: number }>(`/api/projects/${projectId}/frames/batch-feedback`, {
       method: "POST",
-      body: JSON.stringify({ from_statuses: fromStatuses, status }),
+      body: JSON.stringify({
+        from_statuses: fromStatuses,
+        status,
+        public_import_id: options?.publicImportId,
+      }),
     }),
   updateAnnotations: (projectId: string, frameId: string, annotations: Annotation[], status = "human_ok") =>
     request(`/api/projects/${projectId}/frames/${frameId}/annotations`, {
@@ -758,12 +910,24 @@ export const api = {
       body: JSON.stringify(keys?.length ? { keys } : {}),
       timeoutMs: 600_000,
     }),
-  uploadModel: (projectId: string, file: File, name = "") => {
+  uploadModel: (projectId: string, file: File, name = "", cover?: File | null) => {
     const fd = new FormData();
     fd.append("file", file);
     if (name) fd.append("name", name);
-    return request<ModelVersion>(`/api/projects/${projectId}/models/upload`, { method: "POST", body: fd });
+    if (cover) fd.append("cover", cover);
+    return request<ModelVersion>(`/api/projects/${projectId}/models/upload`, {
+      method: "POST",
+      body: fd,
+      // 权重常 >10MB：浏览器直连后端，避开 Next 代理默认 10MB 截断
+      apiBase: typeof window !== "undefined" ? RUNTIME.apiOrigin : undefined,
+      // 权重文件常达数十到数百 MB，放宽至 10 分钟
+      timeoutMs: 10 * 60 * 1000,
+    });
   },
+  deleteModel: (projectId: string, modelId: string) =>
+    request<{ ok: boolean; id: string }>(`/api/projects/${projectId}/models/${modelId}`, {
+      method: "DELETE",
+    }),
   predictModel: (projectId: string, modelId: string, file: File) => {
     const fd = new FormData();
     fd.append("file", file);

@@ -13,6 +13,7 @@ from server.core.image_io import read_image_bgr, write_image_bgr
 from server.core.paths import frames_dir, label_path_for_frame
 from server.core.yolo_io import parse_labels, yolo_to_xywh
 from server.db.models import Annotation, Category, Frame, FrameStatus, Project, ProjectTaskType, Task
+from server.repositories.material_repository import active_frame_filter
 
 
 def crop_from_bbox(
@@ -54,6 +55,7 @@ def run_derive_classify_task(
 
     frames = db.query(Frame).filter(
         Frame.project_id == source_project_id,
+        active_frame_filter(),
         Frame.status.in_({FrameStatus.AUTO_OK, FrameStatus.HUMAN_OK}),
     ).all()
 
@@ -102,6 +104,7 @@ def run_derive_classify_task(
 
                 frame = Frame(
                     project_id=project.id,
+                    material_batch_id=task.params.get("material_batch_id"),
                     filename=f"crop_{Path(src_frame.filename).stem}_{box_index + 1}.jpg",
                     storage_key=storage_key,
                     source_group_id=src_frame.source_group_id or src_frame.video_id or src_frame.id,

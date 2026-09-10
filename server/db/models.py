@@ -13,6 +13,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -86,6 +87,15 @@ class UserStatus(str, enum.Enum):
     DISABLED = "disabled"
 
 
+class MaterialOrigin(str, enum.Enum):
+    VIDEO = "video"
+    IMAGE_UPLOAD = "image_upload"
+    PUBLIC_DATASET = "public_dataset"
+    DATASET_IMPORT = "dataset_import"
+    DERIVED = "derived"
+    LEGACY = "legacy"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -125,6 +135,37 @@ class Project(Base):
     public_dataset_imports: Mapped[list[PublicDatasetImport]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+    material_batches: Mapped[list[MaterialBatch]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class MaterialBatch(Base):
+    __tablename__ = "material_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    origin: Mapped[MaterialOrigin] = mapped_column(
+        Enum(MaterialOrigin, values_callable=lambda enum_cls: [item.value for item in enum_cls]),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    project: Mapped[Project] = relationship(back_populates="material_batches")
+    videos: Mapped[list[Video]] = relationship(back_populates="material_batch")
+    frames: Mapped[list[Frame]] = relationship(back_populates="material_batch")
+    public_imports: Mapped[list[PublicDatasetImport]] = relationship(back_populates="material_batch")
+    dataset_version_links: Mapped[list[DatasetVersionMaterialBatch]] = relationship(
+        back_populates="material_batch"
+    )
 
 
 class Category(Base):
@@ -147,6 +188,9 @@ class Video(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    material_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("material_batches.id", name="fk_videos_material_batch_id", ondelete="SET NULL"), nullable=True, index=True
+    )
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
     storage_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     filepath: Mapped[str] = mapped_column(String(1000), nullable=False)
@@ -158,6 +202,7 @@ class Video(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     project: Mapped[Project] = relationship(back_populates="videos")
+    material_batch: Mapped[MaterialBatch | None] = relationship(back_populates="videos")
     frames: Mapped[list[Frame]] = relationship(back_populates="video")
 
 
@@ -166,6 +211,9 @@ class Frame(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    material_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("material_batches.id", name="fk_frames_material_batch_id", ondelete="SET NULL"), nullable=True, index=True
+    )
     video_id: Mapped[str | None] = mapped_column(ForeignKey("videos.id", ondelete="SET NULL"), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(500), nullable=False)
     storage_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
@@ -188,6 +236,7 @@ class Frame(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="frames")
+    material_batch: Mapped[MaterialBatch | None] = relationship(back_populates="frames")
     video: Mapped[Video | None] = relationship(back_populates="frames")
     annotations: Mapped[list[Annotation]] = relationship(back_populates="frame", cascade="all, delete-orphan")
     public_import: Mapped[PublicDatasetImport | None] = relationship(back_populates="frames")
@@ -267,6 +316,32 @@ class DatasetVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     project: Mapped[Project] = relationship(back_populates="dataset_versions")
+    material_batch_links: Mapped[list[DatasetVersionMaterialBatch]] = relationship(
+        back_populates="dataset_version", cascade="all, delete-orphan"
+    )
+
+
+class DatasetVersionMaterialBatch(Base):
+    __tablename__ = "dataset_version_material_batches"
+    __table_args__ = (
+        Index("ix_dataset_version_material_batches_batch_id", "material_batch_id"),
+    )
+
+    dataset_version_id: Mapped[str] = mapped_column(
+        ForeignKey("dataset_versions.id", ondelete="CASCADE"), primary_key=True
+    )
+    material_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("material_batches.id", ondelete="RESTRICT"), primary_key=True
+    )
+    origin: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+    frame_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    content_checksum: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    dataset_version: Mapped[DatasetVersion] = relationship(back_populates="material_batch_links")
+    material_batch: Mapped[MaterialBatch] = relationship(back_populates="dataset_version_links")
 
 
 class PublicDatasetImport(Base):
@@ -274,6 +349,9 @@ class PublicDatasetImport(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    material_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("material_batches.id", name="fk_public_dataset_imports_material_batch_id", ondelete="SET NULL"), nullable=True, index=True
+    )
     provider: Mapped[str] = mapped_column(String(30), nullable=False)
     source_ref: Mapped[str] = mapped_column(String(500), nullable=False)
     source_version: Mapped[str] = mapped_column(String(100), default="")
@@ -308,6 +386,7 @@ class PublicDatasetImport(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="public_dataset_imports")
+    material_batch: Mapped[MaterialBatch | None] = relationship(back_populates="public_imports")
     frames: Mapped[list[Frame]] = relationship(back_populates="public_import")
 
 

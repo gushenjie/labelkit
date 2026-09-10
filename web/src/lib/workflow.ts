@@ -17,9 +17,9 @@ export const WORKFLOW_STEPS: ReadonlyArray<{
   },
   {
     slug: "label",
-    label: "AI 预标注",
-    description: "批量生成初始标注结果",
-    pageDescription: "用 YOLO 或 LLM 对未标注图片批量打框，生成待人工确认的初始标注。",
+    label: "标注处理",
+    description: "AI 批量标注或人工绘制",
+    pageDescription: "可以用 YOLO 或 LLM 批量生成初始标注，也可以直接逐张人工标注。",
   },
   {
     slug: "review",
@@ -72,7 +72,7 @@ export function getNextActionForTask(
     case "dedup":
     case "public_fetch":
     case "public_import":
-      return { label: "去 AI 预标注", href: `/projects/${projectId}/label` };
+      return { label: "去素材标注", href: `/projects/${projectId}/label` };
     case "label":
     case "relabel":
     case "review":
@@ -125,8 +125,8 @@ export function computeContinueAction(
   if (unlabeled > 0) {
     return {
       step: "label",
-      label: `继续 AI 预标注`,
-      description: `${unlabeled} 张待生成初始标注`,
+      label: `继续素材标注`,
+      description: `${unlabeled} 张可 AI 批量处理或人工标注`,
       href: `/projects/${projectId}/label`,
       count: unlabeled,
       primary: true,

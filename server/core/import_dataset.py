@@ -26,8 +26,8 @@ from server.db.models import (
 _IMG_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.webp")
 
 
-def _storage_key(project_id: str, image_path: Path) -> str:
-    identity = f"{project_id}|{image_path.resolve()}".encode("utf-8")
+def _storage_key(project_id: str, image_path: Path, material_batch_id: str | None = None) -> str:
+    identity = f"{project_id}|{material_batch_id or ''}|{image_path.resolve()}".encode("utf-8")
     return hashlib.sha256(identity).hexdigest()[:32]
 
 
@@ -127,7 +127,7 @@ def run_import_classify_task(
             for path in created_paths:
                 path.unlink(missing_ok=True)
             raise RuntimeError("任务已取消")
-        storage_key = _storage_key(project.id, img_src)
+        storage_key = _storage_key(project.id, img_src, task.params.get("material_batch_id"))
         if storage_key in existing:
             skipped += 1
         else:
@@ -136,6 +136,7 @@ def run_import_classify_task(
             created_paths.append(dst)
             frame = Frame(
                 project_id=project.id,
+                material_batch_id=task.params.get("material_batch_id"),
                 filename=img_src.name,
                 storage_key=storage_key,
                 source_group_id=import_group_id,
@@ -218,7 +219,7 @@ def run_import_task(
                 Path(created_frame.filepath).unlink(missing_ok=True)
                 label_path_for_frame(project.id, created_frame).unlink(missing_ok=True)
             raise RuntimeError("任务已取消")
-        storage_key = _storage_key(project.id, img_src)
+        storage_key = _storage_key(project.id, img_src, task.params.get("material_batch_id"))
         if storage_key in existing:
             skipped += 1
             task.progress = i + 1
@@ -229,6 +230,7 @@ def run_import_task(
 
         frame = Frame(
             project_id=project.id,
+            material_batch_id=task.params.get("material_batch_id"),
             filename=img_src.name,
             storage_key=storage_key,
             source_group_id=import_group_id,

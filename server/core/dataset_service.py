@@ -13,20 +13,24 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from server.core.paths import dataset_versions_dir
 from server.db.models import (
     Category,
     DatasetVersion,
+    DatasetVersionMaterialBatch,
     Frame,
     FrameStatus,
+    MaterialBatch,
     ModelVersion,
     Project,
     ProjectTaskType,
     PublicDatasetImport,
     Task,
 )
+from server.repositories.material_repository import MaterialRepository, active_frame_filter
+from server.services.material_readiness_service import MaterialReadinessService
 
 TRAINABLE = {
     FrameStatus.AUTO_OK,
@@ -44,6 +48,8 @@ class SnapshotFrameInput:
     storage_key: str | None
     source_group_id: str
     status: str
+    material_batch_id: str | None
+    ingest_origin: str
     locked_split: str | None
     labels: tuple[tuple[int, float | None, float | None, float | None, float | None], ...]
 
@@ -125,10 +131,15 @@ class DatasetVersionRepository:
     def __init__(self, db: Session):
         self._db = db
 
+    @property
+    def db(self) -> Session:
+        return self._db
+
     def list_frames(self, project_id: str, task_type: ProjectTaskType) -> list[SnapshotFrameInput]:
         frames = (
             self._db.query(Frame)
-            .filter(Frame.project_id == project_id, Frame.status.in_(TRAINABLE))
+            .options(selectinload(Frame.annotations), selectinload(Frame.material_batch))
+            .filter(Frame.project_id == project_id, Frame.status.in_(TRAINABLE), active_frame_filter())
             .order_by(Frame.id)
             .all()
         )
@@ -156,6 +167,14 @@ class DatasetVersionRepository:
                     storage_key=frame.storage_key,
                     source_group_id=frame.source_group_id or frame.video_id or frame.id,
                     status=frame.status.value,
+                    material_batch_id=frame.material_batch_id,
+                    ingest_origin=(
+                        frame.material_batch.origin.value
+                        if frame.material_batch and hasattr(frame.material_batch.origin, "value")
+                        else str(frame.material_batch.origin)
+                        if frame.material_batch
+                        else "legacy"
+                    ),
                     locked_split=(
                         frame.split
                         if frame.public_import_id
@@ -203,6 +222,46 @@ class DatasetVersionRepository:
                 snapshot_path=str(version.snapshot_path),
             )
         )
+        self._db.flush()
+
+    def save_material_batch_links(self, version_id: str, entries: list[dict]) -> None:
+        grouped: dict[str, list[dict]] = {}
+        for entry in entries:
+            batch_id = entry.get("material_batch_id")
+            if batch_id:
+                grouped.setdefault(str(batch_id), []).append(entry)
+        if not grouped:
+            return
+        batches = {
+            batch.id: batch
+            for batch in self._db.query(MaterialBatch).filter(MaterialBatch.id.in_(grouped)).all()
+        }
+        for batch_id, batch_entries in grouped.items():
+            batch = batches.get(batch_id)
+            if not batch:
+                raise RuntimeError(f"素材批次不存在: {batch_id}")
+            content_payload = [
+                {
+                    "frame_id": item["frame_id"],
+                    "image_checksum": item["image_checksum"],
+                    "label_checksum": item["label_checksum"],
+                }
+                for item in sorted(batch_entries, key=lambda item: item["frame_id"])
+            ]
+            content_checksum = hashlib.sha256(
+                json.dumps(content_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            self._db.add(
+                DatasetVersionMaterialBatch(
+                    dataset_version_id=version_id,
+                    material_batch_id=batch_id,
+                    origin=batch.origin.value if hasattr(batch.origin, "value") else str(batch.origin),
+                    title=batch.title,
+                    metadata_json=dict(batch.metadata_json or {}),
+                    frame_count=len(batch_entries),
+                    content_checksum=content_checksum,
+                )
+            )
         self._db.flush()
 
     def get(self, version_id: str, project_id: str) -> DatasetVersionDTO | None:
@@ -269,6 +328,21 @@ class DatasetVersionRepository:
         )
 
     def trigger_sources(self, project_id: str, version_id: str) -> tuple[DatasetSourceRefDTO, ...]:
+        links = (
+            self._db.query(DatasetVersionMaterialBatch)
+            .filter(DatasetVersionMaterialBatch.dataset_version_id == version_id)
+            .order_by(DatasetVersionMaterialBatch.created_at, DatasetVersionMaterialBatch.material_batch_id)
+            .all()
+        )
+        if links:
+            return tuple(
+                DatasetSourceRefDTO(
+                    str((item.metadata_json or {}).get("provider") or item.origin),
+                    item.title,
+                    str((item.metadata_json or {}).get("source_url") or ""),
+                )
+                for item in links
+            )
         imports = (
             self._db.query(PublicDatasetImport)
             .filter(
@@ -389,6 +463,7 @@ class DatasetService:
         *,
         val_ratio: float = 0.2,
     ) -> DatasetVersionDTO:
+        MaterialReadinessService(MaterialRepository(self._repository.db)).assert_current_pool_ready(project_id)
         frames = self._repository.list_frames(project_id, task_type)
         if not frames:
             raise RuntimeError("没有可创建数据版本的已确认样本")
@@ -445,6 +520,8 @@ class DatasetService:
                         "storage_key": frame.storage_key,
                         "source_group_id": frame.source_group_id,
                         "status": frame.status,
+                        "material_batch_id": frame.material_batch_id,
+                        "ingest_origin": frame.ingest_origin,
                         "split": split_map[frame.id],
                         "image": relative_image.as_posix(),
                         "image_checksum": _sha256_file(snapshot_image),
@@ -453,7 +530,7 @@ class DatasetService:
                     }
                 )
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "task_type": task_type.value,
                 "frames": entries,
             }
@@ -482,6 +559,7 @@ class DatasetService:
         )
         try:
             self._repository.save(version)
+            self._repository.save_material_batch_links(version.id, entries)
         except Exception:
             if root.exists():
                 shutil.rmtree(root)

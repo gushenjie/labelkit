@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy import and_, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from server.api.deps import get_optional_actor
 from server.api.schemas import (
@@ -34,6 +34,7 @@ from server.core.vlm_profiles import resolve_profile
 from server.core.yolo_io import YoloLabel, write_labels
 from server.db.database import get_db
 from server.db.models import Annotation, Category, Frame, FrameStatus, Project
+from server.repositories.material_repository import active_frame_filter
 
 _PREVIEW_CACHE_HEADERS = {"Cache-Control": "private, max-age=3600"}
 
@@ -65,6 +66,14 @@ def _frame_out(frame: Frame) -> FrameOut:
         source=frame.source,
         uncertainty=frame.uncertainty,
         video_id=frame.video_id,
+        material_batch_id=frame.material_batch_id,
+        ingest_origin=(
+            frame.material_batch.origin.value
+            if frame.material_batch and hasattr(frame.material_batch.origin, "value")
+            else str(frame.material_batch.origin)
+            if frame.material_batch
+            else "legacy"
+        ),
         has_labels=bool(frame.annotations) or frame.status == FrameStatus.NO_TARGET,
         annotations=[{
             "id": a.id,
@@ -86,15 +95,21 @@ def list_frames(
     project_id: str,
     status: str | None = Query(None),
     split: str | None = Query(None),
+    public_import_id: str | None = None,
     sort: str = Query("uncertainty"),
     limit: int = Query(0, ge=0, le=200),
     db: Session = Depends(get_db),
 ):
-    q = db.query(Frame).filter(Frame.project_id == project_id)
+    q = db.query(Frame).options(selectinload(Frame.material_batch)).filter(
+        Frame.project_id == project_id,
+        active_frame_filter(),
+    )
     if status and status != "all":
         q = q.filter(Frame.status == FrameStatus(status))
     if split:
         q = q.filter(Frame.split == split)
+    if public_import_id:
+        q = q.filter(Frame.public_import_id == public_import_id)
     if sort == "recent":
         q = q.order_by(Frame.updated_at.desc())
     elif sort == "uncertainty":
@@ -113,6 +128,7 @@ def list_frames_page(
     project_id: str,
     statuses: str | None = Query(None),
     split: str | None = Query(None),
+    public_import_id: str | None = None,
     sort: str = Query("uncertainty", pattern="^(uncertainty|recent|created)$"),
     cursor: str | None = Query(None),
     limit: int = Query(100, ge=1, le=100),
@@ -124,16 +140,26 @@ def list_frames_page(
     except ValueError as error:
         raise HTTPException(400, f"Invalid frame status: {error}") from error
 
-    q = db.query(Frame).filter(Frame.project_id == project_id)
+    q = db.query(Frame).options(selectinload(Frame.material_batch)).filter(
+        Frame.project_id == project_id,
+        active_frame_filter(),
+    )
     if parsed_statuses:
         q = q.filter(Frame.status.in_(parsed_statuses))
     if split:
         q = q.filter(Frame.split == split)
+    if public_import_id:
+        q = q.filter(Frame.public_import_id == public_import_id)
     total = q.count()
 
     if cursor:
         data = _decode_cursor(cursor)
-        expected = {"statuses": list(status_values), "split": split, "sort": sort}
+        expected = {
+            "statuses": list(status_values),
+            "split": split,
+            "public_import_id": public_import_id,
+            "sort": sort,
+        }
         if any(data.get(key) != value for key, value in expected.items()):
             raise HTTPException(400, "Frame cursor does not match current filters")
         last_id = data["id"]
@@ -184,6 +210,7 @@ def list_frames_page(
         payload = {
             "statuses": list(status_values),
             "split": split,
+            "public_import_id": public_import_id,
             "sort": sort,
             "id": last.id,
             "created_at": last.created_at.isoformat(),
@@ -201,7 +228,7 @@ def frame_stats(project_id: str, db: Session = Depends(get_db)):
     counts: dict[str, int] = {s.value: 0 for s in FrameStatus}
     rows = (
         db.query(Frame.status, func.count(Frame.id))
-        .filter(Frame.project_id == project_id)
+        .filter(Frame.project_id == project_id, active_frame_filter())
         .group_by(Frame.status)
         .all()
     )
@@ -318,10 +345,16 @@ def batch_frame_feedback(
             raise HTTPException(400, f"不允许从来源状态批量确认：{status.value}")
         from_statuses.append(status)
 
+    query = db.query(Frame).filter(
+        Frame.project_id == project_id,
+        Frame.status.in_(from_statuses),
+        active_frame_filter(),
+    )
+    if body.public_import_id:
+        query = query.filter(Frame.public_import_id == body.public_import_id)
+
     updated = (
-        db.query(Frame)
-        .filter(Frame.project_id == project_id, Frame.status.in_(from_statuses))
-        .update(
+        query.update(
             {
                 Frame.status: FrameStatus.HUMAN_OK,
                 Frame.source: "human",
@@ -342,6 +375,7 @@ def batch_frame_feedback(
         metadata={
             "from_statuses": [s.value for s in from_statuses],
             "status": FrameStatus.HUMAN_OK.value,
+            "public_import_id": body.public_import_id,
             "updated": updated,
         },
     )
@@ -459,6 +493,7 @@ def label_estimate(
         db.query(Frame)
         .filter(
             Frame.project_id == project_id,
+            active_frame_filter(),
             or_(
                 Frame.status == FrameStatus.UNLABELED,
                 and_(

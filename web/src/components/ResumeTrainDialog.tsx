@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@/components/Icon";
+import { ModalSurface } from "@/components/ui/motion";
 
 export type ResumeTrainParams = {
   epochs: number;
@@ -73,13 +74,17 @@ export function ResumeTrainDialog({
 }: Props) {
   const [mounted, setMounted] = useState(false);
   const [form, setForm] = useState<ResumeTrainParams | null>(null);
+  const formTask = useRef<string | null>(null);
+  const submittingRef = useRef(false);
+  useEffect(() => { if (!submitting) submittingRef.current = false; }, [submitting]);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
   useEffect(() => {
-    if (open && task) setForm(paramsFromTask(task));
+    if (!open) { formTask.current = null; submittingRef.current = false; }
+    else if (task && formTask.current !== task.id) { setForm(paramsFromTask(task)); formTask.current = task.id; }
   }, [open, task]);
 
   const taskCode = useMemo(() => {
@@ -87,20 +92,15 @@ export function ResumeTrainDialog({
     return `TASK-${task.id.replaceAll("-", "").slice(0, 6).toUpperCase()}`;
   }, [task]);
 
-  if (!mounted || !open || !task || !form) return null;
+  if (!mounted) return null;
 
   const setField = <K extends keyof ResumeTrainParams>(key: K, value: ResumeTrainParams[K]) => {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
   return createPortal(
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !submitting) onClose();
-      }}
-    >
+    <ModalSurface open={Boolean(open && task && form)} onClose={onClose} busy={submitting}>
+    {task && form && (
       <div
         className="materials-public-import-dialog resume-train-dialog"
         role="dialog"
@@ -279,14 +279,15 @@ export function ResumeTrainDialog({
             type="button"
             className="btn-primary"
             disabled={submitting || form.epochs < Math.max(1, task.progress)}
-            onClick={() => onConfirm(form)}
+            onClick={() => { if (!submittingRef.current) { submittingRef.current = true; onConfirm(form); } }}
           >
             <Icon name="play" size={14} />
             {submitting ? "启动中…" : "开始续训"}
           </button>
         </footer>
       </div>
-    </div>,
+    )}
+    </ModalSurface>,
     document.body,
   );
 }

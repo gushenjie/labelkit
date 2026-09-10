@@ -42,6 +42,7 @@ class CatalogItem:
     project_id: str | None = None
     model_id: str | None = None
     preview_frame_id: str | None = None
+    has_cover: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class TrainingModel:
     updated_at: str
     source: str = "训练模型"
     preview_frame_id: str | None = None
+    has_cover: bool = False
     created_at: datetime | None = None
     dataset_version: int | None = None
     sample_count: int | None = None
@@ -119,6 +121,7 @@ def _training_catalog_item(model: TrainingModel) -> CatalogItem:
         project_id=model.project_id,
         model_id=model.id,
         preview_frame_id=model.preview_frame_id,
+        has_cover=model.has_cover,
     )
 
 

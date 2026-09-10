@@ -98,6 +98,7 @@ export default function ReviewPage() {
   const searchParams = useSearchParams();
   const frameParam = searchParams.get("frame");
   const filterParam = searchParams.get("filter") ?? searchParams.get("status");
+  const publicImportId = searchParams.get("publicImport");
   const { toast } = useToast();
   const confirm = useConfirm();
 
@@ -107,6 +108,7 @@ export default function ReviewPage() {
   const [pageTotal, setPageTotal] = useState(0);
   const [loadingNext, setLoadingNext] = useState(false);
   const [frameStats, setFrameStats] = useState<Record<string, number>>({});
+  const [statsLoaded, setStatsLoaded] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -117,20 +119,23 @@ export default function ReviewPage() {
   const sessionStart = useRef(Date.now());
   const [confirmedInSession, setConfirmedInSession] = useState(0);
 
-  const [filter, setFilter] = useState<ReviewFilter | null>(null);
+  const [filter, setFilter] = useState<ReviewFilter | null>(() =>
+    filterParam ? normalizeReviewFilter(filterParam) : null,
+  );
   const [idx, setIdx] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
   const [showAutoReview, setShowAutoReview] = useState(false);
   const [showRelabel, setShowRelabel] = useState(false);
   const [relabelMode, setRelabelMode] = useState<"yolo" | "llm">("yolo");
   const filmstripRef = useRef<HTMLDivElement>(null);
-  const activeThumbRef = useRef<HTMLDivElement>(null);
+  const activeThumbRef = useRef<HTMLButtonElement>(null);
   const [annotationSidePanel, setAnnotationSidePanel] = useState<HTMLDivElement | null>(null);
   const [annotationActionPanel, setAnnotationActionPanel] = useState<HTMLDivElement | null>(null);
   const [publicImports, setPublicImports] = useState<PublicDatasetImport[]>([]);
   const [approvingTrain, setApprovingTrain] = useState(false);
   const [mainImageReady, setMainImageReady] = useState(false);
   const [batchConfirming, setBatchConfirming] = useState(false);
+  const manualMode = filter === "manual";
 
   const pendingReviewImports = publicImports.filter((item) =>
     ["review", "review_expanded", "full_review_required"].includes(item.state),
@@ -146,10 +151,12 @@ export default function ReviewPage() {
   const visibleFilters = useMemo(() => visibleReviewFilters(frameStats), [frameStats]);
 
   useEffect(() => {
-    if (!filter) return;
+    if (!filter || !statsLoaded) return;
     if (visibleFilters.includes(filter)) return;
+    // URL 明确指定的工作队列应保留到完成态，不能因数量归零跳到另一类完成页。
+    if (filterParam && normalizeReviewFilter(filterParam) === filter) return;
     setFilter(visibleFilters[0] ?? "all");
-  }, [filter, visibleFilters]);
+  }, [filter, filterParam, statsLoaded, visibleFilters]);
 
   useEffect(() => {
     if (!id) return;
@@ -163,6 +170,8 @@ export default function ReviewPage() {
       return;
     }
     api.frameStats(id).then((stats) => {
+      setFrameStats(stats);
+      setStatsLoaded(true);
       const visible = visibleReviewFilters(stats);
       if (visible.includes("sample")) setFilter("sample");
       else if (visible.includes("pending")) setFilter("pending");
@@ -185,9 +194,16 @@ export default function ReviewPage() {
     if (!id || approvingTrain) return;
     setApprovingTrain(true);
     try {
+      if (publicImportId) {
+        const approved = await api.approvePublicDatasetReview(id, publicImportId);
+        toast({ type: "success", message: "本批公开数据已通过抽检并回到素材总账" });
+        router.push(`/projects/${id}/materials?highlight=${approved.material_batch_id ?? ""}`);
+        return;
+      }
       if (hasPublicReviewGate) {
-        await api.approveProjectPublicDatasetsAndTrain(id);
-        toast({ type: "success", message: "项目抽样复核通过，已合并全部公开数据并启动训练" });
+        const first = pendingReviewImports[0];
+        if (first) router.push(`/projects/${id}/review?filter=sample&publicImport=${first.id}`);
+        return;
       }
       router.push(`/projects/${id}/train`);
     } catch (error) {
@@ -199,7 +215,7 @@ export default function ReviewPage() {
 
   const loadFrames = useCallback(() => {
     if (!id || filter === null) return;
-    api.listFramesPage(id, reviewStatuses(filter)).then((page) => {
+    api.listFramesPage(id, reviewStatuses(filter), null, "uncertainty", { publicImportId: publicImportId ?? undefined }).then((page) => {
       const f = page.items;
       setFrames(f);
       setNextCursor(page.next_cursor);
@@ -211,13 +227,13 @@ export default function ReviewPage() {
         setIdx((i) => Math.min(i, Math.max(0, f.length - 1)));
       }
     });
-  }, [id, filter, frameParam]);
+  }, [id, filter, frameParam, publicImportId]);
 
   const loadNextPage = useCallback(async () => {
     if (!id || filter === null || !nextCursor || loadingNext) return;
     setLoadingNext(true);
     try {
-      const page = await api.listFramesPage(id, reviewStatuses(filter), nextCursor);
+      const page = await api.listFramesPage(id, reviewStatuses(filter), nextCursor, "uncertainty", { publicImportId: publicImportId ?? undefined });
       setFrames((currentFrames) => {
         const existing = new Set(currentFrames.map((frame) => frame.id));
         return [...currentFrames, ...page.items.filter((frame) => !existing.has(frame.id))];
@@ -227,11 +243,14 @@ export default function ReviewPage() {
     } finally {
       setLoadingNext(false);
     }
-  }, [filter, id, loadingNext, nextCursor]);
+  }, [filter, id, loadingNext, nextCursor, publicImportId]);
 
   const refreshMeta = useCallback(() => {
     if (!id) return;
-    api.frameStats(id).then(setFrameStats);
+    api.frameStats(id).then((stats) => {
+      setFrameStats(stats);
+      setStatsLoaded(true);
+    });
     api.listTasks(id).then((t) => {
       const reviewTasks = t.filter((x) => x.task_type === "review");
       setTasks(reviewTasks);
@@ -402,7 +421,9 @@ export default function ReviewPage() {
 
   const batchConfirmCount =
     filter === "sample"
-      ? countSampleReview(frameStats)
+      ? publicImportId
+        ? pageTotal
+        : countSampleReview(frameStats)
       : filter === "pending"
         ? pendingCount
         : filter === "rejected"
@@ -414,7 +435,9 @@ export default function ReviewPage() {
   const handleBatchConfirm = async () => {
     if (!id || !filter || !canBatchConfirm) return;
     if (!confirmDiscard()) return;
-    const filterLabel = REVIEW_FILTERS.find((f) => f.value === filter)?.label ?? "当前筛选";
+    const filterLabel = publicImportId && filter === "sample"
+      ? "本批公开数据抽检"
+      : REVIEW_FILTERS.find((f) => f.value === filter)?.label ?? "当前筛选";
     const ok = await confirm({
       title: "一键确认",
       message: `将「${filterLabel}」下剩余 ${batchConfirmCount} 张全部标记为已确认，保留现有标注且不再逐张查看。确定继续？`,
@@ -424,7 +447,9 @@ export default function ReviewPage() {
     setBatchConfirming(true);
     setActionError("");
     try {
-      const result = await api.batchFrameFeedback(id, reviewStatuses(filter), "human_ok");
+      const result = await api.batchFrameFeedback(id, reviewStatuses(filter), "human_ok", {
+        publicImportId: publicImportId ?? undefined,
+      });
       setConfirmedInSession((n) => n + (result.updated ?? 0));
       setIsEditing(false);
       draftsRef.current.clear();
@@ -482,8 +507,30 @@ export default function ReviewPage() {
   // auto_ok 可直接训练，不阻塞「下一步」；仅 needs_human / llm_labeled / auto_fixed 需人工处理
   const blockingCount = countBlockingReview(frameStats);
   const trainableCount = countTrainable(frameStats);
-  const canGoTrain = blockingCount === 0 && trainableCount > 0;
-  const reviewHeaderAction = canGoTrain ? (
+  const unlabeledCount = frameStats.unlabeled ?? 0;
+  const canGoTrain = unlabeledCount === 0 && blockingCount === 0 && trainableCount > 0;
+  const batchReviewComplete = Boolean(publicImportId && pageTotal === 0);
+  const reviewHeaderAction = manualMode && unlabeledCount > 0 ? (
+    <WorkflowNextButton
+      label="标注复核"
+      disabled
+      disabledHint={`还剩 ${unlabeledCount} 张待人工标注`}
+    />
+  ) : publicImportId ? (
+    <button
+      type="button"
+      className="materials-workspace__next-action materials-workspace__next-action--ready"
+      disabled={approvingTrain || !batchReviewComplete}
+      title={batchReviewComplete ? "" : `本批仍有 ${pageTotal} 张待复核`}
+      onClick={() => void startTrainingFromReview()}
+    >
+      <Icon name="check" size={16} />
+      <div className="flex flex-col items-start leading-tight">
+        <span className="text-[10px] opacity-80 font-normal">完成本批抽检</span>
+        <strong>{approvingTrain ? "正在提交…" : "确认并返回素材"}</strong>
+      </div>
+    </button>
+  ) : canGoTrain ? (
     hasPublicReviewGate ? (
       <button
         type="button"
@@ -514,26 +561,26 @@ export default function ReviewPage() {
     />
   );
 
-  if (filter === "sample" && frames.length === 0 && countSampleReview(frameStats) === 0) {
+  if (filter === "sample" && frames.length === 0 && (publicImportId ? pageTotal === 0 : countSampleReview(frameStats) === 0)) {
     return (
       <div className="review-page min-h-[calc(100vh-64px)] bg-[#f4faf8] text-[#17343A] font-sans flex flex-col relative overflow-hidden p-8">
         <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-[#10A88F]/10 blur-[120px] rounded-full pointer-events-none" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-[#078D82]/10 blur-[100px] rounded-full pointer-events-none" />
         <div className="relative z-10 flex flex-col h-full w-full">
         <ProjectPageHeader
-          title="标注复核"
-          eyebrow="Quality assurance"
-          description={reviewCopy.pageDescription}
+          title={publicImportId ? "公开数据抽检" : "标注复核"}
+          eyebrow={publicImportId ? "Dataset quality check" : "Quality assurance"}
+          description={publicImportId ? "核对本批公开数据的抽检样本；确认后保留原有标注并返回素材总账。" : reviewCopy.pageDescription}
           action={reviewHeaderAction}
         />
         <div className="flex-1 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-10 flex flex-col items-center justify-center text-center">
             <div className="w-16 h-16 bg-[#F4FAF8] rounded-2xl flex items-center justify-center mb-6 shadow-inner border border-[#CFF4EC]">
               <Icon name="check" size={32} className="text-[#10A88F]" />
             </div>
-            <h2 className="text-xl font-bold text-[#075F5A] mb-3">抽样复查完成</h2>
+            <h2 className="text-xl font-bold text-[#075F5A] mb-3">{publicImportId ? "本批公开数据抽检完成" : "抽样复查完成"}</h2>
             <p className="text-[#17343A]/60 max-w-md mx-auto mb-8 leading-relaxed">
-              风险样本已全部确认（本次处理 {confirmedInSession} 张）。<br />
-              点击下方按钮创建不可变数据版本并开始训练。
+              {publicImportId ? "本批抽检样本均已确认，原有标注已保留。" : `风险样本已全部确认（本次处理 ${confirmedInSession} 张）。`}<br />
+              {publicImportId ? "确认抽检结果后，该批次会回到素材总账；全部素材准备完成后再统一训练。" : "当前抽样复核已完成。"}
             </p>
             <div className="flex gap-4 flex-wrap justify-center">
               <button
@@ -542,14 +589,10 @@ export default function ReviewPage() {
                 disabled={approvingTrain}
                 onClick={() => void startTrainingFromReview()}
               >
-                {approvingTrain
-                  ? "正在创建版本并启动训练…"
-                  : publicImports.some((item) => item.state === "training")
-                    ? "查看训练进度"
-                    : "创建版本并开始训练"}
+                {approvingTrain ? "正在提交…" : publicImportId ? "确认抽检并返回素材" : "训练或导出"}
               </button>
               <button type="button" className="px-6 py-2.5 bg-white border border-[#e4e7ec] text-[#344054] rounded-xl text-sm font-bold hover:bg-gray-50 transition-colors shadow-sm" onClick={() => switchFilter("confirmed")}>
-                查看已确认
+                {publicImportId ? "查看本批已确认" : "查看已确认"}
               </button>
             </div>
         </div>
@@ -599,9 +642,9 @@ export default function ReviewPage() {
 
       <div className="relative z-10 flex flex-col h-full min-h-0 w-full">
         <ProjectPageHeader
-          title="标注复核"
-          eyebrow="Quality assurance"
-          description={reviewCopy.pageDescription}
+          title={manualMode ? "人工标注" : "标注复核"}
+          eyebrow={manualMode ? "Manual annotation" : "Quality assurance"}
+          description={manualMode ? "逐张绘制或调整标注；保存后直接记为人工确认，不再经过 AI 预标注。" : reviewCopy.pageDescription}
           action={reviewHeaderAction}
         />
 
@@ -614,7 +657,7 @@ export default function ReviewPage() {
           </div>
         )}
 
-        {showAutoReview && (
+        {showAutoReview && !manualMode && (
           <div className="mb-4 bg-white/80 backdrop-blur-xl border border-white shadow-[0_8px_32px_rgba(16,168,143,0.06)] rounded-2xl p-5 shrink-0">
             <TaskProgress
               label="审查进度"
@@ -641,6 +684,7 @@ export default function ReviewPage() {
             <div className="flex items-center gap-1 overflow-x-auto custom-scrollbar">
               {REVIEW_FILTERS.filter((f) => visibleFilters.includes(f.value)).map((f) => {
                 const count =
+                  f.value === "manual" ? unlabeledCount :
                   f.value === "sample" ? sampleCount :
                   f.value === "pending" ? pendingCount :
                   f.value === "rejected" ? rejectedCount :
@@ -671,18 +715,20 @@ export default function ReviewPage() {
                   )}
                 </span>
               )}
-              <button
-                type="button"
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors shadow-sm ${
-                  showAutoReview
-                    ? "bg-[#F4FAF8] text-[#10A88F] border border-[#CFF4EC]"
-                    : "bg-white border border-[#e4e7ec] text-[#344054] hover:bg-gray-50"
-                }`}
-                onClick={() => setShowAutoReview((v) => !v)}
-              >
-                <Icon name="sparkles" size={14} className="text-[#10A88F]" />
-                机器预审
-              </button>
+              {!manualMode && (
+                <button
+                  type="button"
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors shadow-sm ${
+                    showAutoReview
+                      ? "bg-[#F4FAF8] text-[#10A88F] border border-[#CFF4EC]"
+                      : "bg-white border border-[#e4e7ec] text-[#344054] hover:bg-gray-50"
+                  }`}
+                  onClick={() => setShowAutoReview((v) => !v)}
+                >
+                  <Icon name="sparkles" size={14} className="text-[#10A88F]" />
+                  机器预审
+                </button>
+              )}
               {canBatchConfirm && (
                 <button
                   type="button"
@@ -749,9 +795,13 @@ export default function ReviewPage() {
             <div className="flex-1 flex items-center justify-center m-2 bg-white/80 rounded-2xl border border-white shadow-sm min-h-0">
               <EmptyState
                 title={`「${activeFilterMeta?.label}」暂无图片`}
-                description={filter === "pending" && confirmedCount > 0 ? "可以尝试查看已确认或开始训练" : undefined}
+                description={manualMode ? "当前没有未标注素材，可以处理待确认结果或返回素材标注。" : filter === "pending" && confirmedCount > 0 ? "可以尝试查看已确认或开始训练" : undefined}
                 action={
-                  filter === "pending" && confirmedCount > 0 ? (
+                  manualMode ? (
+                    <Link href={`/projects/${id}/label`} className="bg-white border border-[#e4e7ec] text-[#344054] px-6 py-2.5 rounded-xl text-sm font-bold shadow-sm hover:bg-gray-50 transition-colors inline-block mt-4">
+                      返回素材标注
+                    </Link>
+                  ) : filter === "pending" && confirmedCount > 0 ? (
                     <Link href={`/projects/${id}/train`} className="bg-[#10A88F] text-white px-6 py-2.5 rounded-xl text-sm font-bold shadow-sm shadow-[#10A88F]/20 hover:bg-[#078D82] transition-colors inline-block mt-4">
                       开始训练
                     </Link>
@@ -778,13 +828,14 @@ export default function ReviewPage() {
                       compact
                       sidePanel={annotationSidePanel}
                       actionPanel={annotationActionPanel}
+                      workflowMode={manualMode ? "manual" : "review"}
                     />
                   )}
                 </div>
                 <aside className="review-side h-full min-h-0">
                   {current && (
                     <>
-                      <span className="text-[10px] font-bold tracking-wider text-[#10A88F] uppercase">当前帧</span>
+                      <span className="text-[10px] font-bold tracking-wider text-[#10A88F] uppercase">{manualMode ? "待人工标注" : "当前帧"}</span>
                       <div className="mt-1 flex items-start gap-1.5 min-w-0">
                         <h2 className="text-sm font-bold text-[#075F5A] truncate min-w-0 flex-1" title={current.filename}>
                           {current.filename}
@@ -824,10 +875,13 @@ export default function ReviewPage() {
                     const selected = i === idx;
                     const distance = Math.abs(i - idx);
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={f.id}
                         ref={selected ? activeThumbRef : undefined}
-                        className={`h-full aspect-video shrink-0 rounded-lg overflow-hidden cursor-pointer transition-all border-2 relative ${
+                        aria-label={`打开 ${f.filename}`}
+                        aria-pressed={selected}
+                        className={`h-full aspect-video shrink-0 p-0 bg-transparent rounded-lg overflow-hidden cursor-pointer transition-all border-2 relative ${
                           selected
                             ? "border-[#10A88F] shadow-md ring-2 ring-[#10A88F]/20 z-10"
                             : "border-transparent hover:border-[#CFF4EC] shadow-sm opacity-60 hover:opacity-100"
@@ -845,7 +899,7 @@ export default function ReviewPage() {
                             {FRAME_STATUS_SIMPLE[f.status] ?? f.status}
                           </span>
                         </div>
-                      </div>
+                      </button>
                     );
                   });
                   })()}

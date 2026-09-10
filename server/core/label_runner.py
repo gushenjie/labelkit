@@ -21,6 +21,7 @@ from server.core.paths import label_path_for_frame
 from server.core.vlm_profiles import resolve_profile
 from server.core.yolo_io import write_labels
 from server.db.models import Annotation, Category, Frame, FrameStatus, Project, ProjectTaskType, Task
+from server.repositories.material_repository import active_frame_filter
 
 
 CONFIRMED = {FrameStatus.AUTO_OK, FrameStatus.AUTO_FIXED, FrameStatus.HUMAN_OK, FrameStatus.NO_TARGET}
@@ -64,7 +65,7 @@ def _resolve_label_frames(
     force: bool,
     frame_ids: list[str] | None = None,
 ) -> list[Frame]:
-    q = db.query(Frame).filter(Frame.project_id == project_id)
+    q = db.query(Frame).filter(Frame.project_id == project_id, active_frame_filter())
     if frame_ids is not None:
         if not frame_ids:
             return []

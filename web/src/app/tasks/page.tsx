@@ -11,6 +11,9 @@ import { Select } from "@/components/ui/Select";
 import { useToast } from "@/components/ui/ToastProvider";
 import { api, type GlobalTask, type ProjectDashboard } from "@/lib/api";
 import { formatTrainLog } from "@/lib/train-log";
+import { ChangedValue, ModalSurface } from "@/components/ui/motion";
+import { useTaskLayout } from "@/components/ui/useTaskLayout";
+import { useExitItems } from "@/components/ui/useExitItems";
 
 const TASK_LABEL: Record<string, string> = {
   extract: "视频抽帧", dedup: "数据去重", label: "自动标注", review: "标注复查",
@@ -38,7 +41,7 @@ function taskAssignee(task: GlobalTask) {
 }
 function taskProgress(task: GlobalTask) {
   if (task.status === "completed") return 100;
-  if (task.total <= 0) return task.status === "running" ? 12 : 0;
+  if (task.total <= 0) return 0;
   return Math.max(0, Math.min(100, Math.round((task.progress / task.total) * 100)));
 }
 function compactNumber(value: number) {
@@ -68,6 +71,8 @@ export default function GlobalTasksPage() {
   const [tasks, setTasks] = useState<GlobalTask[]>([]);
   const [dashboard, setDashboard] = useState<ProjectDashboard | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
   const [query, setQuery] = useState("");
   const [taskType, setTaskType] = useState("all");
   const [status, setStatus] = useState("all");
@@ -100,19 +105,23 @@ export default function GlobalTasksPage() {
     }
     if (inflightRef.current) return;
     inflightRef.current = true;
+    if (mode === "initial") { setLoading(true); setLoadError(false); }
     try {
       if (mode === "initial") {
         const [nextTasks, nextDashboard] = await Promise.all([api.listAllTasks(), api.getProjectDashboard()]);
         setTasks(nextTasks);
         setDashboard(nextDashboard);
         hasActiveRef.current = nextTasks.some((task) => ACTIVE_STATUSES.has(task.status));
+        setRefreshError(false);
         return;
       }
       const nextTasks = await api.listAllTasks();
       setTasks(nextTasks);
       hasActiveRef.current = nextTasks.some((task) => ACTIVE_STATUSES.has(task.status));
+      setRefreshError(false);
     } catch {
-      // 静默刷新失败时保留当前列表，避免打断操作
+      if (mode === "initial") setLoadError(true);
+      else setRefreshError(true);
     } finally {
       inflightRef.current = false;
       if (mode === "initial") setLoading(false);
@@ -199,7 +208,15 @@ export default function GlobalTasksPage() {
   }, [showMore]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, pageCount);
-  const visibleTasks = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const visibleTasks = useMemo(() => filtered.slice((safePage - 1) * pageSize, safePage * pageSize), [filtered, safePage, pageSize]);
+  const resultKey = [query, taskType, status, project, assignee, safePage, pageSize].join("|");
+  const taskLayout = useTaskLayout(view, `${resultKey}|${visibleTasks.map(task => task.id).join(",")}`);
+  const changeView = (next: "list" | "grid") => { if (next !== view) { taskLayout.capture(); setView(next); } };
+  const displayedTasks = useExitItems(visibleTasks, resultKey);
+  useEffect(() => {
+    const focused = document.activeElement?.closest<HTMLElement>("[data-task-id]");
+    if (focused?.hasAttribute("inert")) taskLayout.ref.current?.focus();
+  }, [displayedTasks, taskLayout.ref]);
   const rangeStart = filtered.length ? (safePage - 1) * pageSize + 1 : 0;
   const rangeEnd = Math.min(safePage * pageSize, filtered.length);
   const summary = dashboard?.summary;
@@ -256,10 +273,10 @@ export default function GlobalTasksPage() {
   return (
     <div className={`task-center-page task-center-page--${view}`}>
       <section className="task-metrics" aria-label="任务中心概览">
-        <Metric icon="folder" value={compactNumber(summary?.total_projects ?? 0)} label="项目总数" trend={`${summary?.projects_last_30_days ?? 0}`} hint="近 30 天" />
-        <Metric icon="layers" value={compactNumber(summary?.total_data_items ?? 0)} label="数据总量（项）" trend={compactNumber(summary?.data_items_last_30_days ?? 0)} hint="近 30 天" />
-        <Metric icon="users" value={compactNumber(summary?.active_annotators ?? 0)} label="活跃执行者" trend={`${summary?.completed_tasks_last_30_days ?? 0}`} hint="任务已完成" />
-        <Metric icon="clock" value={(summary?.total_video_hours ?? 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 })} label="视频总时长" trend={(summary?.video_hours_last_30_days ?? 0).toFixed(2)} hint="近 30 天" />
+        <Metric loading={!summary} icon="folder" value={compactNumber(summary?.total_projects ?? 0)} label="项目总数" trend={`${summary?.projects_last_30_days ?? 0}`} hint="近 30 天" />
+        <Metric loading={!summary} icon="layers" value={compactNumber(summary?.total_data_items ?? 0)} label="数据总量（项）" trend={compactNumber(summary?.data_items_last_30_days ?? 0)} hint="近 30 天" />
+        <Metric loading={!summary} icon="users" value={compactNumber(summary?.active_annotators ?? 0)} label="活跃执行者" trend={`${summary?.completed_tasks_last_30_days ?? 0}`} hint="任务已完成" />
+        <Metric loading={!summary} icon="clock" value={(summary?.total_video_hours ?? 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 })} label="视频总时长" trend={(summary?.video_hours_last_30_days ?? 0).toFixed(2)} hint="近 30 天" />
       </section>
 
       <section className="task-toolbar" aria-label="任务筛选">
@@ -282,12 +299,13 @@ export default function GlobalTasksPage() {
           )}
         </div>
         <div className="task-view-switch" aria-label="视图切换">
-          <button type="button" aria-label="列表视图" aria-pressed={view === "list"} className={view === "list" ? "active" : ""} onClick={() => setView("list")}><Icon name="list" size={22} /></button>
-          <button type="button" aria-label="网格视图" aria-pressed={view === "grid"} className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}><Icon name="grid" size={20} /></button>
+          <button type="button" aria-label="列表视图" aria-pressed={view === "list"} className={view === "list" ? "active" : ""} onClick={() => changeView("list")}><Icon name="list" size={22} /></button>
+          <button type="button" aria-label="网格视图" aria-pressed={view === "grid"} className={view === "grid" ? "active" : ""} onClick={() => changeView("grid")}><Icon name="grid" size={20} /></button>
         </div>
       </section>
 
-      <section className="task-results" aria-live="polite" aria-busy={loading}>
+      {refreshError && <div role="status" className="task-refresh-error">刷新失败，当前显示上次数据。<button type="button" onClick={() => void refresh("silent")}>重试</button></div>}
+      <section className="task-results" aria-busy={loading}>
         {view === "list" && (loading || visibleTasks.length > 0) && (
           <div className="task-list-head" aria-hidden="true">
             <span>任务</span>
@@ -307,16 +325,19 @@ export default function GlobalTasksPage() {
             fields={3}
             label="正在加载任务列表"
           />
-        ) : visibleTasks.length === 0 ? (
+        ) : loadError ? (
+          <div className="task-results__empty" role="alert"><strong>任务加载失败</strong><button type="button" className="btn-secondary" onClick={() => void refresh("initial")}>重新加载</button></div>
+        ) : displayedTasks.length === 0 ? (
           <div className="task-results__empty"><Icon name="archive" size={28} /><strong>没有符合条件的任务</strong><span>调整筛选条件后再试。</span></div>
         ) : (
-          <div className="task-cards lk-scrollbar" key={view}>
-            {visibleTasks.map((task, index) => (
+          <div className="task-cards lk-scrollbar" ref={taskLayout.ref} tabIndex={-1} aria-label="任务列表">
+            {displayedTasks.map(({ item: task, exiting }, index) => (
               <TaskCard
                 key={task.id}
                 task={task}
                 previewId={projectById.get(task.project_id)?.preview_frame_id ?? null}
                 animationIndex={index}
+                exiting={exiting}
                 resuming={resumingId === task.id}
                 onResume={openResume}
                 onViewLog={() => setLogTaskId(task.id)}
@@ -338,14 +359,9 @@ export default function GlobalTasksPage() {
         </div>
       </footer>
 
-      {mounted && logTask && createPortal(
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setLogTaskId(null);
-          }}
-        >
+      {mounted && createPortal(
+        <ModalSurface open={Boolean(logTask)} onClose={() => setLogTaskId(null)}>
+        {logTask && (
           <div
             className="materials-public-import-dialog task-train-log-dialog"
             role="dialog"
@@ -421,7 +437,8 @@ export default function GlobalTasksPage() {
               </button>
             </footer>
           </div>
-        </div>,
+        )}
+        </ModalSurface>,
         document.body,
       )}
 
@@ -439,8 +456,8 @@ export default function GlobalTasksPage() {
   );
 }
 
-function Metric({ icon, value, label, trend, hint }: { icon: "folder" | "layers" | "users" | "clock"; value: string; label: string; trend: string; hint: string }) {
-  return <article><span className="task-metric__icon"><Icon name={icon} size={30} /></span><div><strong>{value}</strong><p>{label}</p><small>↑ {trend} <em>{hint}</em></small></div></article>;
+function Metric({ icon, value, label, trend, hint, loading = false }: { icon: "folder" | "layers" | "users" | "clock"; value: string; label: string; trend: string; hint: string; loading?: boolean }) {
+  return <article><span className="task-metric__icon"><Icon name={icon} size={30} /></span><div><strong>{loading ? <span className="lk-value-placeholder" aria-label="加载中" /> : <ChangedValue value={value} />}</strong><p>{label}</p><small style={{ visibility: loading ? "hidden" : undefined }}>↑ <ChangedValue value={trend} /> <em>{hint}</em></small></div></article>;
 }
 
 function Filter({ className = "", label, ariaLabel, value, onChange, options }: { className?: string; label: string; ariaLabel: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {
@@ -454,6 +471,7 @@ function TaskCard({
   resuming,
   onResume,
   onViewLog,
+  exiting = false,
 }: {
   task: GlobalTask;
   previewId: string | null;
@@ -461,6 +479,7 @@ function TaskCard({
   resuming: boolean;
   onResume: (task: GlobalTask) => void;
   onViewLog: () => void;
+  exiting?: boolean;
 }) {
   const progress = taskProgress(task);
   const assigned = taskAssignee(task);
@@ -474,6 +493,10 @@ function TaskCard({
     <article
       className="task-card"
       data-status={task.status}
+      data-task-id={task.id}
+      data-exiting={exiting || undefined}
+      inert={exiting}
+      aria-hidden={exiting || undefined}
       style={{ "--task-index": animationIndex } as CSSProperties}
     >
       <Link href={`/projects/${task.project_id}/tasks`} className="task-card__media" aria-label={`打开 ${taskCode}`}>
@@ -515,13 +538,13 @@ function TaskCard({
         <small>进度</small>
         <div>
           <span><i style={{ width: `${progress}%` }} /></span>
-          <strong>{progress}%</strong>
+          <strong><ChangedValue value={task.total <= 0 && task.status !== "completed" ? "—" : `${progress}%`} /></strong>
         </div>
         <p>{compactNumber(task.progress)} / {compactNumber(task.total)}</p>
       </div>
       <div className="task-card__state">
         <small>状态</small>
-        <span className={`task-status task-status--${task.status}`}>{STATUS_LABEL[task.status] ?? task.status}</span>
+        <span className={`task-status task-status--${task.status}`}><ChangedValue value={STATUS_LABEL[task.status] ?? task.status} /></span>
       </div>
       <div className="task-card__actions">
         {canResume ? (
@@ -551,8 +574,8 @@ function TaskCard({
         ) : null}
       </div>
       <div className="task-card__mobile-summary">
-        <span className={`task-status task-status--${task.status}`}>{STATUS_LABEL[task.status] ?? task.status}</span>
-        <span className="task-card__mobile-progress"><i><b style={{ width: `${progress}%` }} /></i><strong>{progress}%</strong></span>
+        <span className={`task-status task-status--${task.status}`}><ChangedValue value={STATUS_LABEL[task.status] ?? task.status} /></span>
+        <span className="task-card__mobile-progress"><i><b style={{ width: `${progress}%` }} /></i><strong><ChangedValue value={task.total <= 0 && task.status !== "completed" ? "—" : `${progress}%`} /></strong></span>
         <span className="task-card__mobile-type">{typeLabel}</span>
         <span className="task-card__mobile-assignee">{assigned}</span>
         <span className="task-card__mobile-time">

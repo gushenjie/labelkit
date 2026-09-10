@@ -94,7 +94,7 @@
   background: rgb(255 255 255 / 98%);
   padding: 4px;
   box-shadow: 0 16px 36px rgb(24 49 58 / 16%), 0 3px 9px rgb(24 49 58 / 7%);
-  animation: select-menu-in 160ms cubic-bezier(.22, 1, .36, 1) both;
+  transform-origin: top left;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgb(9 143 126 / 22%) transparent;

@@ -12,6 +12,11 @@ type Props = {
   categories: Category[];
 };
 
+type PreviewPrefs = {
+  rtspUrl: string;
+  confidenceThreshold: number;
+};
+
 const STATUS_COPY: Record<ModelPreviewStatus, { label: string; detail: string }> = {
   STARTING: { label: "正在连接", detail: "正在加载模型并连接摄像头，通常需要 5～10 秒" },
   STREAMING: { label: "实时检测中", detail: "画面与检测结果正在持续更新" },
@@ -20,6 +25,43 @@ const STATUS_COPY: Record<ModelPreviewStatus, { label: string; detail: string }>
   STOPPED: { label: "已停止", detail: "实时预览已经结束" },
   FAILED: { label: "预览失败", detail: "连接或推理未能继续" },
 };
+
+const DEFAULT_PREFS: PreviewPrefs = {
+  rtspUrl: "",
+  confidenceThreshold: 0.25,
+};
+
+function prefsKey(projectId: string, modelId: string) {
+  return `labelkit.modelPreview.${projectId}.${modelId}`;
+}
+
+function loadPreviewPrefs(projectId: string, modelId: string): PreviewPrefs {
+  if (typeof window === "undefined" || !projectId || !modelId) return DEFAULT_PREFS;
+  try {
+    const raw = window.localStorage.getItem(prefsKey(projectId, modelId));
+    if (!raw) return DEFAULT_PREFS;
+    const parsed = JSON.parse(raw) as Partial<PreviewPrefs>;
+    const confidence = Number(parsed.confidenceThreshold);
+    return {
+      rtspUrl: typeof parsed.rtspUrl === "string" ? parsed.rtspUrl : "",
+      confidenceThreshold:
+        Number.isFinite(confidence) && confidence >= 0.01 && confidence <= 1
+          ? confidence
+          : DEFAULT_PREFS.confidenceThreshold,
+    };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
+function savePreviewPrefs(projectId: string, modelId: string, prefs: PreviewPrefs) {
+  if (typeof window === "undefined" || !projectId || !modelId) return;
+  try {
+    window.localStorage.setItem(prefsKey(projectId, modelId), JSON.stringify(prefs));
+  } catch {
+    // 忽略私密模式等写入失败
+  }
+}
 
 function validRtspUrl(value: string): boolean {
   try {
@@ -40,8 +82,8 @@ export function ModelRealtimePreview({
   categories,
 }: Props) {
   const [rtspUrl, setRtspUrl] = useState("");
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.25);
-  const [inferenceFps, setInferenceFps] = useState(5);
+  const [confidenceThreshold, setConfidenceThreshold] = useState(DEFAULT_PREFS.confidenceThreshold);
+  const [prefsReady, setPrefsReady] = useState(false);
   const [creating, setCreating] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -50,14 +92,13 @@ export function ModelRealtimePreview({
   const [activeTarget, setActiveTarget] = useState("");
   const [error, setError] = useState("");
   const sessionRef = useRef<string | null>(null);
+  const savedRtspRef = useRef("");
 
-  const canStart = validRtspUrl(rtspUrl)
+  const canStart = prefsReady
+    && validRtspUrl(rtspUrl)
     && Number.isFinite(confidenceThreshold)
     && confidenceThreshold >= 0.01
     && confidenceThreshold <= 1
-    && Number.isFinite(inferenceFps)
-    && inferenceFps >= 1
-    && inferenceFps <= 10
     && !creating
     && !stopping
     && !sessionId;
@@ -67,6 +108,14 @@ export function ModelRealtimePreview({
     () => Object.entries(snapshot?.classCounts ?? {}).sort((a, b) => b[1] - a[1]),
     [snapshot?.classCounts],
   );
+
+  useEffect(() => {
+    const prefs = loadPreviewPrefs(projectId, modelId);
+    savedRtspRef.current = prefs.rtspUrl;
+    setRtspUrl(prefs.rtspUrl);
+    setConfidenceThreshold(prefs.confidenceThreshold);
+    setPrefsReady(true);
+  }, [modelId, projectId]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -107,10 +156,20 @@ export function ModelRealtimePreview({
     }
   }, [modelId, projectId]);
 
+  const restoreFormFromPrefs = () => {
+    setRtspUrl(savedRtspRef.current);
+  };
+
   const startPreview = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!canStart) return;
     const requestedUrl = rtspUrl.trim();
+    const prefs: PreviewPrefs = {
+      rtspUrl: requestedUrl,
+      confidenceThreshold,
+    };
+    savePreviewPrefs(projectId, modelId, prefs);
+    savedRtspRef.current = requestedUrl;
     setCreating(true);
     setError("");
     setSnapshot(null);
@@ -118,13 +177,12 @@ export function ModelRealtimePreview({
       const created = await api.createModelPreview(projectId, modelId, {
         rtspUrl: requestedUrl,
         confidenceThreshold,
-        inferenceFps,
+        inferenceFps: 0,
       });
       sessionRef.current = created.sessionId;
       setSessionId(created.sessionId);
       setStreamUrl(api.modelPreviewStreamUrl(created.streamPath));
       setActiveTarget("当前摄像头");
-      setRtspUrl("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法创建实时预览，请重试。");
     } finally {
@@ -150,6 +208,7 @@ export function ModelRealtimePreview({
     setSessionId(null);
     setStreamUrl(null);
     setActiveTarget("");
+    restoreFormFromPrefs();
   };
 
   const resetTerminalSession = () => {
@@ -159,6 +218,7 @@ export function ModelRealtimePreview({
     setSnapshot(null);
     setActiveTarget("");
     setError("");
+    restoreFormFromPrefs();
   };
 
   const sessionTerminal = snapshot?.status === "FAILED" || snapshot?.status === "STOPPED";
@@ -168,47 +228,42 @@ export function ModelRealtimePreview({
       <div className="model-realtime-toolbar">
         {!sessionId ? (
           <form className="model-realtime-form" onSubmit={startPreview}>
-            <label className="model-realtime-source-field">
-              <span>RTSP 视频地址</span>
-              <input
-                type="text"
-                value={rtspUrl}
-                placeholder="rtsp://用户名:密码@摄像头地址/视频路径"
-                autoComplete="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                onChange={(event) => setRtspUrl(event.target.value)}
-              />
-              <small>地址仅用于本次会话，不会保存。</small>
-            </label>
-            <label>
-              <span>置信度</span>
-              <input
-                type="number"
-                min="0.01"
-                max="1"
-                step="0.01"
-                value={confidenceThreshold}
-                onChange={(event) => setConfidenceThreshold(Number(event.target.value))}
-              />
-            </label>
-            <label>
-              <span>推理帧率</span>
-              <select value={inferenceFps} onChange={(event) => setInferenceFps(Number(event.target.value))}>
-                {[1, 2, 3, 5, 8, 10].map((value) => <option key={value} value={value}>{value} FPS</option>)}
-              </select>
-            </label>
-            <button type="submit" className={creating ? "is-loading" : undefined} disabled={!canStart}>
-              <Icon name={creating ? "refresh" : "play"} size={16} />
-              {creating ? "正在创建…" : "开始实时预览"}
-            </button>
+            <div className="model-realtime-form__row">
+              <label className="model-realtime-source-field">
+                <span>RTSP 地址</span>
+                <input
+                  type="text"
+                  value={rtspUrl}
+                  placeholder="rtsp://user:pass@host/path"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  onChange={(event) => setRtspUrl(event.target.value)}
+                />
+              </label>
+              <label className="model-realtime-param-field">
+                <span>置信度</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  max="1"
+                  step="0.01"
+                  value={confidenceThreshold}
+                  onChange={(event) => setConfidenceThreshold(Number(event.target.value))}
+                />
+              </label>
+              <button type="submit" className={creating ? "is-loading" : undefined} disabled={!canStart}>
+                <Icon name={creating ? "refresh" : "play"} size={16} />
+                {creating ? "正在创建…" : "开始实时预览"}
+              </button>
+            </div>
           </form>
         ) : (
           <div className="model-realtime-active-bar">
             <div className="model-realtime-active-source">
               <span className="model-realtime-source-icon" aria-hidden><Icon name="video" size={16} /></span>
               <strong>{activeTarget || "当前摄像头"}</strong>
-              <small>置信度 {confidenceThreshold.toFixed(2)} · 目标 {inferenceFps} FPS</small>
+              <small>置信度 {confidenceThreshold.toFixed(2)} · 推理不限速</small>
             </div>
             <button type="button" onClick={stopPreview} disabled={stopping || sessionTerminal}>
               <Icon name="x" size={16} />{stopping ? "正在停止…" : "停止预览"}
@@ -228,7 +283,6 @@ export function ModelRealtimePreview({
               <div className="model-realtime-empty">
                 <span><Icon name="video" size={30} /></span>
                 <strong>连接真实视频，检验训练结果</strong>
-                <p>填写可由 LabelKit 后端访问的 RTSP 地址，检测结果将直接绘制在实时画面中。</p>
               </div>
             ) : sessionTerminal ? (
               <div

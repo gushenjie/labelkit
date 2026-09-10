@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
+import { UploadModelModal } from "@/components/UploadModelModal";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
+import { useToast } from "@/components/ui/ToastProvider";
 import { api, type ModelCatalog, type ModelCatalogItem } from "@/lib/api";
 
 const FALLBACK_CATALOG: ModelCatalog = {
@@ -41,9 +45,11 @@ function SelectFilter({ label, value, values, onChange }: { label: string; value
 
 function ModelCardArt({ model }: { model: ModelCatalogItem }) {
   const [imageFailed, setImageFailed] = useState(false);
-  const imageUrl = model.project_id && model.preview_frame_id
-    ? api.frameImageUrl(model.project_id, model.preview_frame_id)
-    : null;
+  const imageUrl = model.project_id && model.model_id && model.has_cover
+    ? api.modelCoverUrl(model.project_id, model.model_id)
+    : model.project_id && model.preview_frame_id
+      ? api.frameImageUrl(model.project_id, model.preview_frame_id)
+      : null;
 
   return (
     <div className="model-card__art">
@@ -51,7 +57,7 @@ function ModelCardArt({ model }: { model: ModelCatalogItem }) {
         <img
           className="model-card__art-image"
           src={imageUrl}
-          alt={`${model.project_name ?? model.name} 的素材代表图`}
+          alt={`${model.project_name ?? model.name} 的封面`}
           onError={() => setImageFailed(true)}
         />
       ) : (
@@ -61,29 +67,102 @@ function ModelCardArt({ model }: { model: ModelCatalogItem }) {
   );
 }
 
-function ModelCard({ model }: { model: ModelCatalogItem }) {
+function ModelCard({
+  model,
+  deleting,
+  onDelete,
+}: {
+  model: ModelCatalogItem;
+  deleting?: boolean;
+  onDelete?: (model: ModelCatalogItem) => void;
+}) {
   const isTestable = Boolean(model.project_id && model.model_id);
+  const canDelete = Boolean(model.project_id && model.model_id && onDelete);
   const title = model.project_name ?? model.name;
   const dateLabel = model.source === "训练模型" ? "训练于：" : model.source === "官方预训练" ? "注册于：" : "更新于：";
   return <article className="model-card">
     <div className="model-card__top"><ModelCardArt model={model} /><div className="model-card__intro"><div className="model-card__title"><h2>{title}</h2><span>{model.version}</span></div><div className="model-card__labels"><mark>{model.category}</mark>{model.source ? <mark>{model.source}</mark> : null}</div><p>{model.description}</p>{model.metadata?.length ? <div className="model-card__metadata">{model.metadata.map((item) => <span key={item}>{item}</span>)}</div> : null}</div></div>
     <div className="model-card__metrics">{model.metrics.map((metric) => <div key={metric.label}><span>{metric.label}</span><strong>{metric.value}</strong>{metric.change && <em>{metric.direction === "down" ? "↓" : "↑"} {metric.change}</em>}</div>)}</div>
-    <footer><span className="model-card__updated"><Icon name="clock" size={15} />{dateLabel}{model.updated_at}</span>{isTestable ? <Link className="model-card__deploy" href={`/models/trial?projectId=${encodeURIComponent(model.project_id!)}&modelId=${encodeURIComponent(model.model_id!)}&name=${encodeURIComponent(title)}&version=${encodeURIComponent(model.version)}`}>在线测试<Icon name="chevron-right" size={15} /></Link> : <span className="model-card__deploy model-card__deploy--disabled" title="内置示例模型暂未配置可推理的模型文件">内置示例</span>}</footer>
+    <footer>
+      <span className="model-card__updated"><Icon name="clock" size={15} />{dateLabel}{model.updated_at}</span>
+      <div className="model-card__actions">
+        {canDelete && (
+          <button
+            type="button"
+            className="model-card__delete"
+            disabled={deleting}
+            title="删除模型"
+            aria-label={`删除 ${title} ${model.version}`}
+            onClick={() => onDelete?.(model)}
+          >
+            <Icon name="trash" size={14} />
+            {deleting ? "删除中…" : "删除"}
+          </button>
+        )}
+        {isTestable ? (
+          <Link
+            className="model-card__deploy"
+            href={`/models/trial?projectId=${encodeURIComponent(model.project_id!)}&modelId=${encodeURIComponent(model.model_id!)}&projectName=${encodeURIComponent(model.project_name ?? "")}&modelName=${encodeURIComponent(model.name)}&name=${encodeURIComponent(`${model.project_name ?? model.name} · ${model.name}`)}`}
+          >
+            在线测试<Icon name="chevron-right" size={15} />
+          </Link>
+        ) : (
+          <span className="model-card__deploy model-card__deploy--disabled" title="内置示例模型暂未配置可推理的模型文件">内置示例</span>
+        )}
+      </div>
+    </footer>
   </article>;
 }
 
 export default function GlobalModelsPage() {
+  const searchParams = useSearchParams();
+  const projectParam = searchParams.get("project");
+  const { toast } = useToast();
+  const confirm = useConfirm();
   const [catalog, setCatalog] = useState(FALLBACK_CATALOG);
   const [query, setQuery] = useState("");
   const [modelType, setModelType] = useState("All");
   const [framework, setFramework] = useState("All");
   const [task, setTask] = useState("All");
   const [status, setStatus] = useState("All");
-  const [view, setView] = useState<"grid" | "list">("grid");
   const [page, setPage] = useState(1);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const pageSize = 6;
 
-  useEffect(() => { api.getModelCatalog().then(setCatalog).catch(() => setCatalog(FALLBACK_CATALOG)); }, []);
+  const refreshCatalog = () => {
+    api.getModelCatalog().then(setCatalog).catch(() => setCatalog(FALLBACK_CATALOG));
+  };
+
+  useEffect(() => { refreshCatalog(); }, []);
+
+  useEffect(() => {
+    const open = () => setUploadOpen(true);
+    window.addEventListener("open-upload-model", open);
+    return () => window.removeEventListener("open-upload-model", open);
+  }, []);
+
+  const handleDelete = async (model: ModelCatalogItem) => {
+    if (!model.project_id || !model.model_id) return;
+    const title = model.project_name ?? model.name;
+    const ok = await confirm({
+      title: "删除模型",
+      message: `确定删除「${title} ${model.version}」？\n将同时删除权重文件，且不可恢复。`,
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    setDeletingId(model.id);
+    try {
+      await api.deleteModel(model.project_id, model.model_id);
+      toast({ type: "success", message: `已删除「${title} ${model.version}」` });
+      refreshCatalog();
+    } catch (error) {
+      toast({ type: "error", message: error instanceof Error ? error.message : "删除失败" });
+    } finally {
+      setDeletingId(null);
+    }
+  };
   const unique = (key: "category" | "framework" | "task" | "status") => Array.from(new Set(catalog.models.map((model) => model[key])));
   const models = useMemo(() => catalog.models.filter((model) => {
     const haystack = `${model.name} ${model.category} ${model.description}`.toLowerCase();
@@ -119,8 +198,18 @@ export default function GlobalModelsPage() {
         </article>
       ))}
     </section>
-    <section className="catalog-toolbar" aria-label="模型筛选"><label className="catalog-search"><Icon name="search" size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按名称、类型或描述搜索模型" /></label><SelectFilter label="模型类型" value={modelType} values={unique("category")} onChange={setModelType} /><SelectFilter label="框架" value={framework} values={unique("framework")} onChange={setFramework} /><SelectFilter label="任务" value={task} values={unique("task")} onChange={setTask} /><SelectFilter label="状态" value={status} values={unique("status")} onChange={setStatus} /><div className="catalog-view-toggle"><button type="button" aria-label="网格视图" aria-pressed={view === "grid"} onClick={() => setView("grid")}><Icon name="grid" size={19} /></button><button type="button" aria-label="列表视图" aria-pressed={view === "list"} onClick={() => setView("list")}><Icon name="list" size={20} /></button></div></section>
-    <section className={`model-card-grid model-card-grid--${view}`} aria-label="模型列表">{visibleModels.map((model) => <ModelCard key={model.id} model={model} />)}{models.length === 0 && <p className="catalog-empty">没有符合当前筛选条件的模型。</p>}</section>
+    <section className="catalog-toolbar" aria-label="模型筛选"><label className="catalog-search"><Icon name="search" size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按名称、类型或描述搜索模型" /></label><SelectFilter label="模型类型" value={modelType} values={unique("category")} onChange={setModelType} /><SelectFilter label="框架" value={framework} values={unique("framework")} onChange={setFramework} /><SelectFilter label="任务" value={task} values={unique("task")} onChange={setTask} /><SelectFilter label="状态" value={status} values={unique("status")} onChange={setStatus} /></section>
+    <section className="model-card-grid model-card-grid--grid" aria-label="模型列表">{visibleModels.map((model) => <ModelCard key={model.id} model={model} deleting={deletingId === model.id} onDelete={handleDelete} />)}{models.length === 0 && <p className="catalog-empty">没有符合当前筛选条件的模型。</p>}</section>
     <footer className="catalog-pagination"><p>第 {start}–{end} 条，共 {models.length} 个模型</p><div><span className="catalog-pagination__size">每页 6 条</span><button type="button" disabled={currentPage === 1} aria-label="上一页" onClick={() => setPage((value) => Math.max(1, value - 1))}><Icon name="chevron-left" size={15} /></button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button type="button" key={number} aria-current={number === currentPage ? "page" : undefined} onClick={() => setPage(number)}>{number}</button>)}<button type="button" disabled={currentPage === pageCount} aria-label="下一页" onClick={() => setPage((value) => Math.min(pageCount, value + 1))}><Icon name="chevron-right" size={15} /></button></div></footer>
+    <UploadModelModal
+      open={uploadOpen}
+      initialProjectId={projectParam}
+      onClose={() => setUploadOpen(false)}
+      onUploaded={(model, project) => {
+        setUploadOpen(false);
+        toast({ type: "success", message: `已上传「${model.name}」到项目「${project.name}」` });
+        refreshCatalog();
+      }}
+    />
   </div>;
 }
