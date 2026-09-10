@@ -55,7 +55,13 @@ async function request<T>(path: string, options?: RequestOptions): Promise<T> {
         }
       }
       const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || err.error || res.statusText);
+      const detail = err.detail;
+      const detailMessage = typeof detail === "string"
+        ? detail
+        : detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string"
+          ? detail.message
+          : "";
+      throw new Error(detailMessage || err.error || res.statusText);
     }
     return res.json();
   } catch (error) {
@@ -202,6 +208,12 @@ export type Task = {
   heartbeat_at: string | null;
   retry_of_task_id: string | null;
   created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  can_resume?: boolean;
+  last_activity_at?: string | null;
+  resume_from_task_id?: string | null;
+  latest_resume_task_id?: string | null;
 };
 
 export type GlobalTask = Task & {
@@ -250,6 +262,36 @@ export type ModelVersion = {
   metrics: Record<string, unknown>;
   dataset_snapshot: Record<string, unknown>;
   dataset_version_id: string | null;
+};
+
+export type ModelPreviewStatus =
+  | "STARTING"
+  | "STREAMING"
+  | "RECONNECTING"
+  | "STOPPING"
+  | "STOPPED"
+  | "FAILED";
+
+export type ModelPreviewSession = {
+  sessionId: string;
+  status: ModelPreviewStatus;
+  streamPath: string;
+  createdAt: string;
+};
+
+export type ModelPreviewSnapshot = {
+  sessionId: string;
+  status: ModelPreviewStatus;
+  modelName: string;
+  frameWidth: number | null;
+  frameHeight: number | null;
+  inferenceFps: number;
+  lastInferenceMs: number | null;
+  detectionCount: number;
+  classCounts: Record<string, number>;
+  lastFrameAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
 };
 
 export type DatasetVersionSummary = {
@@ -437,6 +479,13 @@ export const api = {
   },
   getDatasetVersionDetail: (projectId: string, versionId: string) =>
     request<DatasetVersionDetail>(`/api/projects/${projectId}/dataset-versions/${versionId}`),
+  datasetVersionCoverUrl: (projectId: string, versionId: string) =>
+    withAuthQuery(`${getApiBase()}/api/projects/${projectId}/dataset-versions/${versionId}/cover`),
+  openDatasetVersion: (projectId: string, versionId: string) =>
+    request<{ ok: boolean; path: string }>(
+      `/api/projects/${projectId}/dataset-versions/${versionId}/open`,
+      { method: "POST" },
+    ),
   createProject: (body: Partial<Project> & { categories?: Category[] }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(body) }),
   getProject: (id: string) => request<Project>(`/api/projects/${id}?include_disk_usage=false`),
@@ -628,6 +677,28 @@ export const api = {
       `/api/projects/${projectId}/label/estimate${query}`,
     );
   },
+  suggestTrainParams: (projectId: string, body: { dataset_version_id?: string } = {}) =>
+    request<{
+      params: {
+        epochs: number;
+        imgsz: number;
+        batch: number;
+        base_model: string;
+        workers: number;
+        patience: number;
+        lr0: number;
+        optimizer: string;
+        seed: number;
+        close_mosaic: number;
+        weight_decay: number;
+        warmup_epochs: number;
+      };
+      reason: string;
+      source: "llm" | "heuristic" | string;
+    }>(`/api/projects/${projectId}/suggest/train-params`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   listTasks: (projectId: string) => request<Task[]>(`/api/projects/${projectId}/tasks`),
   listAllTasks: () => request<GlobalTask[]>("/api/tasks"),
@@ -646,6 +717,11 @@ export const api = {
     }),
   retryTask: (projectId: string, taskId: string) =>
     request<Task>(`/api/projects/${projectId}/tasks/${taskId}/retry`, { method: "POST" }),
+  resumeTrainTask: (projectId: string, taskId: string, params?: Record<string, unknown>) =>
+    request<Task>(`/api/projects/${projectId}/tasks/${taskId}/resume`, {
+      method: "POST",
+      body: JSON.stringify({ params: params ?? {} }),
+    }),
 
   listModels: (projectId: string) => request<ModelVersion[]>(`/api/projects/${projectId}/models`),
   listBaseModelCandidates: (taskType?: string) => {
@@ -696,6 +772,29 @@ export const api = {
       { method: "POST", body: fd },
     );
   },
+  createModelPreview: (
+    projectId: string,
+    modelId: string,
+    body: { rtspUrl: string; confidenceThreshold: number; inferenceFps: number },
+  ) => request<ModelPreviewSession>(
+    `/api/projects/${projectId}/models/${modelId}/preview-sessions`,
+    { method: "POST", body: JSON.stringify(body) },
+  ),
+  getModelPreview: (projectId: string, modelId: string, sessionId: string) =>
+    request<ModelPreviewSnapshot>(
+      `/api/projects/${projectId}/models/${modelId}/preview-sessions/${sessionId}`,
+    ),
+  stopModelPreview: (
+    projectId: string,
+    modelId: string,
+    sessionId: string,
+    options?: { keepalive?: boolean },
+  ) => request<ModelPreviewSnapshot>(
+    `/api/projects/${projectId}/models/${modelId}/preview-sessions/${sessionId}`,
+    { method: "DELETE", keepalive: options?.keepalive },
+  ),
+  modelPreviewStreamUrl: (streamPath: string) =>
+    withAuthQuery(`${getApiBase()}${streamPath}`),
 
   getSettings: () =>
     request<{

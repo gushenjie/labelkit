@@ -421,8 +421,8 @@ function PublicDatasetImportDialog({
   const downloadFinished = hasByteProgress && downloadedBytes >= expectedBytes;
   const subtitle = publicImport.state === "fetching"
     ? downloadFinished
-      ? "下载完成，正在解压并分析…"
-      : "正在下载并分析…"
+      ? "下载完成，分析中…"
+      : "下载中…"
     : publicImport.state === "fetched"
       ? `${String(publicImport.quality_report.image_count ?? 0)} 张 · ${publishAnnotationCount} 条标注${publicImport.detected_format ? ` · ${formatDatasetFormat(publicImport.detected_format)}` : ""}`
       : publicImport.state === "needs_label"
@@ -470,21 +470,17 @@ function PublicDatasetImportDialog({
         <div className="materials-public-import-dialog__body lk-scrollbar">
           {publicImport.state === "fetching" && (
             <div className="materials-public-import-dialog__loading">
-              <Icon name="sparkles" size={36} className="text-[#10A88F] animate-pulse" />
-              <strong>
-                {downloadFinished
-                  ? "正在解压并分析数据集"
-                  : "正在下载数据集"}
-              </strong>
-              {hasByteProgress && (
+              <PublicImportWaitVisual analyzing={downloadFinished} />
+              <strong>{downloadFinished ? "正在分析" : "正在下载"}</strong>
+              {hasByteProgress ? (
                 <div className="materials-public-import-dialog__progress" aria-label="下载进度">
                   <div className="materials-public-import-dialog__progress-head">
-                    <span>{downloadFinished ? "下载已完成" : "下载进度"}</span>
+                    <span>{downloadFinished ? "下载完成" : "下载进度"}</span>
                     <strong>{downloadPercent}%</strong>
                   </div>
                   <div className="materials-public-import-dialog__progress-bar">
                     <div
-                      className={`materials-public-import-dialog__progress-fill${downloadFinished ? " is-done" : ""}`}
+                      className={`materials-public-import-dialog__progress-fill${downloadFinished ? " is-done" : " is-active"}`}
                       style={{ width: `${downloadPercent ?? 0}%` }}
                     />
                   </div>
@@ -492,12 +488,15 @@ function PublicDatasetImportDialog({
                     {formatBytes(downloadedBytes)} / {formatBytes(expectedBytes)}
                   </span>
                 </div>
+              ) : (
+                <div
+                  className="materials-public-import-dialog__progress-bar materials-public-import-dialog__progress-bar--indeterminate"
+                  aria-hidden="true"
+                >
+                  <div className="materials-public-import-dialog__progress-fill is-indeterminate" />
+                </div>
               )}
-              <span>
-                {downloadFinished
-                  ? "分析完成后会自动显示标签确认"
-                  : "完成后会自动显示标签确认"}
-              </span>
+              <span>{downloadFinished ? "完成后确认标签" : "请稍候"}</span>
             </div>
           )}
 
@@ -675,6 +674,28 @@ type PublicFetchBootstrap = {
   error?: string;
 };
 
+const PREPARE_STEPS = ["确认版本信息", "创建下载任务", "就绪开始下载"] as const;
+
+function PublicImportWaitVisual({ analyzing = false }: { analyzing?: boolean }) {
+  return (
+    <div
+      className={`materials-public-import-dialog__wait-visual${analyzing ? " is-analyzing" : ""}`}
+      aria-hidden="true"
+    >
+      <span className="materials-public-import-dialog__orbit" />
+      <span className="materials-public-import-dialog__orbit materials-public-import-dialog__orbit--inner" />
+      <span className="materials-public-import-dialog__wait-core">
+        <Icon name="sparkles" size={28} className="materials-public-import-dialog__wait-icon" />
+      </span>
+      <span className="materials-public-import-dialog__wait-dots">
+        <i />
+        <i />
+        <i />
+      </span>
+    </div>
+  );
+}
+
 function PublicFetchPreparingDialog({
   bootstrap,
   onClose,
@@ -683,6 +704,17 @@ function PublicFetchPreparingDialog({
   onClose: () => void;
 }) {
   const failed = bootstrap.phase === "failed";
+  const [activeStep, setActiveStep] = useState(0);
+
+  useEffect(() => {
+    if (failed) return;
+    setActiveStep(0);
+    const timer = window.setInterval(() => {
+      setActiveStep((previous) => (previous < PREPARE_STEPS.length - 1 ? previous + 1 : previous));
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [failed, bootstrap.title, bootstrap.sourceVersion]);
+
   return (
     <div
       className="modal-backdrop"
@@ -703,8 +735,8 @@ function PublicFetchPreparingDialog({
             <h2 id="public-fetch-preparing-title">{bootstrap.title}</h2>
             <p>
               {failed
-                ? "创建下载任务失败"
-                : `v${bootstrap.sourceVersion} · 正在准备导入`}
+                ? "创建失败"
+                : `v${bootstrap.sourceVersion} · 准备中`}
             </p>
           </div>
           {failed && (
@@ -715,31 +747,40 @@ function PublicFetchPreparingDialog({
         </header>
         <div className="materials-public-import-dialog__body">
           <div className="materials-public-import-dialog__loading">
-            <Icon
-              name="sparkles"
-              size={36}
-              className={`text-[#10A88F]${failed ? "" : " animate-pulse"}`}
-            />
-            <strong>{failed ? "无法开始下载" : "正在创建下载任务"}</strong>
+            {failed ? (
+              <Icon name="sparkles" size={36} className="text-[#10A88F]" />
+            ) : (
+              <PublicImportWaitVisual />
+            )}
+            <strong>{failed ? "无法开始下载" : "正在创建任务"}</strong>
             {failed ? (
               <span>{bootstrap.error || "请稍后重试"}</span>
             ) : (
               <>
-                <ol className="materials-public-import-dialog__steps">
-                  <li className="is-active">确认数据集版本、许可证与任务类型</li>
-                  <li>在项目中创建导入记录与下载任务</li>
-                  <li>下载数据包并分析标签</li>
+                <ol className="materials-public-import-dialog__steps" aria-live="polite">
+                  {PREPARE_STEPS.map((label, index) => {
+                    const className = index < activeStep
+                      ? "is-done"
+                      : index === activeStep
+                        ? "is-active"
+                        : undefined;
+                    return (
+                      <li key={label} className={className}>
+                        {label}
+                      </li>
+                    );
+                  })}
                 </ol>
-                <span>正在确认数据集信息，通常只需几秒</span>
+                <span>请稍候</span>
               </>
             )}
           </div>
         </div>
-        <footer className="materials-public-import-dialog__footer">
+        <footer className={`materials-public-import-dialog__footer${failed ? "" : " materials-public-import-dialog__footer--hint"}`}>
           <span>
             {failed
-              ? "可关闭后重新选择数据集"
-              : "请保持页面打开，准备完成后会自动开始下载"}
+              ? "可关闭后重新选择"
+              : "完成后自动开始下载"}
           </span>
           {failed && (
             <button type="button" className="btn-secondary" onClick={onClose}>

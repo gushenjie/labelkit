@@ -15,6 +15,7 @@ from server.config import settings
 from server.core.dedup import compute_phash, deduplicate_paths
 from server.core.extract import extract_frames
 from server.core.paths import cache_dir, frames_dir, label_path_for_frame, models_dir, videos_dir
+from server.core.train_process import cleanup_all_registered_trains, cleanup_task_train_processes
 from server.db.database import SessionLocal
 from server.db.models import (
     Annotation,
@@ -44,7 +45,7 @@ class TaskWorker:
 
     @classmethod
     def reconcile_stale_tasks(cls, db: Session, project_id: str | None = None) -> int:
-        """Mark unfinished tasks interrupted on process startup; never rerun them."""
+        """启动时对齐未完成任务：终止孤儿训练进程，再标记中断。永不自动重跑。"""
         q = db.query(Task).filter(
             Task.status.in_({TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED})
         )
@@ -56,9 +57,19 @@ class TaskWorker:
             thread = cls._running.get(task.project_id)
             if thread and thread.is_alive():
                 continue
+            killed: list[int] = []
+            if task.task_type == TaskType.TRAIN:
+                killed = cleanup_task_train_processes(task.project_id, task.id)
             task.status = TaskStatus.INTERRUPTED
             task.finished_at = now
-            task.log = (task.log + "\n任务已中断（服务重启或异常退出）；请手动重试").strip()
+            if killed:
+                note = (
+                    f"任务已中断（服务重启）；已终止残留训练进程 {', '.join(str(pid) for pid in killed)}。"
+                    "可从 last.pt 断点续训。"
+                )
+            else:
+                note = "任务已中断（服务重启或异常退出）；请手动重试"
+            task.log = (task.log + "\n" + note).strip()
             import_id = str(task.params.get("import_id") or "")
             public_import = db.get(PublicDatasetImport, import_id) if import_id else None
             if public_import and task.task_type == TaskType.PUBLIC_FETCH:
@@ -72,6 +83,21 @@ class TaskWorker:
                 for linked_import in linked_imports:
                     linked_import.state = "training_interrupted"
             fixed += 1
+        # 兼容：库里已是 interrupted，但仍有孤儿 train_entry 占 GPU
+        orphan_q = db.query(Task).filter(
+            Task.task_type == TaskType.TRAIN,
+            Task.status.in_({TaskStatus.INTERRUPTED, TaskStatus.FAILED, TaskStatus.CANCELLED}),
+        )
+        if project_id:
+            orphan_q = orphan_q.filter(Task.project_id == project_id)
+        for task in orphan_q.order_by(Task.created_at.desc()).limit(50).all():
+            killed = cleanup_task_train_processes(task.project_id, task.id)
+            if killed:
+                task.log = (
+                    task.log
+                    + f"\n已清理残留训练进程 {', '.join(str(pid) for pid in killed)}（状态曾不同步）。"
+                ).strip()
+                fixed += 1
         lease_query = db.query(ProjectExecutionLease)
         if project_id:
             lease_query = lease_query.filter(ProjectExecutionLease.project_id == project_id)
@@ -80,6 +106,10 @@ class TaskWorker:
             db.commit()
         return fixed
 
+    @classmethod
+    def shutdown_cleanup(cls) -> None:
+        """进程退出前尽量结束本进程拉起的训练子进程。"""
+        cleanup_all_registered_trains()
     @classmethod
     def cancel(cls, task_id: str) -> None:
         cls._cancel.add(task_id)

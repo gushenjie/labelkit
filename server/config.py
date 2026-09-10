@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     login_password: str = "admin"
     auth_secret: str = "labelkit-local-auth-secret"
     auth_session_hours: int = 12
+    preview_max_sessions: int = 2
+    preview_connect_timeout_seconds: float = 10.0
+    preview_idle_timeout_seconds: float = 60.0
+    preview_default_inference_fps: float = 5.0
+    preview_max_inference_fps: float = 10.0
+    preview_jpeg_quality: int = 82
+    preview_max_frame_width: int = 1280
+    preview_reconnect_attempts: int = 5
 
 
 settings = Settings()

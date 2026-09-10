@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import atexit
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.api import audit, auth, datasets, frames, media, models, projects, public_datasets, settings, suggest, system, tasks, users
+from server.api import audit, auth, datasets, frames, media, model_previews, models, projects, public_datasets, settings, suggest, system, tasks, users
 from server.api.deps import get_current_user
 from server.config import settings as app_settings
+from server.core.dataset_service import reconcile_dataset_version_files
 from server.db.database import SessionLocal, init_db
 from server.worker.task_worker import TaskWorker
-from server.core.dataset_service import reconcile_dataset_version_files
 
 init_db()
 
@@ -44,6 +46,7 @@ app.include_router(tasks.router, dependencies=_auth)
 app.include_router(tasks.global_router, dependencies=_auth)
 app.include_router(models.router, dependencies=_auth)
 app.include_router(models.global_router, dependencies=_auth)
+app.include_router(model_previews.router)
 app.include_router(settings.router, dependencies=_auth)
 app.include_router(suggest.router, dependencies=_auth)
 app.include_router(system.router, dependencies=_auth)
@@ -52,3 +55,12 @@ app.include_router(system.router, dependencies=_auth)
 @app.get("/api/health")
 def health():
     return {"status": "ok", "app": app_settings.app_name}
+
+
+def _shutdown_cleanup() -> None:
+    TaskWorker.shutdown_cleanup()
+    model_previews.preview_manager.close_all()
+
+
+app.router.add_event_handler("shutdown", _shutdown_cleanup)
+atexit.register(TaskWorker.shutdown_cleanup)

@@ -51,3 +51,15 @@ def test_training_request_accepts_project_model_path():
     )
     assert request.base_model.endswith("best.pt")
     assert _optional_train_kwargs(request) == {}
+
+
+def test_normalize_workers_caps_on_windows(monkeypatch):
+    import sys
+
+    from server.core import train_entry
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert train_entry._normalize_workers(8) == 2
+    assert train_entry._normalize_workers(0) == 0
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert train_entry._normalize_workers(8) == 8

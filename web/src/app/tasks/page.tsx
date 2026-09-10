@@ -1,9 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "@/components/Icon";
+import { ResumeTrainDialog, type ResumeTrainParams } from "@/components/ResumeTrainDialog";
+import { TrainLogPanel } from "@/components/TrainLogPanel";
+import { ListSkeleton } from "@/components/ui/ListSkeleton";
+import { Select } from "@/components/ui/Select";
+import { useToast } from "@/components/ui/ToastProvider";
 import { api, type GlobalTask, type ProjectDashboard } from "@/lib/api";
+import { formatTrainLog } from "@/lib/train-log";
 
 const TASK_LABEL: Record<string, string> = {
   extract: "视频抽帧", dedup: "数据去重", label: "自动标注", review: "标注复查",
@@ -37,18 +44,27 @@ function taskProgress(task: GlobalTask) {
 function compactNumber(value: number) {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
-function shortDate(value: string) {
-  const date = new Date(value);
+function shortDateTime(value?: string | null) {
+  if (!value) return "--";
+  const raw = value.trim();
+  const normalized = /[zZ]|[+-]\d{2}:\d{2}$/.test(raw) ? raw : `${raw}Z`;
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return "--";
-  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
 }
-function dueDate(value: string) {
-  const date = new Date(value);
-  date.setDate(date.getDate() + 10);
-  return shortDate(date.toISOString());
+function taskCodeOf(taskId: string) {
+  return `TASK-${taskId.replaceAll("-", "").slice(0, 6).toUpperCase()}`;
 }
 
 export default function GlobalTasksPage() {
+  const { toast } = useToast();
   const [tasks, setTasks] = useState<GlobalTask[]>([]);
   const [dashboard, setDashboard] = useState<ProjectDashboard | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,8 +77,16 @@ export default function GlobalTasksPage() {
   const [view, setView] = useState<"list" | "grid">("list");
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(1);
+  const [resumingId, setResumingId] = useState<string | null>(null);
+  const [resumeTaskId, setResumeTaskId] = useState<string | null>(null);
+  const [logTaskId, setLogTaskId] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
   const inflightRef = useRef(false);
   const hasActiveRef = useRef(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const refresh = useCallback(async (mode: "initial" | "silent" | "dashboard" = "silent") => {
     if (mode === "dashboard") {
@@ -188,6 +212,47 @@ export default function GlobalTasksPage() {
     setAssignee("all");
   };
 
+  const openResume = (task: GlobalTask) => {
+    if (!task.can_resume) return;
+    setResumeTaskId(task.id);
+  };
+
+  const resumeTask = useMemo(
+    () => (resumeTaskId ? tasks.find((item) => item.id === resumeTaskId) ?? null : null),
+    [resumeTaskId, tasks],
+  );
+
+  const confirmResume = async (params: ResumeTrainParams) => {
+    if (!resumeTask) return;
+    setResumingId(resumeTask.id);
+    try {
+      await api.resumeTrainTask(resumeTask.project_id, resumeTask.id, params);
+      toast({ type: "success", message: "已启动断点续训" });
+      setResumeTaskId(null);
+      await refresh("silent");
+    } catch (error) {
+      toast({ type: "error", message: `续训失败：${error}` });
+    } finally {
+      setResumingId(null);
+    }
+  };
+
+  const logTask = useMemo(
+    () => (logTaskId ? tasks.find((item) => item.id === logTaskId) ?? null : null),
+    [logTaskId, tasks],
+  );
+  const trainLogLines = useMemo(() => formatTrainLog(logTask?.log ?? ""), [logTask?.log]);
+
+  const copyTrainLog = async () => {
+    if (!trainLogLines.length) return;
+    try {
+      await navigator.clipboard.writeText(trainLogLines.join("\n"));
+      toast({ type: "success", message: "训练日志已复制" });
+    } catch {
+      toast({ type: "error", message: "复制失败，请检查剪贴板权限" });
+    }
+  };
+
   return (
     <div className={`task-center-page task-center-page--${view}`}>
       <section className="task-metrics" aria-label="任务中心概览">
@@ -222,31 +287,46 @@ export default function GlobalTasksPage() {
         </div>
       </section>
 
-      <section className="task-results" aria-live="polite">
-        {loading ? <div className="task-results__empty">正在加载任务…</div> : visibleTasks.length === 0 ? (
+      <section className="task-results" aria-live="polite" aria-busy={loading}>
+        {view === "list" && (loading || visibleTasks.length > 0) && (
+          <div className="task-list-head" aria-hidden="true">
+            <span>任务</span>
+            <span>类型</span>
+            <span>执行者</span>
+            <span>时间</span>
+            <span>进度</span>
+            <span>状态</span>
+            <span>操作</span>
+          </div>
+        )}
+        {loading ? (
+          <ListSkeleton
+            className="task-list-skeleton lk-scrollbar"
+            variant={view}
+            count={view === "grid" ? 8 : 6}
+            fields={3}
+            label="正在加载任务列表"
+          />
+        ) : visibleTasks.length === 0 ? (
           <div className="task-results__empty"><Icon name="archive" size={28} /><strong>没有符合条件的任务</strong><span>调整筛选条件后再试。</span></div>
         ) : (
-          <>
-            {view === "list" && (
-              <div className="task-list-head" aria-hidden="true">
-                <span>任务</span>
-                <span>类型</span>
-                <span>执行者</span>
-                <span>进度</span>
-                <span>状态</span>
-                <i />
-              </div>
-            )}
-            <div className="task-cards lk-scrollbar">
-              {visibleTasks.map((task) => (
-                <TaskCard key={task.id} task={task} previewId={projectById.get(task.project_id)?.preview_frame_id ?? null} />
-              ))}
-            </div>
-          </>
+          <div className="task-cards lk-scrollbar" key={view}>
+            {visibleTasks.map((task, index) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                previewId={projectById.get(task.project_id)?.preview_frame_id ?? null}
+                animationIndex={index}
+                resuming={resumingId === task.id}
+                onResume={openResume}
+                onViewLog={() => setLogTaskId(task.id)}
+              />
+            ))}
+          </div>
         )}
       </section>
 
-      <footer className="task-pagination">
+      <footer className={loading ? "task-pagination task-pagination--loading" : "task-pagination"} aria-hidden={loading}>
         <span>显示 {rangeStart}–{rangeEnd} 条，共 {filtered.length} 条任务</span>
         <div>
           <label><select aria-label="每页任务数" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{PAGE_SIZE_OPTIONS.map((value) => <option key={value} value={value}>{value} 条 / 页</option>)}</select><Icon name="chevron-down" size={15} /></label>
@@ -257,6 +337,104 @@ export default function GlobalTasksPage() {
           <button type="button" aria-label="下一页" disabled={safePage === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}><Icon name="chevron-right" size={17} /></button>
         </div>
       </footer>
+
+      {mounted && logTask && createPortal(
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setLogTaskId(null);
+          }}
+        >
+          <div
+            className="materials-public-import-dialog task-train-log-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="task-train-log-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="materials-public-import-dialog__head">
+              <div>
+                <h2 id="task-train-log-title">训练日志</h2>
+                <p>
+                  {`TASK-${logTask.id.replaceAll("-", "").slice(0, 6).toUpperCase()}`}
+                  {" · "}
+                  {logTask.project_name}
+                  {" · "}
+                  {STATUS_LABEL[logTask.status] ?? logTask.status}
+                  {" · "}
+                  {logTask.progress}/{logTask.total || "?"}
+                  {logTask.resume_from_task_id
+                    ? ` · 续训自 ${taskCodeOf(logTask.resume_from_task_id)}`
+                    : ""}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="modal-close-button"
+                aria-label="关闭"
+                onClick={() => setLogTaskId(null)}
+              >
+                <Icon name="x" size={18} />
+              </button>
+            </header>
+            <div className="materials-public-import-dialog__body task-train-log-dialog__body">
+              <div className="train-monitor__log-wrap task-train-log-dialog__panel">
+                <div className="train-monitor__head">
+                  <h3>训练日志</h3>
+                  <div className="train-monitor__head-actions">
+                    <span className="train-monitor__status">{trainLogLines.length} 行</span>
+                    <button
+                      type="button"
+                      className="btn-secondary train-monitor__copy-button"
+                      disabled={!trainLogLines.length}
+                      onClick={() => void copyTrainLog()}
+                      title="复制当前显示的训练日志"
+                    >
+                      <Icon name="copy" size={14} />
+                      一键复制
+                    </button>
+                  </div>
+                </div>
+                <TrainLogPanel
+                  lines={trainLogLines}
+                  emptyText={logTask.status === "running" ? "等待训练输出…" : "暂无训练日志"}
+                />
+              </div>
+            </div>
+            <footer className="materials-public-import-dialog__footer">
+              {logTask.can_resume ? (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={resumingId === logTask.id}
+                  onClick={() => {
+                    setLogTaskId(null);
+                    openResume(logTask);
+                  }}
+                >
+                  继续训练
+                </button>
+              ) : null}
+              <button type="button" className="btn-secondary" onClick={() => setLogTaskId(null)}>
+                关闭
+              </button>
+            </footer>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      <ResumeTrainDialog
+        open={Boolean(resumeTask)}
+        task={resumeTask}
+        submitting={Boolean(resumeTask && resumingId === resumeTask.id)}
+        onClose={() => {
+          if (resumingId) return;
+          setResumeTaskId(null);
+        }}
+        onConfirm={(params) => void confirmResume(params)}
+      />
     </div>
   );
 }
@@ -266,16 +444,38 @@ function Metric({ icon, value, label, trend, hint }: { icon: "folder" | "layers"
 }
 
 function Filter({ className = "", label, ariaLabel, value, onChange, options }: { className?: string; label: string; ariaLabel: string; value: string; onChange: (value: string) => void; options: [string, string][] }) {
-  return <label className={`task-filter ${className}`.trim()}><span>{label}</span><select aria-label={ariaLabel} value={value} onChange={(event) => onChange(event.target.value)}>{options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}</select><Icon name="chevron-down" size={15} /></label>;
+  return <Select className={`task-filter ${className}`.trim()} leadingLabel={label} ariaLabel={ariaLabel} value={value} onValueChange={onChange} options={options.map(([optionValue, optionLabel]) => ({ value: optionValue, label: optionLabel }))} />;
 }
 
-function TaskCard({ task, previewId }: { task: GlobalTask; previewId: string | null }) {
+function TaskCard({
+  task,
+  previewId,
+  animationIndex,
+  resuming,
+  onResume,
+  onViewLog,
+}: {
+  task: GlobalTask;
+  previewId: string | null;
+  animationIndex: number;
+  resuming: boolean;
+  onResume: (task: GlobalTask) => void;
+  onViewLog: () => void;
+}) {
   const progress = taskProgress(task);
   const assigned = taskAssignee(task);
-  const taskCode = `TASK-${task.id.replaceAll("-", "").slice(0, 6).toUpperCase()}`;
+  const taskCode = taskCodeOf(task.id);
   const typeLabel = TASK_LABEL[task.task_type] ?? task.task_type;
+  const isTrain = task.task_type === "train";
+  const canResume = Boolean(task.can_resume);
+  const resumeFromId = task.resume_from_task_id || null;
+  const latestResumeId = task.latest_resume_task_id || null;
   return (
-    <article className="task-card">
+    <article
+      className="task-card"
+      data-status={task.status}
+      style={{ "--task-index": animationIndex } as CSSProperties}
+    >
       <Link href={`/projects/${task.project_id}/tasks`} className="task-card__media" aria-label={`打开 ${taskCode}`}>
         {previewId ? <img src={api.frameImageUrl(task.project_id, previewId)} alt="" /> : <span><Icon name="image" size={25} /></span>}
       </Link>
@@ -284,10 +484,18 @@ function TaskCard({ task, previewId }: { task: GlobalTask; previewId: string | n
           <Link href={`/projects/${task.project_id}/tasks`}>{taskCode}</Link>
           <button type="button" title="复制任务 ID" aria-label={`复制 ${taskCode}`} onClick={() => navigator.clipboard?.writeText(task.id)}>⧉</button>
         </div>
-        <span className="task-card__project">{task.project_name}</span>
-        <div className="task-card__dates">
-          <span><Icon name="audit" size={14} />创建：{shortDate(task.created_at)}</span>
-          <span><Icon name="audit" size={14} />截止：{dueDate(task.created_at)}</span>
+        <div className="task-card__meta">
+          <span className="task-card__project">{task.project_name}</span>
+          {resumeFromId ? (
+            <span className="task-card__lineage" title={`从 ${taskCodeOf(resumeFromId)} 断点续训`}>
+              续训自 {taskCodeOf(resumeFromId)}
+            </span>
+          ) : null}
+          {!resumeFromId && latestResumeId ? (
+            <span className="task-card__lineage task-card__lineage--muted" title={`最近续训尝试 ${taskCodeOf(latestResumeId)}`}>
+              已续训 {taskCodeOf(latestResumeId)}
+            </span>
+          ) : null}
         </div>
       </div>
       <div className="task-card__type">
@@ -297,6 +505,11 @@ function TaskCard({ task, previewId }: { task: GlobalTask; previewId: string | n
       <div className="task-card__assignee">
         <small>执行者</small>
         <span><i>{assigned.slice(0, 1).toUpperCase()}</i>{assigned}</span>
+      </div>
+      <div className="task-card__time">
+        <small>时间</small>
+        <span title={task.started_at || undefined}>开始 {shortDateTime(task.started_at)}</span>
+        <span title={task.finished_at || undefined}>结束 {shortDateTime(task.finished_at)}</span>
       </div>
       <div className="task-card__progress">
         <small>进度</small>
@@ -310,15 +523,63 @@ function TaskCard({ task, previewId }: { task: GlobalTask; previewId: string | n
         <small>状态</small>
         <span className={`task-status task-status--${task.status}`}>{STATUS_LABEL[task.status] ?? task.status}</span>
       </div>
+      <div className="task-card__actions">
+        {canResume ? (
+          <button
+            type="button"
+            className="task-card__action task-card__action--resume"
+            disabled={resuming}
+            title={`从 ${task.progress}/${task.total || "?"} 断点继续`}
+            onClick={() => onResume(task)}
+          >
+            <span className="task-card__action-ico" aria-hidden="true">
+              <Icon name="play" size={11} />
+            </span>
+            {resuming ? "启动中" : "继续训练"}
+          </button>
+        ) : null}
+        {isTrain ? (
+          <button
+            type="button"
+            className="task-card__action task-card__action--log"
+            title="查看训练日志"
+            onClick={onViewLog}
+          >
+            <Icon name="list" size={13} />
+            查看日志
+          </button>
+        ) : null}
+      </div>
       <div className="task-card__mobile-summary">
         <span className={`task-status task-status--${task.status}`}>{STATUS_LABEL[task.status] ?? task.status}</span>
         <span className="task-card__mobile-progress"><i><b style={{ width: `${progress}%` }} /></i><strong>{progress}%</strong></span>
         <span className="task-card__mobile-type">{typeLabel}</span>
         <span className="task-card__mobile-assignee">{assigned}</span>
+        <span className="task-card__mobile-time">
+          开始 {shortDateTime(task.started_at)} · 结束 {shortDateTime(task.finished_at)}
+        </span>
+        <div className="task-card__mobile-actions">
+          {canResume ? (
+            <button
+              type="button"
+              className="task-card__action task-card__action--resume"
+              disabled={resuming}
+              onClick={() => onResume(task)}
+            >
+              <span className="task-card__action-ico" aria-hidden="true">
+                <Icon name="play" size={11} />
+              </span>
+              {resuming ? "启动中" : "继续训练"}
+            </button>
+          ) : null}
+          {isTrain ? (
+            <button type="button" className="task-card__action task-card__action--log" onClick={onViewLog}>
+              <Icon name="list" size={13} />
+              查看日志
+            </button>
+          ) : null}
+        </div>
       </div>
-      <button type="button" className="task-card__menu" aria-label={`${taskCode} 更多操作`} title={task.error || task.log || "更多操作"}>
-        <Icon name="more" size={20} />
-      </button>
     </article>
   );
 }

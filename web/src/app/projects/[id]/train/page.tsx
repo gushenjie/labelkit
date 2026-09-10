@@ -20,6 +20,7 @@ import { TaskProgress } from "@/components/ui/TaskProgress";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/ToastProvider";
 import { Icon } from "@/components/Icon";
+import { ResumeTrainDialog, type ResumeTrainParams } from "@/components/ResumeTrainDialog";
 import { TrainLogPanel } from "@/components/TrainLogPanel";
 import { formatTrainLog } from "@/lib/train-log";
 
@@ -100,8 +101,12 @@ export default function TrainPage() {
   const [closeMosaic, setCloseMosaic] = useState(10);
   const [weightDecay, setWeightDecay] = useState(0.0005);
   const [warmupEpochs, setWarmupEpochs] = useState(3);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestReason, setSuggestReason] = useState("");
   const [stats, setStats] = useState<Record<string, number>>({});
   const [starting, setStarting] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [resumeTargetId, setResumeTargetId] = useState<string | null>(null);
   const [exportDir, setExportDir] = useState("");
   const [valRatio, setValRatio] = useState(20);
   const [exportError, setExportError] = useState("");
@@ -265,6 +270,70 @@ export default function TrainPage() {
     }
   };
 
+  const resumeTarget = useMemo(
+    () => (resumeTargetId ? tasks.find((item) => item.id === resumeTargetId) ?? null : null),
+    [resumeTargetId, tasks],
+  );
+
+  const openResumeTrain = () => {
+    const target = tasks.find((item) => item.task_type === "train" && item.can_resume);
+    if (!target) {
+      toast({ type: "error", message: "当前没有可续训的断点权重" });
+      return;
+    }
+    setResumeTargetId(target.id);
+  };
+
+  const confirmResumeTrain = async (params: ResumeTrainParams) => {
+    if (!id || !resumeTarget) return;
+    setResuming(true);
+    try {
+      await api.resumeTrainTask(id, resumeTarget.id, params);
+      toast({ type: "success", message: "已启动断点续训" });
+      setResumeTargetId(null);
+      refresh();
+      requestProjectStatsRefresh(id);
+    } catch (error) {
+      toast({ type: "error", message: `续训失败：${error}` });
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  const applyAiTrainParams = async () => {
+    if (!id) return;
+    setSuggesting(true);
+    try {
+      const result = await api.suggestTrainParams(id, {
+        ...(datasetVersionId ? { dataset_version_id: datasetVersionId } : {}),
+      });
+      const params = result.params;
+      setEpochs(params.epochs);
+      setImgsz(params.imgsz);
+      setBatch(params.batch);
+      setBaseModel(params.base_model);
+      setWorkers(params.workers);
+      setPatience(params.patience);
+      setLr0(params.lr0);
+      setOptimizer(params.optimizer);
+      setSeed(params.seed);
+      setWeightDecay(params.weight_decay);
+      setWarmupEpochs(params.warmup_epochs);
+      if (project?.task_type !== "classify") {
+        setCloseMosaic(params.close_mosaic);
+      }
+      setSuggestReason(result.reason);
+      toast({
+        type: "success",
+        message: result.source === "llm" ? "已填入 AI 建议参数" : "已填入启发式建议参数",
+      });
+    } catch (error) {
+      toast({ type: "error", message: `建议参数失败：${error}` });
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
   const pickExportDir = async () => {
     setPicking(true);
     setExportError("");
@@ -329,6 +398,10 @@ export default function TrainPage() {
   const confirmedCount = countConfirmed(stats);
   const selectedDataset = datasetVersions.find((item) => item.id === datasetVersionId) ?? null;
   const activeTrain = tasks.find((t) => t.status === "running");
+  const resumableTrain = useMemo(
+    () => tasks.find((item) => item.task_type === "train" && Boolean(item.can_resume)) ?? null,
+    [tasks],
+  );
   const officialModels = project?.task_type === "classify" ? CLASSIFY_OFFICIAL_MODELS : DETECT_OFFICIAL_MODELS;
   const currentProjectModels = baseCandidates.filter((item) => item.project_id === id);
   const otherProjectModels = baseCandidates.filter((item) => item.project_id !== id);
@@ -531,10 +604,28 @@ export default function TrainPage() {
           )}
         </PanelSection>
 
-        <PanelSection title="训练参数">
+        <PanelSection
+          title="训练参数"
+          action={
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={availableCount === 0 || suggesting || !!activeTrain}
+              onClick={applyAiTrainParams}
+            >
+              <Icon name="sparkles" size={14} />
+              {suggesting ? "正在分析…" : "AI 建议参数"}
+            </button>
+          }
+        >
           <p className="text-caption text-subtle">
             优先用本项目已训版本继续迭代；也可选工作区其他项目的同类型模型做迁移，或直接用官方内置基座。
           </p>
+          {suggestReason && (
+            <p className="mb-3 rounded-lg border border-[#CFF4EC] bg-[#F7FBFB] px-3 py-2 text-[12px] leading-relaxed text-[#075F5A]">
+              {suggestReason}
+            </p>
+          )}
           <div className="mb-3">
             <label className="text-label text-muted">基础模型</label>
             <select
@@ -653,12 +744,24 @@ export default function TrainPage() {
           <div className="train-control-panel__actions">
             <button
               className="btn-primary"
-              disabled={availableCount === 0 || starting || !!activeTrain || !baseModel}
+              disabled={availableCount === 0 || starting || resuming || !!activeTrain || !baseModel}
               onClick={startTrain}
             >
               <Icon name="play" size={15} />
               {activeTrain ? "训练进行中…" : starting ? "启动中…" : "开始训练"}
             </button>
+            {resumableTrain && !activeTrain && (
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={resuming || starting}
+                onClick={openResumeTrain}
+                title={`从 ${resumableTrain.progress}/${resumableTrain.total || "?"} 断点继续`}
+              >
+                <Icon name="refresh" size={15} />
+                {resuming ? "续训启动中…" : `继续训练（${resumableTrain.progress}/${resumableTrain.total || "?"}）`}
+              </button>
+            )}
             {activeTrain && (
               <button type="button" className="btn-danger" disabled={stopping} onClick={stopTrain}>
                 <Icon name="x" size={15} />
@@ -712,9 +815,19 @@ export default function TrainPage() {
                 <div className="train-monitor__empty">点击「开始训练」后，这里会显示 epoch 进度</div>
               )}
 
+              {displayedTrain?.status === "interrupted" && (
+                <div className="operations-alert operations-alert--warning mt-3">
+                  训练已中断（进度 {displayedTrain.progress}/{displayedTrain.total || "?"}）
+                  {displayedTrain.can_resume
+                    ? "，可点击左侧「继续训练」从 last.pt 断点续训。"
+                    : "，未找到可续训权重，请重新开始训练。"}
+                </div>
+              )}
+
               {displayedTrain?.status === "failed" && displayedTrain.error && (
                 <div className="operations-alert operations-alert--danger mt-3">
                   {displayedTrain.error}
+                  {displayedTrain.can_resume ? " · 若仍保留 last.pt，可尝试「继续训练」。" : ""}
                 </div>
               )}
 
@@ -823,6 +936,18 @@ export default function TrainPage() {
         </div>,
         document.body,
       )}
+
+      <ResumeTrainDialog
+        open={Boolean(resumeTarget)}
+        task={resumeTarget}
+        submitting={resuming}
+        showCloseMosaic={project?.task_type !== "classify"}
+        onClose={() => {
+          if (resuming) return;
+          setResumeTargetId(null);
+        }}
+        onConfirm={(params) => void confirmResumeTrain(params)}
+      />
     </div>
   );
 }

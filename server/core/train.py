@@ -19,6 +19,16 @@ from sqlalchemy.orm import Session
 
 from server.core.dataset_service import DatasetService, DatasetVersionRepository
 from server.core.paths import exports_dir, label_path_for_frame, models_dir
+from server.core.train_process import (
+    clear_train_pid,
+    terminate_process_tree,
+    write_train_pid,
+)
+from server.core.train_resume import (
+    find_resume_checkpoint,
+    training_dataset_dir,
+    training_run_dir,
+)
 from server.db.models import Category, Frame, FrameStatus, ModelVersion, Project, ProjectTaskType, Task
 
 
@@ -124,28 +134,6 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]|\[K", "", text)
 
 
-def _terminate_process_tree(pid: int, timeout: float = 5.0) -> None:
-    import psutil
-
-    try:
-        parent = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
-    processes = parent.children(recursive=True) + [parent]
-    for process in processes:
-        try:
-            process.terminate()
-        except psutil.NoSuchProcess:
-            pass
-    _, alive = psutil.wait_procs(processes, timeout=timeout)
-    for process in alive:
-        try:
-            process.kill()
-        except psutil.NoSuchProcess:
-            pass
-    psutil.wait_procs(alive, timeout=timeout)
-
-
 def run_train_task(
     db: Session,
     task: Task,
@@ -163,6 +151,21 @@ def run_train_task(
     requested_model = (params.get("base_model") or "").strip()
     val_ratio = float(params.get("val_ratio", 0.2))
     run_name = f"task_{task.id}"
+    resume = bool(params.get("resume"))
+    resume_from_task_id = str(params.get("resume_from_task_id") or "").strip()
+    resume_source_task_id = resume_from_task_id or str(params.get("retry_of_task_id") or "").strip()
+    resume_checkpoint: Path | None = None
+    reused_dataset = False
+
+    if resume:
+        if not resume_source_task_id:
+            raise RuntimeError("续训缺少来源任务 ID")
+        resume_checkpoint = find_resume_checkpoint(project.id, resume_source_task_id)
+        if resume_checkpoint is None:
+            raise RuntimeError("未找到可续训权重 last.pt，请重新开始训练")
+        requested_model = str(resume_checkpoint)
+        if log:
+            log(f"从断点续训 | 来源任务: {resume_source_task_id} | 权重: {resume_checkpoint}")
 
     def _optional_number(key: str, caster):
         if key not in params or params.get(key) is None or params.get(key) == "":
@@ -183,22 +186,55 @@ def run_train_task(
     else:
         advanced["optimizer"] = None
 
-    dataset_dir = exports_dir(project.id) / f"train_{task.id}"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
     dataset_service = DatasetService(DatasetVersionRepository(db))
     requested_version_id = (params.get("dataset_version_id") or "").strip()
-    dataset_version = (
-        dataset_service.get_version(project.id, requested_version_id)
-        if requested_version_id
-        else dataset_service.create_version(project.id, project.task_type, val_ratio=val_ratio)
+    source_dataset_dir = (
+        training_dataset_dir(project.id, resume_source_task_id) if resume and resume_source_task_id else None
     )
-    db.commit()
-    try:
-        stats = dataset_service.materialize(dataset_version, dataset_dir, cancelled=cancelled)
-    except Exception:
-        if dataset_dir.exists():
-            shutil.rmtree(dataset_dir)
-        raise
+
+    if resume and source_dataset_dir and source_dataset_dir.exists():
+        dataset_dir = source_dataset_dir
+        reused_dataset = True
+        dataset_version = (
+            dataset_service.get_version(project.id, requested_version_id)
+            if requested_version_id
+            else None
+        )
+        # 续训复用原导出目录，避免再次物化整份数据集
+        if project.task_type == ProjectTaskType.CLASSIFY:
+            data_path = dataset_dir
+            train_n = len(list((dataset_dir / "train").glob("*"))) if (dataset_dir / "train").exists() else 0
+            stats = {"train": train_n, "val": 0, "total": train_n}
+        else:
+            data_path = dataset_dir / "dataset.yaml"
+            if not data_path.exists():
+                raise RuntimeError(f"续训数据集配置不存在: {data_path}")
+            # 粗略统计，仅用于结果快照
+            train_n = len(list((dataset_dir / "images" / "train").glob("*"))) if (dataset_dir / "images" / "train").exists() else 0
+            val_n = len(list((dataset_dir / "images" / "val").glob("*"))) if (dataset_dir / "images" / "val").exists() else 0
+            stats = {"train": train_n, "val": val_n, "total": train_n + val_n}
+        if log:
+            log(f"复用原训练数据目录: {dataset_dir}")
+    else:
+        dataset_dir = exports_dir(project.id) / f"train_{task.id}"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        dataset_version = (
+            dataset_service.get_version(project.id, requested_version_id)
+            if requested_version_id
+            else dataset_service.create_version(project.id, project.task_type, val_ratio=val_ratio)
+        )
+        db.commit()
+        try:
+            stats = dataset_service.materialize(dataset_version, dataset_dir, cancelled=cancelled)
+        except Exception:
+            if dataset_dir.exists():
+                shutil.rmtree(dataset_dir)
+            raise
+
+        if project.task_type == ProjectTaskType.CLASSIFY:
+            data_path = dataset_dir
+        else:
+            data_path = dataset_dir / "dataset.yaml"
 
     if project.task_type == ProjectTaskType.CLASSIFY:
         base_model = requested_model or "yolov8s-cls.pt"
@@ -206,40 +242,50 @@ def run_train_task(
             base_model = "yolov8s-cls.pt"
         if stats["total"] < 10:
             raise RuntimeError(f"可训练样本过少: {stats['total']}")
-        if log:
+        if log and not resume:
             log(f"分类数据集: {stats}")
-        data_path = dataset_dir
     else:
         base_model = requested_model or "yolov8s.pt"
         if stats["total"] < 5:
             raise RuntimeError(f"可训练样本过少: {stats['total']}（检测任务至少需要 5 张）")
-        if log:
+        if log and not resume:
             log(f"检测数据集: {stats}")
-        data_path = dataset_dir / "dataset.yaml"
 
     task.total = epochs
+    if resume and task.progress <= 0:
+        # 若续训任务未带上进度，尽量从来源任务进度展示
+        pass
     db.commit()
     if log:
-        log("开始训练...")
+        log("继续训练..." if resume else "开始训练...")
 
     output_root = exports_dir(project.id) / "training_runs"
     output_root.mkdir(parents=True, exist_ok=True)
-    request_path = dataset_dir / "training-request.json"
-    metrics_path = dataset_dir / "training-metrics.json"
+    # 续训时权重仍写入原 run 目录；新任务仅用于任务中心跟踪
+    run_output_dir = (
+        training_run_dir(project.id, resume_source_task_id)
+        if resume and resume_source_task_id
+        else output_root / run_name
+    )
+    request_path = dataset_dir / f"training-request-{task.id}.json"
+    metrics_path = dataset_dir / f"training-metrics-{task.id}.json"
     request_path.write_text(
         json.dumps(
             {
                 "mode": project.task_type.value,
                 "base_model": base_model,
-                "data": str(data_path.resolve()),
+                "data": str(Path(data_path).resolve()),
                 "epochs": epochs,
                 "imgsz": imgsz,
                 "batch": batch,
                 "workers": workers,
                 "device": device,
                 "output_root": str(output_root.resolve()),
-                "run_name": run_name,
+                "run_name": (
+                    f"task_{resume_source_task_id}" if resume and resume_source_task_id else run_name
+                ),
                 "metrics_path": str(metrics_path.resolve()),
+                "resume": resume,
                 **{key: value for key, value in advanced.items() if value is not None},
             },
             ensure_ascii=False,
@@ -247,7 +293,7 @@ def run_train_task(
         ),
         encoding="utf-8",
     )
-    training_log = dataset_dir / "training.log"
+    training_log = dataset_dir / f"training-{task.id}.log"
     proc = subprocess.Popen(
         [sys.executable, "-m", "server.core.train_entry", "--params", str(request_path)],
         stdout=subprocess.PIPE,
@@ -258,6 +304,7 @@ def run_train_task(
         bufsize=1,
         cwd=str(Path(__file__).resolve().parent.parent.parent),
     )
+    write_train_pid(project.id, task.id, proc.pid)
     tail: deque[str] = deque(maxlen=40)
     line_queue: Queue[str | None] = Queue()
 
@@ -272,39 +319,46 @@ def run_train_task(
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
     was_cancelled = False
-    with training_log.open("w", encoding="utf-8") as output_file:
-        while True:
-            if cancelled and cancelled() and not was_cancelled:
-                was_cancelled = True
-                _terminate_process_tree(proc.pid)
-            try:
-                line = line_queue.get(timeout=0.2)
-            except Empty:
-                if proc.poll() is not None and not reader.is_alive():
+    try:
+        with training_log.open("w", encoding="utf-8") as output_file:
+            while True:
+                if cancelled and cancelled() and not was_cancelled:
+                    was_cancelled = True
+                    terminate_process_tree(proc.pid)
+                try:
+                    line = line_queue.get(timeout=0.2)
+                except Empty:
+                    if proc.poll() is not None and not reader.is_alive():
+                        break
+                    continue
+                if line is None:
                     break
-                continue
-            if line is None:
-                break
-            output_file.write(line)
-            output_file.flush()
-            tail.append(line.rstrip())
-            clean_line = _strip_ansi(line)
-            epoch_match = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s+\d+[GMK]?", clean_line)
-            if epoch_match and int(epoch_match.group(2)) == epochs:
-                task.progress = min(int(epoch_match.group(1)), epochs)
-                task.heartbeat_at = datetime.now(timezone.utc)
-                db.commit()
-                if log:
-                    log(clean_line.strip())
-    reader.join(timeout=1.0)
-    returncode = proc.wait()
+                output_file.write(line)
+                output_file.flush()
+                tail.append(line.rstrip())
+                clean_line = _strip_ansi(line)
+                epoch_match = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s+\d+[GMK]?", clean_line)
+                if epoch_match and int(epoch_match.group(2)) == epochs:
+                    task.progress = min(int(epoch_match.group(1)), epochs)
+                    task.heartbeat_at = datetime.now(timezone.utc)
+                    db.commit()
+                    if log:
+                        log(clean_line.strip())
+        reader.join(timeout=1.0)
+        returncode = proc.wait()
+    finally:
+        clear_train_pid(project.id, task.id, proc.pid)
+        if proc.poll() is None:
+            terminate_process_tree(proc.pid)
+            proc.wait(timeout=8)
 
     if was_cancelled:
-        run_output_dir = output_root / run_name
-        if run_output_dir.exists():
-            shutil.rmtree(run_output_dir)
-        if dataset_dir.exists():
-            shutil.rmtree(dataset_dir)
+        # 续训复用原目录，取消时不得删除断点权重与原数据集
+        if not resume:
+            if run_output_dir.exists():
+                shutil.rmtree(run_output_dir)
+            if dataset_dir.exists() and not reused_dataset:
+                shutil.rmtree(dataset_dir)
         if log:
             log("训练已取消，训练进程树已终止")
         return
@@ -312,19 +366,24 @@ def run_train_task(
     if returncode != 0:
         raise RuntimeError("Training failed:\n" + "\n".join(list(tail)[-12:]))
 
-    run_output_dir = output_root / run_name
-    run_dir = run_output_dir / "weights" / "best.pt"
-    if not run_dir.exists():
-        raise RuntimeError(f"Current task best.pt not found: {run_dir}")
+    best_pt = run_output_dir / "weights" / "best.pt"
+    if not best_pt.exists():
+        raise RuntimeError(f"Current task best.pt not found: {best_pt}")
 
     version = db.query(ModelVersion).filter(ModelVersion.project_id == project.id).count() + 1
     out_path = models_dir(project.id) / f"v{version}_best.pt"
-    shutil.copy2(run_dir, out_path)
+    shutil.copy2(best_pt, out_path)
 
     if not metrics_path.exists():
         raise RuntimeError("Training metrics file not found")
     metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
     metrics = metrics_payload.get("metrics", {})
+
+    if dataset_version is None and requested_version_id:
+        try:
+            dataset_version = dataset_service.get_version(project.id, requested_version_id)
+        except Exception:
+            dataset_version = None
 
     mv = ModelVersion(
         project_id=project.id,
@@ -332,9 +391,15 @@ def run_train_task(
         name=f"v{version}",
         filepath=str(out_path),
         metrics=metrics,
-        dataset_snapshot={**stats, "base_model": base_model, "output_dir": str(run_output_dir)},
+        dataset_snapshot={
+            **stats,
+            "base_model": base_model,
+            "output_dir": str(run_output_dir),
+            "resumed": resume,
+            "resume_from_task_id": resume_source_task_id or None,
+        },
         task_id=task.id,
-        dataset_version_id=dataset_version.id,
+        dataset_version_id=dataset_version.id if dataset_version else None,
     )
     db.add(mv)
     task.progress = epochs
@@ -343,10 +408,12 @@ def run_train_task(
         "version": version,
         "metrics": metrics,
         "dataset": stats,
-        "dataset_version_id": dataset_version.id,
+        "dataset_version_id": dataset_version.id if dataset_version else requested_version_id or None,
         "base_model": base_model,
         "device": metrics_payload.get("device", device),
         "output_dir": str(run_output_dir),
         "log_path": str(training_log),
+        "resumed": resume,
+        "resume_from_task_id": resume_source_task_id or None,
     }
     db.commit()

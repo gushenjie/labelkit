@@ -2,7 +2,12 @@
 
 import Link from "next/link";
 import { FormEvent, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "@/components/Icon";
+import { useTaskTray } from "@/components/TaskTrayProvider";
+import { useConfirm } from "@/components/ui/ConfirmDialog";
+import { Select } from "@/components/ui/Select";
+import { useToast } from "@/components/ui/ToastProvider";
 import {
   api,
   type DatasetCatalog,
@@ -10,6 +15,7 @@ import {
   type DatasetVersionSummary,
   type Project,
 } from "@/lib/api";
+import { taskTypeLabel } from "@/lib/workflow";
 
 const EMPTY_CATALOG: DatasetCatalog = {
   total_versions: 0,
@@ -20,6 +26,7 @@ const EMPTY_CATALOG: DatasetCatalog = {
   items: [],
 };
 const PAGE_SIZE = 10;
+const EXPORT_DIR_KEY = "labelkit-export-dir";
 
 function number(value: number) {
   return new Intl.NumberFormat("zh-CN").format(value);
@@ -31,6 +38,10 @@ function date(value: string) {
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   }).format(parsed);
+}
+
+function safeDirName(name: string): string {
+  return name.replace(/[/\\:*?"<>|]/g, "_").trim() || "dataset";
 }
 
 function taskLabel(value: string) {
@@ -69,6 +80,8 @@ function taskStatusLabel(value: string) {
 }
 
 export default function DatasetCenterPage() {
+  const { runningTasks } = useTaskTray();
+  const { toast } = useToast();
   const [catalog, setCatalog] = useState(EMPTY_CATALOG);
   const [projects, setProjects] = useState<Project[]>([]);
   const [query, setQuery] = useState("");
@@ -82,6 +95,37 @@ export default function DatasetCenterPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [exportTarget, setExportTarget] = useState<DatasetVersionSummary | null>(null);
+
+  const busyByProject = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const task of runningTasks) {
+      if (!map.has(task.project_id)) {
+        map.set(task.project_id, taskTypeLabel(task.task_type));
+      }
+    }
+    return map;
+  }, [runningTasks]);
+
+  const exportBlockReason = useCallback(
+    (pid: string) => {
+      const label = busyByProject.get(pid);
+      if (!label) return "";
+      return `该项目正在${label}，请结束后再导出`;
+    },
+    [busyByProject],
+  );
+
+  const openDatasetFolder = useCallback(
+    async (item: DatasetVersionSummary) => {
+      try {
+        await api.openDatasetVersion(item.project_id, item.id);
+      } catch (nextError) {
+        toast({ type: "error", message: String(nextError) || "无法打开目录" });
+      }
+    },
+    [toast],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -152,21 +196,20 @@ export default function DatasetCenterPage() {
           <Icon name="search" size={18} />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索数据集、版本或标签（ID）" />
         </label>
-        <label className="dataset-filter">
-          <select aria-label="按项目筛选" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
-            <option value="">全部分组</option>
-            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
-          <Icon name="chevron-down" size={14} />
-        </label>
-        <label className="dataset-filter">
-          <select aria-label="按任务类型筛选" value={taskType} onChange={(event) => setTaskType(event.target.value)}>
-            <option value="">全部类型</option>
-            <option value="detect">目标检测</option>
-            <option value="classify">图像分类</option>
-          </select>
-          <Icon name="chevron-down" size={14} />
-        </label>
+        <Select
+          className="dataset-filter"
+          ariaLabel="按项目筛选"
+          value={projectId}
+          onValueChange={setProjectId}
+          options={[{ value: "", label: "全部分组" }, ...projects.map((project) => ({ value: project.id, label: project.name }))]}
+        />
+        <Select
+          className="dataset-filter"
+          ariaLabel="按任务类型筛选"
+          value={taskType}
+          onValueChange={setTaskType}
+          options={[{ value: "", label: "全部类型" }, { value: "detect", label: "目标检测" }, { value: "classify", label: "图像分类" }]}
+        />
         <button className="dataset-filter-button" type="button" onClick={load}><Icon name="sliders" size={16} />筛选</button>
         {(query || projectId || taskType) && (
           <button className="dataset-reset" type="button" onClick={() => { setQuery(""); setProjectId(""); setTaskType(""); }}>
@@ -191,7 +234,16 @@ export default function DatasetCenterPage() {
                 setTaskType("");
               }}>{catalog.total_versions ? "清除筛选" : "创建首个版本"}</button></div>
             ) : catalog.items.map((item) => (
-              <DatasetRow key={item.id} item={item} active={detailOpen && selected?.id === item.id} onSelect={() => { setSelected(item); setDetailOpen(true); }} />
+              <DatasetRow
+                key={item.id}
+                item={item}
+                active={detailOpen && selected?.id === item.id}
+                exportDisabled={Boolean(exportBlockReason(item.project_id))}
+                exportDisabledReason={exportBlockReason(item.project_id)}
+                onSelect={() => { setSelected(item); setDetailOpen(true); }}
+                onExport={() => setExportTarget(item)}
+                onOpenFolder={() => void openDatasetFolder(item)}
+              />
             ))}
           </div>
           <footer className="dataset-pagination">
@@ -203,8 +255,20 @@ export default function DatasetCenterPage() {
       </div>
 
       <p className="dataset-retention-note"><Icon name="lock" size={14} />版本内容在项目存续期间不可编辑；删除项目会一并删除其数据版本、模型和快照文件。</p>
-      {detailOpen && <DatasetDetailDrawer summary={selected} detail={detail} loading={detailLoading} onClose={() => setDetailOpen(false)} />}
+      {detailOpen && (
+        <DatasetDetailDrawer
+          summary={selected}
+          detail={detail}
+          loading={detailLoading}
+          exportDisabled={Boolean(selected && exportBlockReason(selected.project_id))}
+          exportDisabledReason={selected ? exportBlockReason(selected.project_id) : ""}
+          onClose={() => setDetailOpen(false)}
+          onExport={(item) => setExportTarget(item)}
+          onOpenFolder={(item) => void openDatasetFolder(item)}
+        />
+      )}
       {createOpen && <CreateDatasetDialog projects={projects} onClose={() => setCreateOpen(false)} onCreated={async (project, versionId) => { setCreateOpen(false); setProjectId(project); setQuery(""); setTaskType(""); setPage(0); const next = await api.getDatasetCatalog({ projectId: project, limit: PAGE_SIZE }); setCatalog(next); const found = next.items.find((item) => item.id === versionId); if (found) setSelected(found); }} />}
+      {exportTarget && <ExportDatasetDialog summary={exportTarget} onClose={() => setExportTarget(null)} />}
     </div>
   );
 }
@@ -218,15 +282,68 @@ function SplitBar({ item }: { item: DatasetVersionSummary }) {
   return <div className="dataset-split" aria-label={`训练 ${item.train_count}，验证 ${item.val_count}，测试 ${item.test_count}`}><div><i className="train" style={{ width: `${item.train_count / total * 100}%` }} /><i className="val" style={{ width: `${item.val_count / total * 100}%` }} /><i className="test" style={{ width: `${item.test_count / total * 100}%` }} /></div><small>训练 {number(item.train_count)} · 验证 {number(item.val_count)}{item.test_count ? ` · 测试 ${number(item.test_count)}` : ""}</small></div>;
 }
 
-function DatasetRow({ item, active, onSelect }: { item: DatasetVersionSummary; active: boolean; onSelect: () => void }) {
+function DatasetRow({
+  item,
+  active,
+  onSelect,
+  onExport,
+  onOpenFolder,
+  exportDisabled,
+  exportDisabledReason,
+}: {
+  item: DatasetVersionSummary;
+  active: boolean;
+  onSelect: () => void;
+  onExport: () => void;
+  onOpenFolder: () => void;
+  exportDisabled: boolean;
+  exportDisabledReason: string;
+}) {
   const created = date(item.created_at).split(" ");
+  const [coverFailed, setCoverFailed] = useState(false);
+  const coverUrl = api.datasetVersionCoverUrl(item.project_id, item.id);
   return <article role="button" tabIndex={0} className={`dataset-row ${active ? "dataset-row--active" : ""}`} onClick={onSelect} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(); } }} aria-pressed={active}>
-    <span className="dataset-row__glyph"><Icon name={item.task_type === "classify" ? "grid" : "image"} size={24} /></span>
+    <span className={`dataset-row__glyph ${coverFailed ? "" : "dataset-row__glyph--photo"}`}>
+      {coverFailed ? (
+        <Icon name={item.task_type === "classify" ? "grid" : "image"} size={24} />
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={coverUrl} alt="" loading="lazy" onError={() => setCoverFailed(true)} />
+      )}
+    </span>
     <span className="dataset-row__identity"><span><b>{item.project_name}</b><mark>v{item.version}.0.0</mark></span><small><i>{taskLabel(item.task_type)}</i><i>{item.source_group_count} 个来源组</i></small></span>
-    <button type="button" className="dataset-row__more" aria-label="更多操作" onClick={(event) => { event.stopPropagation(); onSelect(); }}><Icon name="more" size={17} /></button>
     <DatasetCardSplit item={item} />
     <span className="dataset-row__classes"><small>类别数</small><b>{item.class_count}</b><em>{taskLabel(item.task_type)} / {item.source_group_count} 个来源组</em></span>
     <span className="dataset-row__date"><small>更新时间</small><b>{created[0]} {created.slice(1).join(" ")}</b><em>{item.linked_model_count ? `已关联 ${item.linked_model_count} 个模型` : "尚未关联模型"}</em></span>
+    <span className="dataset-row__actions">
+      <button
+        type="button"
+        className="dataset-row__folder"
+        title="打开文件所在位置"
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpenFolder();
+        }}
+      >
+        <Icon name="folder" size={15} />
+        打开
+      </button>
+      <button
+        type="button"
+        className={`dataset-row__export${exportDisabled ? " dataset-row__export--disabled" : ""}`}
+        disabled={exportDisabled}
+        title={exportDisabled ? exportDisabledReason : "导出该版本"}
+        aria-disabled={exportDisabled}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (exportDisabled) return;
+          onExport();
+        }}
+      >
+        <Icon name="archive" size={15} />
+        导出
+      </button>
+    </span>
   </article>;
 }
 
@@ -240,7 +357,25 @@ function DatasetCardSplit({ item }: { item: DatasetVersionSummary }) {
   return <span className="dataset-row__split"><small>数据集划分</small><span className="dataset-row__split-bar">{segments.map((segment) => <i key={segment.label} className={segment.className} style={{ width: `${segment.count / total * 100}%` }} />)}</span><span className="dataset-row__split-labels">{segments.map((segment) => <span key={segment.label}><small>{segment.label} {Math.round(segment.count / total * 100)}%</small><b>{number(segment.count)}</b></span>)}</span></span>;
 }
 
-function DatasetDetailDrawer({ summary, detail, loading, onClose }: { summary: DatasetVersionSummary | null; detail: DatasetVersionDetail | null; loading: boolean; onClose: () => void }) {
+function DatasetDetailDrawer({
+  summary,
+  detail,
+  loading,
+  onClose,
+  onExport,
+  onOpenFolder,
+  exportDisabled,
+  exportDisabledReason,
+}: {
+  summary: DatasetVersionSummary | null;
+  detail: DatasetVersionDetail | null;
+  loading: boolean;
+  onClose: () => void;
+  onExport: (item: DatasetVersionSummary) => void;
+  onOpenFolder: (item: DatasetVersionSummary) => void;
+  exportDisabled: boolean;
+  exportDisabledReason: string;
+}) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -251,11 +386,41 @@ function DatasetDetailDrawer({ summary, detail, loading, onClose }: { summary: D
   }, [onClose]);
 
   return <div className="dataset-detail-drawer" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <DatasetDetailPanel summary={summary} detail={detail} loading={loading} onClose={onClose} closeRef={closeRef} />
+    <DatasetDetailPanel
+      summary={summary}
+      detail={detail}
+      loading={loading}
+      onClose={onClose}
+      closeRef={closeRef}
+      onExport={onExport}
+      onOpenFolder={onOpenFolder}
+      exportDisabled={exportDisabled}
+      exportDisabledReason={exportDisabledReason}
+    />
   </div>;
 }
 
-function DatasetDetailPanel({ summary, detail, loading, onClose, closeRef }: { summary: DatasetVersionSummary | null; detail: DatasetVersionDetail | null; loading: boolean; onClose?: () => void; closeRef?: RefObject<HTMLButtonElement | null> }) {
+function DatasetDetailPanel({
+  summary,
+  detail,
+  loading,
+  onClose,
+  closeRef,
+  onExport,
+  onOpenFolder,
+  exportDisabled,
+  exportDisabledReason,
+}: {
+  summary: DatasetVersionSummary | null;
+  detail: DatasetVersionDetail | null;
+  loading: boolean;
+  onClose?: () => void;
+  closeRef?: RefObject<HTMLButtonElement | null>;
+  onExport?: (item: DatasetVersionSummary) => void;
+  onOpenFolder?: (item: DatasetVersionSummary) => void;
+  exportDisabled?: boolean;
+  exportDisabledReason?: string;
+}) {
   if (!summary) return <aside className="dataset-detail dataset-detail--empty"><Icon name="database" size={34} /><strong>选择一个数据版本</strong><p>查看固定划分、类别、任务和模型血缘。</p></aside>;
   return <aside className="dataset-detail dataset-detail--drawer" role="dialog" aria-modal="true" aria-labelledby="dataset-detail-title">
     <header><div className="dataset-detail__identity"><span className="dataset-detail__glyph"><Icon name="database" size={20} /></span><div><span>数据版本快照</span><h2 id="dataset-detail-title">数据集 v{summary.version}</h2><p>{summary.project_name}</p></div></div><div className="dataset-detail__header-actions"><mark><i />就绪</mark>{onClose && <button ref={closeRef} type="button" className="dataset-detail__close" aria-label="关闭版本详情" onClick={onClose}><Icon name="x" size={17} /></button>}</div></header>
@@ -268,8 +433,180 @@ function DatasetDetailPanel({ summary, detail, loading, onClose, closeRef }: { s
       {detail.trigger_sources.length > 0 && <section><h3>触发来源 <small>不代表完整样本血缘</small></h3><ul className="dataset-source-list">{detail.trigger_sources.map((source, index) => <li key={`${source.provider}-${index}`}><b>{source.provider}</b><span>{source.title}</span></li>)}</ul></section>}
     </>}
     <section className="dataset-checksum"><h3>内容校验值</h3><code title={summary.checksum}>{summary.checksum}</code><p>训练和导出前会逐文件校验；检测到字节变化时拒绝继续。</p></section>
-    <footer><Link className="btn-primary" href={`/projects/${summary.project_id}/train?datasetVersion=${summary.id}`}><Icon name="play" size={15} />用于训练</Link><Link className="btn-secondary" href={`/projects/${summary.project_id}/train?datasetVersion=${summary.id}#dataset-export`}>导出该版本</Link><Link className="dataset-project-link" href={`/projects/${summary.project_id}/review`}>查看当前项目素材</Link></footer>
+    <footer>
+      <Link className="btn-primary" href={`/projects/${summary.project_id}/train?datasetVersion=${summary.id}`}><Icon name="play" size={15} />用于训练</Link>
+      <button type="button" className="btn-secondary" onClick={() => onOpenFolder?.(summary)}>
+        <Icon name="folder" size={14} />打开目录
+      </button>
+      <button
+        type="button"
+        className="btn-secondary"
+        disabled={exportDisabled}
+        title={exportDisabled ? exportDisabledReason : undefined}
+        onClick={() => {
+          if (exportDisabled) return;
+          onExport?.(summary);
+        }}
+      >
+        导出该版本
+      </button>
+      <Link className="dataset-project-link" href={`/projects/${summary.project_id}/review`}>查看当前项目素材</Link>
+    </footer>
+    {exportDisabled && exportDisabledReason ? <p className="dataset-detail__export-hint">{exportDisabledReason}</p> : null}
   </aside>;
+}
+
+function ExportDatasetDialog({ summary, onClose }: { summary: DatasetVersionSummary; onClose: () => void }) {
+  const confirm = useConfirm();
+  const { toast } = useToast();
+  const [exportDir, setExportDir] = useState("");
+  const [picking, setPicking] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState("");
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const saved = localStorage.getItem(EXPORT_DIR_KEY);
+    if (saved) setExportDir(saved);
+  }, []);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !exporting) onClose();
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [exporting, onClose]);
+
+  const openExportDir = async () => {
+    const dir = exportDir.trim();
+    if (!dir) {
+      setError("请先选择或填写导出目录");
+      return;
+    }
+    setOpening(true);
+    setError("");
+    try {
+      await api.openPath(dir);
+    } catch (nextError) {
+      const parent = dir.replace(/[\\/][^\\/]+$/, "");
+      if (parent && parent !== dir) {
+        try {
+          await api.openPath(parent);
+          return;
+        } catch {
+          // fall through
+        }
+      }
+      setError(String(nextError));
+    } finally {
+      setOpening(false);
+    }
+  };
+  const pickExportDir = async () => {
+    setPicking(true);
+    setError("");
+    try {
+      const { path } = await api.pickFolder();
+      const base = path.replace(/\/$/, "").replace(/\\$/, "");
+      const full = `${base}/${safeDirName(summary.project_name)}-dataset`;
+      setExportDir(full);
+      localStorage.setItem(EXPORT_DIR_KEY, full);
+    } catch (nextError) {
+      const message = String(nextError);
+      if (!message.includes("未选择")) setError(message);
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  const startExport = async () => {
+    const dir = exportDir.trim();
+    if (!dir) {
+      setError("请先选择或填写导出目录");
+      return;
+    }
+    if (
+      !(await confirm({
+        title: "确认导出",
+        message: `将导出 YOLO 数据集到：\n${dir}\n\n若该目录已有文件将被覆盖。是否继续？`,
+        confirmLabel: "开始导出",
+      }))
+    ) {
+      return;
+    }
+    setExporting(true);
+    setError("");
+    try {
+      await api.createTask(summary.project_id, "export", {
+        output_dir: dir,
+        overwrite: true,
+        dataset_version_id: summary.id,
+      });
+      localStorage.setItem(EXPORT_DIR_KEY, dir);
+      toast({ type: "info", message: "导出任务已启动，可在任务中心查看进度" });
+      onClose();
+    } catch (nextError) {
+      setError(String(nextError));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !exporting) onClose(); }}>
+      <div className="dataset-create-dialog" role="dialog" aria-modal="true" aria-labelledby="export-dataset-title" ref={panelRef}>
+        <header>
+          <span><Icon name="archive" size={20} /></span>
+          <div>
+            <h2 id="export-dataset-title">导出数据集</h2>
+            <p>
+              导出为标准 YOLO 目录 · {summary.project_name} v{summary.version}
+              · 训练 {number(summary.train_count)} / 验证 {number(summary.val_count)}
+              {summary.test_count ? ` / 测试 ${number(summary.test_count)}` : ""}
+            </p>
+          </div>
+          <button type="button" aria-label="关闭" disabled={exporting} onClick={onClose}><Icon name="x" size={18} /></button>
+        </header>
+        <div className="dataset-create-body dataset-export-body">
+          <label className="dataset-export-path">
+            <span>导出目录</span>
+            <div className="dataset-export-path__row">
+              <input
+                className="input"
+                value={exportDir}
+                onChange={(event) => setExportDir(event.target.value)}
+                placeholder="选择或填写导出目录"
+                disabled={exporting}
+              />
+              <button type="button" className="btn-secondary" disabled={picking || exporting} onClick={() => void pickExportDir()}>
+                {picking ? "选择中…" : "选择文件夹"}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={opening || exporting || !exportDir.trim()}
+                title="打开导出目录"
+                onClick={() => void openExportDir()}
+              >
+                {opening ? "打开中…" : "打开目录"}
+              </button>
+            </div>
+          </label>
+          {error && <div className="dataset-create-error" role="alert">{error}</div>}
+        </div>
+        <footer className="dataset-export-footer">
+          <span>导出将占用当前项目的任务执行位</span>
+          <button type="button" className="btn-secondary" disabled={exporting} onClick={onClose}>取消</button>
+          <button type="button" className="btn-primary" disabled={exporting || !exportDir.trim()} onClick={() => void startExport()}>
+            {exporting ? "导出进行中…" : "导出数据集"}
+          </button>
+        </footer>
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
 function DatasetSkeleton() {

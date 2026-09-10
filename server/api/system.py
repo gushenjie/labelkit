@@ -76,7 +76,8 @@ def open_path(body: OpenPathRequest):
         if system == "Darwin":
             subprocess.run(["open", str(path)], check=True)
         elif system == "Windows":
-            subprocess.run(["explorer", str(path)], check=True)
+            # explorer 即使成功也可能返回非 0，不按返回码判定失败
+            subprocess.run(["explorer", str(path)], check=False)
         else:
             subprocess.run(["xdg-open", str(path)], check=True)
     except subprocess.CalledProcessError as e:

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
 import { ModelTrialPreview, type TrialBox } from "@/components/ModelTrialPreview";
+import { ModelRealtimePreview } from "@/components/ModelRealtimePreview";
 import { api, type Category } from "@/lib/api";
 
 export default function ModelTrialPage() {
@@ -21,6 +22,7 @@ export default function ModelTrialPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
+  const [trialMode, setTrialMode] = useState<"image" | "realtime">("image");
 
   useEffect(() => {
     if (!projectId) return;
@@ -79,13 +81,20 @@ export default function ModelTrialPage() {
       <header className="model-trial-page__header">
         <div className="model-trial-page__title-row">
           <div className="model-trial-page__copy">
-            <span className="model-trial-page__eyebrow">ONLINE INFERENCE</span>
             <h1>在线测试</h1>
-            <p>上传一张图片，查看目标框、类别与置信度。</p>
+            <p>{trialMode === "image" ? "上传图片，查看模型返回的目标框与置信度。" : "连接单路摄像头，实时查看模型检测结果。"}</p>
+          </div>
+          <div className="model-trial-mode-switch" role="tablist" aria-label="模型试用方式">
+            <button type="button" role="tab" aria-selected={trialMode === "image"} className={trialMode === "image" ? "is-active" : ""} onClick={() => setTrialMode("image")}>
+              <Icon name="image" size={15} />图片测试
+            </button>
+            <button type="button" role="tab" aria-selected={trialMode === "realtime"} className={trialMode === "realtime" ? "is-active" : ""} onClick={() => setTrialMode("realtime")}>
+              <Icon name="video" size={15} />实时预览
+            </button>
           </div>
           <div className="model-trial-page__current-model">
             <span className="model-trial-page__model-icon"><Icon name="cube" size={21} /></span>
-            <div><small>当前模型</small><strong title={name}>{name}</strong></div>
+            <div><small>测试模型</small><strong title={name}>{name}</strong></div>
             {versionLabel && <span className="model-trial-page__version">{versionLabel}</span>}
             <span className="model-trial-page__type">目标检测</span>
           </div>
@@ -98,6 +107,12 @@ export default function ModelTrialPage() {
           <div><strong>缺少模型上下文</strong><p>请从训练模型卡片点击“在线测试”进入此页面。</p></div>
           <Link href="/models">返回模型中心<Icon name="arrow-right" size={15} /></Link>
         </section>
+      ) : trialMode === "realtime" ? (
+        <ModelRealtimePreview
+          projectId={projectId}
+          modelId={modelId}
+          categories={categories}
+        />
       ) : (
         <section className={`model-trial-workspace model-trial-workspace--${resultState}`}>
           {fileInput}
@@ -132,10 +147,6 @@ export default function ModelTrialPage() {
 
               {!imageUrl ? (
                 <div className="model-trial-ready-state">
-                  <section>
-                    <strong>当前模型</strong>
-                    <dl><div><dt>版本</dt><dd>{versionLabel || "当前版本"}</dd></div><div><dt>任务</dt><dd>目标检测</dd></div></dl>
-                  </section>
                   <section>
                     <strong>可识别类别</strong>
                     <div className="model-trial-ready-state__categories">

@@ -1,0 +1,206 @@
+.root {
+  --list-skeleton-base: #e8eef0;
+  --list-skeleton-highlight: #f7faf9;
+  --list-skeleton-edge: #dfe7e9;
+  display: grid;
+  min-height: 0;
+  align-content: start;
+  overflow: hidden;
+}
+
+.assistive {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.item {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  align-items: center;
+}
+
+.block {
+  display: block;
+  overflow: hidden;
+  border-radius: 4px;
+  background:
+    linear-gradient(
+      100deg,
+      var(--list-skeleton-base) 18%,
+      var(--list-skeleton-highlight) 38%,
+      var(--list-skeleton-base) 58%
+    );
+  background-size: 240% 100%;
+  animation: list-skeleton-scan 1.55s ease-in-out infinite;
+  animation-delay: calc(var(--list-skeleton-index, 0) * 55ms);
+}
+
+.list .item {
+  min-height: 84px;
+  grid-template-columns: 76px minmax(180px, 1.1fr) minmax(240px, 1.35fr) minmax(160px, .9fr) 76px 94px;
+  gap: 14px;
+  border-bottom: 1px solid var(--list-skeleton-edge);
+  padding: 9px 12px;
+}
+
+.list .item:last-child {
+  border-bottom: 0;
+}
+
+.thumbnail {
+  width: 72px;
+  height: 64px;
+  border-radius: 6px;
+}
+
+.identity {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.title {
+  width: min(126px, 72%);
+  height: 13px;
+}
+
+.tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag,
+.tagWide {
+  height: 14px;
+  border-radius: 4px;
+}
+
+.tag { width: 38px; }
+.tagWide { width: 82px; }
+.meta { width: 92px; height: 9px; }
+
+.fields {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
+  align-items: center;
+  gap: 18px;
+}
+
+.field { height: 11px; }
+
+.progress {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(60px, 1fr) 28px;
+  align-items: center;
+  gap: 10px;
+}
+
+.progressTrack { width: 100%; height: 6px; border-radius: 999px; }
+.progressValue { width: 26px; height: 10px; justify-self: end; }
+.status { width: 54px; height: 25px; border-radius: 5px; }
+.action { width: 88px; height: 32px; justify-self: end; border-radius: 6px; }
+
+.grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: 8px;
+  padding: 1px 2px 5px;
+}
+
+.grid .item {
+  min-height: 180px;
+  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-rows: 72px 34px 54px;
+  column-gap: 10px;
+  border: 1px solid var(--list-skeleton-edge);
+  border-radius: 9px;
+  background: rgb(255 255 255 / 74%);
+  padding: 9px 12px;
+  box-shadow: 0 3px 9px rgb(35 79 84 / 4%);
+}
+
+.grid .thumbnail {
+  width: 60px;
+  height: 60px;
+}
+
+.grid .identity { align-self: center; }
+
+.grid .fields {
+  display: none;
+}
+
+.grid .progress {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: center;
+}
+
+.grid .status {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: center;
+}
+
+.grid .action {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  align-self: end;
+}
+
+@keyframes list-skeleton-scan {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}
+
+@media (max-width: 980px) {
+  .list .item {
+    grid-template-columns: 76px minmax(160px, 1fr) minmax(140px, .8fr) 72px 90px;
+  }
+
+  .list .fields .field:last-child {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .list {
+    gap: 10px;
+  }
+
+  .list .item {
+    min-height: 164px;
+    grid-template-columns: 82px minmax(0, 1fr);
+    grid-template-rows: 92px 28px 36px;
+    gap: 0 10px;
+    border: 1px solid var(--list-skeleton-edge);
+    border-radius: 9px;
+    background: rgb(255 255 255 / 78%);
+    padding: 10px 12px;
+  }
+
+  .list .thumbnail {
+    width: 72px;
+    height: 72px;
+  }
+
+  .list .fields { display: none; }
+  .list .progress { grid-column: 2; grid-row: 2; }
+  .list .status { grid-column: 1; grid-row: 2; }
+  .list .action { grid-column: 1 / -1; grid-row: 3; align-self: end; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .block {
+    animation: none;
+    background: var(--list-skeleton-base);
+  }
+}

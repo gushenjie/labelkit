@@ -221,6 +221,12 @@ class TaskCreate(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class TrainResumeRequest(BaseModel):
+    """续训时可覆盖的训练参数；未传字段沿用原任务参数。"""
+
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskOut(BaseModel):
     id: str
     project_id: str
@@ -238,6 +244,10 @@ class TaskOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    can_resume: bool = False
+    last_activity_at: datetime | None = None
+    resume_from_task_id: str | None = None
+    latest_resume_task_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -279,6 +289,31 @@ class TrainParams(BaseModel):
     close_mosaic: int | None = Field(default=None, ge=0, le=10_000)
     weight_decay: float | None = Field(default=None, ge=0.0, le=1.0)
     warmup_epochs: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class TrainParamsSuggestRequest(BaseModel):
+    dataset_version_id: str | None = None
+
+
+class SuggestedTrainParamsOut(BaseModel):
+    epochs: int
+    imgsz: int
+    batch: int
+    base_model: str
+    workers: int
+    patience: int
+    lr0: float
+    optimizer: str
+    seed: int
+    close_mosaic: int
+    weight_decay: float
+    warmup_epochs: float
+
+
+class TrainParamsSuggestOut(BaseModel):
+    params: SuggestedTrainParamsOut
+    reason: str
+    source: str
 
 
 class VlmProfileOut(BaseModel):

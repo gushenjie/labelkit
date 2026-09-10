@@ -24,6 +24,7 @@ class TrainingRequest(BaseModel):
     output_root: Path
     run_name: str = Field(pattern=r"^task_[0-9a-f-]+$")
     metrics_path: Path
+    resume: bool = False
     # 常用高级参数；None 表示交给 Ultralytics 默认值
     patience: int | None = Field(default=None, ge=0, le=10_000)
     lr0: float | None = Field(default=None, gt=0, le=1.0)
@@ -64,6 +65,16 @@ def _resolve_device(requested: str) -> str:
     return "cpu"
 
 
+def _normalize_workers(requested: int) -> int:
+    """Windows 多进程 DataLoader 易复制数据集缓存导致 MemoryError，强制收紧。"""
+    import sys
+
+    value = max(0, int(requested))
+    if sys.platform.startswith("win"):
+        return min(value, 2)
+    return min(value, 16)
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
@@ -85,19 +96,26 @@ def main() -> None:
     from ultralytics import YOLO
 
     device = _resolve_device(request.device)
+    workers = _normalize_workers(request.workers)
     model = YOLO(request.base_model)
-    results = model.train(
-        data=str(request.data),
-        epochs=request.epochs,
-        imgsz=request.imgsz,
-        batch=request.batch,
-        workers=request.workers,
-        device=device,
-        project=str(request.output_root),
-        name=request.run_name,
-        exist_ok=False,
+    train_kwargs = {
+        "data": str(request.data),
+        "epochs": request.epochs,
+        "imgsz": request.imgsz,
+        "batch": request.batch,
+        "workers": workers,
+        "device": device,
+        "project": str(request.output_root),
+        "name": request.run_name,
+        "exist_ok": bool(request.resume),
         **_optional_train_kwargs(request),
-    )
+    }
+    if request.resume:
+        # Ultralytics 会从 last.pt 恢复 epoch/优化器，并沿用原 save_dir
+        train_kwargs["resume"] = True
+        # 续训时关闭 dataset cache，降低内存峰值；workers 仍按请求（Windows 会再收紧）
+        train_kwargs["cache"] = False
+    results = model.train(**train_kwargs)
     metrics = _json_safe(getattr(results, "results_dict", {}))
     request.metrics_path.write_text(
         json.dumps({"device": device, "metrics": metrics}, ensure_ascii=False, indent=2),

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { formatTrainLog, groupTrainLogEntries, parseTrainLogLine, parseTrainLogLines } from "./train-log";
 
 describe("train-log parser", () => {
-  it("parses YOLO detect progress lines", () => {
+  it("parses YOLO detect progress lines with legacy speed/eta", () => {
     const entry = parseTrainLogLine("1/80 0G 2.072 6.01 2.205 30 640: 2% ━━━━━ 1/55 2.3s/it 2.2s<2:05");
     expect(entry.kind).toBe("progress");
     if (entry.kind !== "progress") return;
@@ -24,6 +24,44 @@ describe("train-log parser", () => {
     });
   });
 
+  it("parses Ultralytics tqdm bracket speed/eta", () => {
+    const entry = parseTrainLogLine(
+      "50/50 3.29G 1.998 3.363 2.121 39 640: 2%|▏| 25/1093 [00:31<21:52, 1.23s/it]",
+    );
+    expect(entry.kind).toBe("progress");
+    if (entry.kind !== "progress") return;
+    expect(entry.row).toMatchObject({
+      epochCurrent: 50,
+      epochTotal: 50,
+      gpuMem: "3.29G",
+      batchCurrent: 25,
+      batchTotal: 1093,
+      batchPercent: 2,
+      speed: "1.23s/it",
+      eta: "21:52",
+    });
+  });
+
+  it("parses it/s speed from tqdm brackets", () => {
+    const entry = parseTrainLogLine(
+      "1/80 1.2G 1.1 2.2 1.3 8 640: 10%|█| 5/50 [00:02<00:18, 2.45it/s]",
+    );
+    expect(entry.kind).toBe("progress");
+    if (entry.kind !== "progress") return;
+    expect(entry.row).toMatchObject({
+      speed: "2.45it/s",
+      eta: "00:18",
+    });
+  });
+
+  it("keeps speed/eta empty when tqdm has not reported them yet", () => {
+    const entry = parseTrainLogLine("1/80 0G 2.072 6.01 2.205 30 640: 0% ━━━━━ 0/53");
+    expect(entry.kind).toBe("progress");
+    if (entry.kind !== "progress") return;
+    expect(entry.row.speed).toBeUndefined();
+    expect(entry.row.eta).toBeUndefined();
+  });
+
   it("parses dataset info and groups progress rows into a table block", () => {
     const entries = parseTrainLogLines([
       "检测数据集: {'train': 419, 'val': 120, 'test': 40, 'total': 599}",
@@ -38,7 +76,7 @@ describe("train-log parser", () => {
     expect(blocks[2]).toMatchObject({
       kind: "progress-table",
       mode: "detect",
-      rows: [{ epochCurrent: 1 }, { epochCurrent: 1, batchCurrent: 1 }],
+      rows: [{ epochCurrent: 1 }, { epochCurrent: 1, batchCurrent: 1, speed: "5.0s/it", eta: "4:10" }],
     });
   });
 

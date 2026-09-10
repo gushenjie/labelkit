@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import mimetypes
+import platform
 import shutil
+import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from server.api.deps import get_optional_actor
@@ -22,6 +26,16 @@ from server.db.models import DatasetVersion, Project
 router = APIRouter(prefix="/api/projects/{project_id}/dataset-versions", tags=["datasets"])
 global_router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
+
+def _reveal_directory(path) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        subprocess.run(["open", str(path)], check=True)
+    elif system == "Windows":
+        # explorer 即使成功也可能返回非 0，不按返回码判定失败
+        subprocess.run(["explorer", str(path)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(path)], check=True)
 
 @global_router.get("", response_model=DatasetCatalogOut)
 def list_dataset_catalog(
@@ -89,6 +103,46 @@ def create_dataset_version(
     )
     return version
 
+
+@router.get("/{version_id}/cover")
+def get_dataset_version_cover(project_id: str, version_id: str, db: Session = Depends(get_db)):
+    """返回该版本训练集首张图片，供数据管理列表缩略图使用。"""
+    service = DatasetService(DatasetVersionRepository(db))
+    try:
+        version = service.get_version(project_id, version_id)
+        cover = service.resolve_train_cover(version)
+    except RuntimeError as error:
+        message = str(error)
+        status = 404 if "not found" in message.lower() or "不存在" in message or "没有" in message else 400
+        raise HTTPException(status, message) from error
+    media_type = mimetypes.guess_type(cover.name)[0] or "image/jpeg"
+    return FileResponse(
+        cover,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@router.post("/{version_id}/open")
+def open_dataset_version_folder(project_id: str, version_id: str, db: Session = Depends(get_db)):
+    """在系统文件管理器中打开该数据版本的快照目录（优先 media）。"""
+    service = DatasetService(DatasetVersionRepository(db))
+    try:
+        version = service.get_version(project_id, version_id)
+    except RuntimeError as error:
+        raise HTTPException(404, str(error)) from error
+
+    root = version.snapshot_path
+    target = root / "media" if (root / "media").is_dir() else root
+    if not target.is_dir():
+        raise HTTPException(404, "数据版本目录不存在")
+
+    try:
+        _reveal_directory(target)
+    except subprocess.CalledProcessError as error:
+        raise HTTPException(500, f"无法打开目录: {error}") from error
+
+    return {"ok": True, "path": str(target)}
 
 @router.get("/{version_id}", response_model=DatasetVersionDetailOut)
 def get_dataset_version_detail(

@@ -494,6 +494,24 @@ class DatasetService:
             raise RuntimeError(f"Dataset version not found: {version_id}")
         return version
 
+    def resolve_train_cover(self, version: DatasetVersionDTO) -> Path:
+        """返回训练集首张快照图片路径（无 train 时回退任意首帧）。"""
+        frames = list(version.manifest.get("frames") or [])
+        train_frames = [entry for entry in frames if str(entry.get("split") or "") == "train"]
+        entry = (train_frames or frames)[0] if (train_frames or frames) else None
+        if entry is None:
+            raise RuntimeError("数据版本没有可用预览图")
+        relative = str(entry.get("image") or "").strip()
+        if not relative:
+            raise RuntimeError("数据版本预览图路径缺失")
+        path = (version.snapshot_path / relative).resolve()
+        root = version.snapshot_path.resolve()
+        if root not in path.parents and path != root:
+            raise RuntimeError("数据版本预览图路径非法")
+        if not path.is_file():
+            raise RuntimeError("数据版本预览图文件不存在")
+        return path
+
     @staticmethod
     def _summary(
         model: DatasetVersion,

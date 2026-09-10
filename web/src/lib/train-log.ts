@@ -28,14 +28,36 @@ export type TrainLogBlock =
   | { kind: "progress-table"; mode: TrainProgressMode; rows: TrainProgressRow[] };
 
 const DETECT_PROGRESS_RE =
-  /^(\d+)\/(\d+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+):\s*(\d+)%.*?(\d+)\/(\d+)(?:\s+([\d.]+s\/it))?(?:\s+([\d.]+s)?<(.+))?/;
+  /^(\d+)\/(\d+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+):\s*(\d+)%.*?(\d+)\/(\d+)/;
 
 const CLASSIFY_PROGRESS_RE =
-  /^(\d+)\/(\d+)\s+(\S+)\s+([\d.]+)\s+(\d+)\s+(\d+):\s*(\d+)%.*?(\d+)\/(\d+)(?:\s+([\d.]+s\/it))?(?:\s+([\d.]+s)?<(.+))?/;
+  /^(\d+)\/(\d+)\s+(\S+)\s+([\d.]+)\s+(\d+)\s+(\d+):\s*(\d+)%.*?(\d+)\/(\d+)/;
 
 const ANSI_ESCAPE_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+const SPEED_RE = /([\d.]+)\s*(s\/it|it\/s)/i;
+/** YOLO/tqdm: [00:31<21:52, 1.23s/it] */
+const TQDM_BRACKET_RE = /\[(?:[\d:]+)?<([^,\]]+)\s*,\s*([\d.]+)\s*(s\/it|it\/s)\]/i;
+/** 兼容旧日志: 2.3s/it 2.2s<2:05 */
+const LEGACY_ETA_RE = /<([^\s,\]]+)/;
+
+function extractSpeedEta(text: string): { speed?: string; eta?: string } {
+  const bracket = text.match(TQDM_BRACKET_RE);
+  if (bracket) {
+    return {
+      eta: bracket[1].trim(),
+      speed: `${bracket[2]}${bracket[3].toLowerCase()}`,
+    };
+  }
+
+  const speedMatch = text.match(SPEED_RE);
+  const speed = speedMatch ? `${speedMatch[1]}${speedMatch[2].toLowerCase()}` : undefined;
+  const eta = text.match(LEGACY_ETA_RE)?.[1]?.trim();
+  return { speed, eta };
+}
 
 function parseBatchTail(tail: string) {
+  const timing = extractSpeedEta(tail);
+
   const detect = tail.match(DETECT_PROGRESS_RE);
   if (detect) {
     return {
@@ -52,8 +74,8 @@ function parseBatchTail(tail: string) {
         batchPercent: Number(detect[9]),
         batchCurrent: Number(detect[10]),
         batchTotal: Number(detect[11]),
-        speed: detect[12] || undefined,
-        eta: detect[14]?.trim() || undefined,
+        speed: timing.speed,
+        eta: timing.eta,
       },
     };
   }
@@ -72,8 +94,8 @@ function parseBatchTail(tail: string) {
         batchPercent: Number(classify[7]),
         batchCurrent: Number(classify[8]),
         batchTotal: Number(classify[9]),
-        speed: classify[10] || undefined,
-        eta: classify[12]?.trim() || undefined,
+        speed: timing.speed,
+        eta: timing.eta,
       },
     };
   }
